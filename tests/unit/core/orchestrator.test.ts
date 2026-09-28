@@ -1,5 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AnalyticsConfig } from '../../../src/types/index.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
 
 const { mockLoggerWarn } = vi.hoisted(() => ({
   mockLoggerWarn: vi.fn(),
@@ -243,9 +253,18 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
 }
 
 describe('Orchestrator', () => {
+  let homeDir: string;
+  let restoreHome: () => void;
   beforeEach(() => {
     vi.clearAllMocks();
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-home-'));
+    restoreHome = isolateAgentHome(homeDir);
     discoveryEntries = [];
+  });
+
+  afterEach(() => {
+    try { fs.rmSync(homeDir, { recursive: true, force: true }); }
+    finally { restoreHome(); }
   });
 
   describe('startup sequence (T038)', () => {
