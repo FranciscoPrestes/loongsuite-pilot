@@ -3,11 +3,11 @@
   "displayName": "GitHub Copilot",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.copilot"],
+    "paths": ["$COPILOT_HOME"],
     "commands": []
   },
   "hook": {
-    "settingsPath": "~/.copilot/hooks/loongsuite-pilot.json",
+    "settingsPath": "$COPILOT_HOME/hooks/loongsuite-pilot.json",
     "events": ["SessionStart", "UserPromptSubmit", "Stop"],
     "hookCommand": "$PILOT_DATA/hooks/copilot-loongsuite-pilot-hook.sh",
     "format": "flat",

@@ -158,3 +158,17 @@ describe('CopilotInput', () => {
     expect(entries.map(e => e['event.name'])).toEqual(['llm.request', 'llm.response']);
   });
 });
+
+describe('CopilotInput default home', () => {
+  it('follows COPILOT_HOME for watch paths and availability', async () => {
+    const previous = process.env.COPILOT_HOME;
+    process.env.COPILOT_HOME = root;
+    try {
+      expect(CopilotInput.getWatchPaths()).toEqual([root, path.join(root, 'session-state')]);
+      await expect(CopilotInput.checkAvailability()).resolves.toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.COPILOT_HOME;
+      else process.env.COPILOT_HOME = previous;
+    }
+  });
+});

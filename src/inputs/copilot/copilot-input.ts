@@ -2,6 +2,8 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { resolveCopilotHome } from '../../deployment/env-agent-dirs.js';
+import { resolveHome } from '../../utils/fs-utils.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
@@ -35,7 +37,8 @@ export interface CopilotInputOptions extends InputOptions {
   deadSessionGraceMs?: number;
 }
 
-const defaultRoot = () => path.join(homedir(), '.copilot');
+/** Copilot's config dir: `COPILOT_HOME` when set (the SDK relocates session-state with it), else ~/.copilot. */
+const defaultRoot = () => resolveHome(resolveCopilotHome());
 
 export class CopilotInput extends BaseInput {
   readonly id = 'copilot';
