@@ -36,6 +36,18 @@ const obj = (v: unknown): Record<string, unknown> | undefined =>
   (v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : undefined);
 const json = (v: unknown): JsonValue | undefined => (v === undefined ? undefined : v as JsonValue);
 
+/** Copilot stores tool output as text; JSON-looking text becomes a native value (schema gate). */
+function nativeValue(v: unknown): JsonValue | undefined {
+  if (typeof v !== 'string') return json(v);
+  const head = v.trimStart()[0];
+  if (head !== '{' && head !== '[') return v;
+  try {
+    return JSON.parse(v) as JsonValue;
+  } catch {
+    return v;
+  }
+}
+
 export function buildCopilotEvents(events: CopilotEvent[], opts: CopilotBuildOptions): AgentActivityEntry[] {
   const ctx: Ctx = {
     opts, out: [], steps: new Map(), toolSteps: new Map(), tools: new Map(),
@@ -190,7 +202,7 @@ function emitToolResult(ctx: Ctx, event: CopilotEvent, at: number): void {
   entry['gen_ai.tool.name'] = start.name;
   entry['gen_ai.tool.call.id'] = callId;
   entry['tool.result.status'] = success ? 'success' : 'failure';
-  const content = json(obj(d.result)?.content);
+  const content = nativeValue(obj(d.result)?.content);
   if (content !== undefined) entry['gen_ai.tool.call.result'] = content;
   if (!success) {
     entry['error.type'] = 'tool_execution_failed';

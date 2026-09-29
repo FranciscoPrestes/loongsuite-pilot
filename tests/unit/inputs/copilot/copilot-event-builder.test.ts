@@ -152,3 +152,29 @@ describe('robustness', () => {
     expect(entries[0]['workspace.path']).toBe('/work/demo');
   });
 });
+
+describe('native tool result types', () => {
+  const withResult = (content: unknown) => {
+    const events = toolTurn().map(e => (e.type === 'tool.execution_complete'
+      ? { ...e, data: { ...e.data, result: { content } } }
+      : e));
+    return buildCopilotEvents(events, opts);
+  };
+
+  it('turns a JSON-looking string result into a native object', () => {
+    const entries = withResult('{"ok":true,"items":[1,2]}');
+    const result = entries.find(e => e['event.name'] === 'tool.result')!;
+    expect(result['gen_ai.tool.call.result']).toEqual({ ok: true, items: [1, 2] });
+    const next = entries.filter(e => e['event.name'] === 'llm.request')[1];
+    expect(next['gen_ai.input.messages_delta']).toContainEqual({
+      role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', response: { ok: true, items: [1, 2] } }],
+    });
+  });
+
+  it('keeps plain text and unparseable text as strings', () => {
+    const plain = withResult('file body').find(e => e['event.name'] === 'tool.result')!;
+    expect(plain['gen_ai.tool.call.result']).toBe('file body');
+    const broken = withResult('{not json').find(e => e['event.name'] === 'tool.result')!;
+    expect(broken['gen_ai.tool.call.result']).toBe('{not json');
+  });
+});
