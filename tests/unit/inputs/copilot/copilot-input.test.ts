@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CopilotInput } from '../../../../src/inputs/copilot/copilot-input.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
-import { ev, shutdownEvent, T0, textOnlyTurn, toJsonl, toolTurn } from '../../../fixtures/copilot/events.js';
+import { checkpointEvent, ev, shutdownEvent, T0, textOnlyTurn, toJsonl, toolTurn } from '../../../fixtures/copilot/events.js';
 
 let root: string;
 let dataDir: string;
@@ -298,5 +298,49 @@ describe('token totals across resumed sessions', () => {
     await appendFile(file, toJsonl([ev('session.resume', {}, T0 + 20_000), shutdownEvent(T0 + 21_000, totals(1000, 50))]));
     const b = await makeInput();
     expect((await b.run()).filter(e => e['event.name'] === 'other')).toEqual([]);
+  });
+});
+
+describe('session cost across checkpoints', () => {
+  const cost = (entries: AgentActivityEntry[]) =>
+    entries.filter(e => e['agent.copilot.usage.source'] !== undefined)
+      .map(e => [e['agent.copilot.usage.source'], e['agent.copilot.usage.nano_aiu'], e['agent.copilot.usage.premium_requests']]);
+  const second = () => [
+    ev('user.message', { content: 'more', interactionId: 'i-2', messageId: 'm-2' }, T0 + 20_000),
+    ev('assistant.turn_start', { turnId: '5', interactionId: 'i-2' }, T0 + 20_100),
+    ev('assistant.message', { messageId: 'am-5', content: 'ok', model: 'model-a', apiCallId: 'api-5', turnId: '5', interactionId: 'i-2' }, T0 + 21_000),
+  ];
+
+  it('reports cost for a session that never closes and only the increment afterwards', async () => {
+    const { run } = await makeInput();
+    await run();
+    const file = await sessionFile('s');
+    await writeFile(file, toJsonl([...textOnlyTurn(), checkpointEvent(T0 + 3_000, 100, 1)]));
+    expect(cost(await run())).toEqual([['checkpoint', 100, 1]]);
+    await appendFile(file, toJsonl([...second(), checkpointEvent(T0 + 22_000, 260, 2)]));
+    expect(cost(await run())).toEqual([['checkpoint', 160, 1]]);
+  });
+
+  it('does not count the cost twice when the shutdown repeats the reported totals', async () => {
+    const { run } = await makeInput();
+    await run();
+    const file = await sessionFile('s');
+    await writeFile(file, toJsonl([...textOnlyTurn(), checkpointEvent(T0 + 3_000, 100, 1)]));
+    await run();
+    await appendFile(file, toJsonl([shutdownEvent(T0 + 9_000, { 'model-a': { inputTokens: 10, outputTokens: 1, totalNanoAiu: 100 } }, { nanoAiu: 100, premiumRequests: 1 })]));
+    const entries = await run();
+    expect(cost(entries)).toEqual([]);
+    expect(entries.filter(e => e['gen_ai.usage.input_tokens'] !== undefined)).toHaveLength(1);
+  });
+
+  it('remembers reported cost across a restart', async () => {
+    const a = await makeInput();
+    await a.run();
+    const file = await sessionFile('s');
+    await writeFile(file, toJsonl([...textOnlyTurn(), checkpointEvent(T0 + 3_000, 100, 1)]));
+    expect(cost(await a.run())).toEqual([['checkpoint', 100, 1]]);
+    await appendFile(file, toJsonl([checkpointEvent(T0 + 4_000, 100, 1)]));
+    const b = await makeInput();
+    expect(cost(await b.run())).toEqual([]);
   });
 });

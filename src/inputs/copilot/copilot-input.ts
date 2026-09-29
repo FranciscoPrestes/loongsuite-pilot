@@ -7,9 +7,9 @@ import { resolveHome } from '../../utils/fs-utils.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import { buildCopilotEvents, collectUsageTotals } from './copilot-event-builder.js';
+import { buildCopilotEvents, collectSessionCost, collectUsageTotals } from './copilot-event-builder.js';
 import { readEventsFrom, readSessionHead } from './copilot-event-reader.js';
-import type { CopilotEvent, CopilotUsageTotals, ReadEventsResult } from './copilot-types.js';
+import type { CopilotEvent, CopilotSessionCost, CopilotUsageTotals, ReadEventsResult } from './copilot-types.js';
 
 const SESSIONS_KEY = 'copilotSessions';
 const INITIALIZED_KEY = 'copilotInitialized';
@@ -26,6 +26,8 @@ interface SessionCheckpoint {
   size: number;
   /** Cumulative per-model usage already reported (numbers only). */
   usage: Record<string, CopilotUsageTotals>;
+  /** Session-wide cost already reported (numbers only). */
+  cost: CopilotSessionCost;
 }
 
 interface SessionResult {
@@ -187,7 +189,7 @@ export class CopilotInput extends BaseInput {
     fileSize: number,
     now: number,
   ): Promise<SessionResult> {
-    const opts = { sessionId: id, priorUsage: base.usage, ...(await readSessionHead(file)) };
+    const opts = { sessionId: id, priorUsage: base.usage, priorCost: base.cost, ...(await readSessionHead(file)) };
     const split = lastUserIndex(read.events);
     const tailStartsInteraction = read.events[split]?.type === 'user.message';
     const tailStart = tailStartsInteraction ? split : 0;
@@ -211,6 +213,7 @@ export class CopilotInput extends BaseInput {
         lastGrowthMs: now,
         size: read.capped ? read.nextOffset : fileSize,
         usage: collectUsageTotals(read.events, base.usage),
+        cost: collectSessionCost(read.events, base.cost),
       },
     };
   }
@@ -230,7 +233,7 @@ export class CopilotInput extends BaseInput {
 }
 
 function freshCheckpoint(): SessionCheckpoint {
-  return { offset: 0, emitted: [], closed: false, lastGrowthMs: Date.now(), size: 0, usage: {} };
+  return { offset: 0, emitted: [], closed: false, lastGrowthMs: Date.now(), size: 0, usage: {}, cost: {} };
 }
 
 /** Index of the last user.message, or 0 when the span has none (caller re-checks the type). */
@@ -273,6 +276,7 @@ function normalizeCheckpoints(raw: unknown): Record<string, SessionCheckpoint> {
       lastGrowthMs: typeof value.lastGrowthMs === 'number' ? value.lastGrowthMs : Date.now(),
       size: typeof value.size === 'number' ? value.size : 0,
       usage: value.usage && typeof value.usage === 'object' ? value.usage : {},
+      cost: value.cost && typeof value.cost === 'object' ? value.cost : {},
     };
   }
   return out;

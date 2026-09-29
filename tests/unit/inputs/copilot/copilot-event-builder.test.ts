@@ -171,11 +171,22 @@ describe('native tool result types', () => {
     });
   });
 
-  it('keeps plain text and unparseable text as strings', () => {
+  it('keeps plain text as a string', () => {
     const plain = withResult('file body').find(e => e['event.name'] === 'tool.result')!;
     expect(plain['gen_ai.tool.call.result']).toBe('file body');
-    const broken = withResult('{not json').find(e => e['event.name'] === 'tool.result')!;
-    expect(broken['gen_ai.tool.call.result']).toBe('{not json');
+  });
+
+  it('wraps text that starts like JSON but is not valid JSON, keeping every character', () => {
+    const truncated = '{\n  "papeis": {\n    "narradora": {\n      "id": "x",';
+    const entries = withResult(truncated);
+    const result = entries.find(e => e['event.name'] === 'tool.result')!;
+    expect(result['gen_ai.tool.call.result']).toEqual({ type: 'text', content: truncated });
+    const listing = withResult('[INFO] 3 files').find(e => e['event.name'] === 'tool.result')!;
+    expect(listing['gen_ai.tool.call.result']).toEqual({ type: 'text', content: '[INFO] 3 files' });
+    const next = entries.filter(e => e['event.name'] === 'llm.request')[1];
+    expect(next['gen_ai.input.messages_delta']).toContainEqual({
+      role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', response: { type: 'text', content: truncated } }],
+    });
   });
 });
 

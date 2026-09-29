@@ -71,9 +71,13 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `host.ip` | string | Recommended | 主机 IP 或日志源 IP。 |
 | `service.name` | string | Recommended | 用于区分 Agent 实例或产品线的服务名。 |
 | `gen_ai.session.id` | string | 当 Agent 维护会话上下文时 Conditionally Required | 用户会话或对话 ID。 |
-| `agent.copilot.usage.scope` | string | GitHub Copilot 用量汇总条目携带 | 取值 `session`。标记一条 `other` 事件，承载某个模型自该会话上一条汇总以来的 Token 用量（第一条为截至当时的总量），在 Copilot 写入 `session.shutdown` 时发出；不含 `gen_ai.turn.id` 和 `gen_ai.step.id`。会话未正常关闭时不存在。 |
-| `agent.copilot.usage.reasoning_tokens` | int | 数据源提供时推荐 | 该模型在整个会话内的推理 Token 数，仅出现在用量汇总条目上。 |
-| `agent.copilot.usage.nano_aiu` | double | 数据源提供时推荐 | 该模型在整个会话内的 GitHub Copilot 计费消耗，单位为 nano AI unit，仅出现在用量汇总条目上。 |
+| `agent.copilot.usage.scope` | string | GitHub Copilot 用量条目携带 | 取值 `session`。标记不属于任何 Turn 的 `other` 事件（不含 `gen_ai.turn.id` 和 `gen_ai.step.id`）。可能是成本条目（见 `agent.copilot.usage.source`）或某个模型的 Token 汇总，均由 Copilot 会话事件产生。 |
+| `agent.copilot.usage.source` | string | Copilot 成本条目携带 | `checkpoint`（Copilot 在每次交互后写入，即使 host 从未正常关闭也不会丢失）或 `shutdown`（仅补充 checkpoint 尚未覆盖的成本）。Token 汇总不带此字段。 |
+| `agent.copilot.usage.nano_aiu` | double | 数据源提供时推荐 | 会话成本，使用 Copilot 自己的计费单位（nano AI unit），为自同一会话上一条成本条目以来的增量。对同一会话求和即得会话成本。 |
+| `agent.copilot.usage.premium_requests` | double | 数据源提供时推荐 | 会话消耗的 premium request 数，与 `nano_aiu` 一样为增量。 |
+| `agent.copilot.usage.turn_id` | string | checkpoint 成本条目携带 | 刚结束的交互（Turn）；等于该交互事件的 `gen_ai.turn.id`，可据此把成本关联到 Turn。 |
+| `agent.copilot.usage.reasoning_tokens` | int | 数据源提供时推荐 | 某个模型的推理 Token 数，为自同一会话上一条汇总以来的增量，仅出现在 Token 汇总上。 |
+| `agent.copilot.usage.model_nano_aiu` | double | 数据源提供时推荐 | 按模型拆分的成本（增量）。它是 `nano_aiu` 所报告成本的明细，切勿与其相加。仅出现在 Token 汇总上。 |
 | `gen_ai.turn.id` | string | Recommended | 一次用户请求到 Agent 最终响应的轮次 ID。 |
 | `gen_ai.step.id` | string | Recommended | 一次 ReAct 循环或 Agent 中间步骤。 |
 | `gen_ai.response.id` | string | Recommended | 模型 Provider 返回的 LLM response ID。 |

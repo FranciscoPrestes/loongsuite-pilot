@@ -118,6 +118,7 @@ export function shutdownEvent(
     reasoningTokens?: number;
     totalNanoAiu?: number;
   }>,
+  session: { nanoAiu?: number; premiumRequests?: number } = {},
 ): CopilotEvent {
   const modelMetrics = Object.fromEntries(
     Object.entries(models).map(([model, m]) => [model, {
@@ -133,5 +134,17 @@ export function shutdownEvent(
   );
   return ev('session.shutdown', {
     shutdownType: 'routine', totalApiDurationMs: 1, sessionStartTime: T0, codeChanges: {}, modelMetrics,
+    ...(session.nanoAiu !== undefined ? { totalNanoAiu: session.nanoAiu } : {}),
+    ...(session.premiumRequests !== undefined ? { totalPremiumRequests: session.premiumRequests } : {}),
+  }, atMs);
+}
+
+/** session.usage_checkpoint: written once per interaction with the cumulative session cost. */
+export function checkpointEvent(atMs: number, nanoAiu?: number, premiumRequests?: number): CopilotEvent {
+  return ev('session.usage_checkpoint', {
+    ...(nanoAiu !== undefined ? { totalNanoAiu: nanoAiu } : {}),
+    ...(premiumRequests !== undefined ? { totalPremiumRequests: premiumRequests } : {}),
+    modelCacheState: [],
+    promptCacheBreakState: [],
   }, atMs);
 }
