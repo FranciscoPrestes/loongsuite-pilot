@@ -7,9 +7,9 @@ import { resolveHome } from '../../utils/fs-utils.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import { buildCopilotEvents } from './copilot-event-builder.js';
+import { buildCopilotEvents, collectUsageTotals } from './copilot-event-builder.js';
 import { readEventsFrom, readSessionHead } from './copilot-event-reader.js';
-import type { CopilotEvent, ReadEventsResult } from './copilot-types.js';
+import type { CopilotEvent, CopilotUsageTotals, ReadEventsResult } from './copilot-types.js';
 
 const SESSIONS_KEY = 'copilotSessions';
 const INITIALIZED_KEY = 'copilotInitialized';
@@ -24,6 +24,8 @@ interface SessionCheckpoint {
   closed: boolean;
   lastGrowthMs: number;
   size: number;
+  /** Cumulative per-model usage already reported (numbers only). */
+  usage: Record<string, CopilotUsageTotals>;
 }
 
 interface SessionResult {
@@ -185,14 +187,15 @@ export class CopilotInput extends BaseInput {
     fileSize: number,
     now: number,
   ): Promise<SessionResult> {
-    const opts = { sessionId: id, ...(await readSessionHead(file)) };
+    const opts = { sessionId: id, priorUsage: base.usage, ...(await readSessionHead(file)) };
     const split = lastUserIndex(read.events);
     const tailStartsInteraction = read.events[split]?.type === 'user.message';
     const tailStart = tailStartsInteraction ? split : 0;
-    const beforeEntries = buildCopilotEvents(read.events.slice(0, tailStart), opts);
+    // One pass over the whole span keeps the usage bookkeeping consistent; per-interaction
+    // state resets at every user.message. The tail alone provides the ids to remember.
     const tailEntries = buildCopilotEvents(read.events.slice(tailStart), opts);
     const emitted = new Set(base.emitted);
-    const entries = [...beforeEntries, ...tailEntries].filter(e => !emitted.has(e['event.id']));
+    const entries = buildCopilotEvents(read.events, opts).filter(e => !emitted.has(e['event.id']));
     const shutdown = read.events.some(e => e.type === 'session.shutdown');
     // A capped read cannot see the whole open interaction: advance instead of re-reading
     // the same first chunk forever.
@@ -207,6 +210,7 @@ export class CopilotInput extends BaseInput {
         closed: shutdown,
         lastGrowthMs: now,
         size: read.capped ? read.nextOffset : fileSize,
+        usage: collectUsageTotals(read.events, base.usage),
       },
     };
   }
@@ -226,7 +230,7 @@ export class CopilotInput extends BaseInput {
 }
 
 function freshCheckpoint(): SessionCheckpoint {
-  return { offset: 0, emitted: [], closed: false, lastGrowthMs: Date.now(), size: 0 };
+  return { offset: 0, emitted: [], closed: false, lastGrowthMs: Date.now(), size: 0, usage: {} };
 }
 
 /** Index of the last user.message, or 0 when the span has none (caller re-checks the type). */
@@ -268,6 +272,7 @@ function normalizeCheckpoints(raw: unknown): Record<string, SessionCheckpoint> {
       closed: value.closed === true,
       lastGrowthMs: typeof value.lastGrowthMs === 'number' ? value.lastGrowthMs : Date.now(),
       size: typeof value.size === 'number' ? value.size : 0,
+      usage: value.usage && typeof value.usage === 'object' ? value.usage : {},
     };
   }
   return out;
