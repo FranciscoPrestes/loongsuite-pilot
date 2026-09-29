@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCopilotEvents } from '../../../../src/inputs/copilot/copilot-event-builder.js';
+import { buildCopilotEvents, collectUsageTotals } from '../../../../src/inputs/copilot/copilot-event-builder.js';
 import { applyAgentContentPolicy } from '../../../../src/normalization/agent-content-policy.js';
 import type { AgentsConfig } from '../../../../src/types/index.js';
 import { ev, resetFixtureIds, shutdownEvent, T0, textOnlyTurn, toolTurn } from '../../../fixtures/copilot/events.js';
@@ -52,6 +52,46 @@ describe('session.shutdown usage summary', () => {
     expect(summary['gen_ai.usage.input_tokens']).toBe(5);
     expect(summary['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
     expect(summary['agent.copilot.usage.nano_aiu']).toBeUndefined();
+  });
+});
+
+describe('cumulative totals across resumes', () => {
+  const A = { 'model-a': { inputTokens: 1000, outputTokens: 50, cacheReadTokens: 800, reasoningTokens: 7, totalNanoAiu: 100 } };
+  const B = { 'model-a': { inputTokens: 1500, outputTokens: 80, cacheReadTokens: 1200, reasoningTokens: 9, totalNanoAiu: 160 } };
+
+  it('emits nothing for a repeated identical shutdown', () => {
+    const events = [...textOnlyTurn(), shutdownEvent(T0 + 9_000, A), shutdownEvent(T0 + 30_000, A)];
+    expect(summaries(events)).toHaveLength(1);
+  });
+
+  it('emits only the increment when a resumed session shuts down with larger totals', () => {
+    const events = [...textOnlyTurn(), shutdownEvent(T0 + 9_000, A), shutdownEvent(T0 + 30_000, B)];
+    const [first, second] = summaries(events);
+    expect(first['gen_ai.usage.input_tokens']).toBe(1000);
+    expect(second['gen_ai.usage.input_tokens']).toBe(500);
+    expect(second['gen_ai.usage.output_tokens']).toBe(30);
+    expect(second['gen_ai.usage.cache_read.input_tokens']).toBe(400);
+    expect(second['agent.copilot.usage.reasoning_tokens']).toBe(2);
+    expect(second['agent.copilot.usage.nano_aiu']).toBe(60);
+    expect(first['event.id']).not.toBe(second['event.id']);
+  });
+
+  it('treats totals from an earlier summary as already reported', () => {
+    const prior = { 'model-a': { inputTokens: 1000, outputTokens: 50, cacheReadTokens: 800, cacheWriteTokens: 0, reasoningTokens: 7, nanoAiu: 100 } };
+    expect(buildCopilotEvents([shutdownEvent(T0, A)], { sessionId: 's-1', priorUsage: prior })).toEqual([]);
+    const [delta] = buildCopilotEvents([shutdownEvent(T0, B)], { sessionId: 's-1', priorUsage: prior });
+    expect(delta['gen_ai.usage.input_tokens']).toBe(500);
+  });
+
+  it('reports the full totals when a counter goes backwards (state reset)', () => {
+    const prior = { 'model-a': { inputTokens: 9000, outputTokens: 900, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, nanoAiu: 0 } };
+    const [entry] = buildCopilotEvents([shutdownEvent(T0, A)], { sessionId: 's-1', priorUsage: prior });
+    expect(entry['gen_ai.usage.input_tokens']).toBe(1000);
+  });
+
+  it('exposes the latest cumulative totals so the input can remember them', () => {
+    const totals = collectUsageTotals([shutdownEvent(T0, A), shutdownEvent(T0 + 1, B)]);
+    expect(totals['model-a']).toMatchObject({ inputTokens: 1500, outputTokens: 80 });
   });
 });
 

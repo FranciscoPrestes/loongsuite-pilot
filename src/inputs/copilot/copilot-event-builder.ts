@@ -1,6 +1,6 @@
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { baseEntry } from './copilot-entry-factory.js';
-import type { CopilotBuildOptions, CopilotEvent } from './copilot-types.js';
+import type { CopilotBuildOptions, CopilotEvent, CopilotUsageTotals } from './copilot-types.js';
 
 type Part = Record<string, JsonValue>;
 
@@ -30,6 +30,8 @@ interface Ctx {
   firstStep: boolean;
   /** Pending request delta per agent scope: '' is the main agent, otherwise the parent tool call id. */
   deltas: Map<string, JsonValue[]>;
+  /** Cumulative usage already reported, per model. */
+  usage: Map<string, CopilotUsageTotals>;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
@@ -55,6 +57,7 @@ export function buildCopilotEvents(events: CopilotEvent[], opts: CopilotBuildOpt
     opts, out: [], steps: new Map(), toolSteps: new Map(), tools: new Map(),
     selectedModel: opts.selectedModel, autoModel: opts.autoModel, cwd: opts.cwd,
     interactionId: '', firstStep: false, deltas: new Map(),
+    usage: new Map(Object.entries(opts.priorUsage ?? {})),
   };
   for (const event of events) {
     const at = Date.parse(event.timestamp);
@@ -228,28 +231,82 @@ function emitToolResult(ctx: Ctx, event: CopilotEvent, at: number): void {
 const numeric = (v: unknown): number | undefined =>
   (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
 
-/** One session-level `other` entry per model; only fields the source actually persists. */
+const USAGE_FIELDS: ReadonlyArray<readonly [keyof CopilotUsageTotals, string]> = [
+  ['inputTokens', 'gen_ai.usage.input_tokens'],
+  ['outputTokens', 'gen_ai.usage.output_tokens'],
+  ['cacheReadTokens', 'gen_ai.usage.cache_read.input_tokens'],
+  ['cacheWriteTokens', 'gen_ai.usage.cache_creation.input_tokens'],
+  ['reasoningTokens', 'agent.copilot.usage.reasoning_tokens'],
+  ['nanoAiu', 'agent.copilot.usage.nano_aiu'],
+];
+
+function totalsOf(metric: Record<string, unknown> | undefined): CopilotUsageTotals | undefined {
+  const usage = obj(metric?.usage);
+  if (!metric || !usage) return undefined;
+  return {
+    inputTokens: numeric(usage.inputTokens),
+    outputTokens: numeric(usage.outputTokens),
+    cacheReadTokens: numeric(usage.cacheReadTokens),
+    cacheWriteTokens: numeric(usage.cacheWriteTokens),
+    reasoningTokens: numeric(usage.reasoningTokens),
+    nanoAiu: numeric(metric.totalNanoAiu),
+  };
+}
+
+/** Only the fields the source actually reported. */
+function definedOnly(totals: CopilotUsageTotals): CopilotUsageTotals {
+  return Object.fromEntries(Object.entries(totals).filter(([, v]) => v !== undefined)) as CopilotUsageTotals;
+}
+
+/** Current cumulative totals minus what was already reported; a counter going backwards means a reset. */
+function increment(current: CopilotUsageTotals, prior: CopilotUsageTotals = {}): CopilotUsageTotals {
+  const reset = USAGE_FIELDS.some(([field]) => {
+    const now = current[field];
+    return now !== undefined && now < (prior[field] ?? 0);
+  });
+  const base = reset ? {} : prior;
+  return Object.fromEntries(USAGE_FIELDS.map(([field]) => {
+    const now = current[field];
+    return [field, now === undefined ? undefined : now - (base[field] ?? 0)];
+  })) as CopilotUsageTotals;
+}
+
+/**
+ * Latest cumulative per-model totals after applying every session.shutdown in `events`.
+ * The input stores this so a resumed session that repeats its totals is not counted twice.
+ */
+export function collectUsageTotals(
+  events: CopilotEvent[],
+  prior: Record<string, CopilotUsageTotals> = {},
+): Record<string, CopilotUsageTotals> {
+  const result: Record<string, CopilotUsageTotals> = { ...prior };
+  for (const event of events) {
+    if (event.type !== 'session.shutdown') continue;
+    for (const [model, raw] of Object.entries(obj(event.data.modelMetrics) ?? {})) {
+      const totals = totalsOf(obj(raw));
+      if (totals) result[model] = { ...(result[model] ?? {}), ...definedOnly(totals) };
+    }
+  }
+  return result;
+}
+
+/**
+ * One session-level `other` entry per model. Copilot repeats its cumulative totals at every
+ * shutdown (including after a resume), so each entry carries only the increment since the
+ * previous summary of the session and the sum over a session stays correct.
+ */
 function emitUsageSummary(ctx: Ctx, event: CopilotEvent, at: number): void {
-  const metrics = obj(event.data.modelMetrics);
-  if (!metrics) return;
-  for (const [model, raw] of Object.entries(metrics)) {
-    const metric = obj(raw);
-    const usage = obj(metric?.usage);
-    if (!metric || !usage) continue;
+  for (const [model, raw] of Object.entries(obj(event.data.modelMetrics) ?? {})) {
+    const totals = totalsOf(obj(raw));
+    if (!totals) continue;
+    const delta = increment(totals, ctx.usage.get(model));
+    ctx.usage.set(model, { ...(ctx.usage.get(model) ?? {}), ...definedOnly(totals) });
+    const reported = USAGE_FIELDS.filter(([field]) => delta[field] !== undefined);
+    if (reported.every(([field]) => delta[field] === 0)) continue;
     const entry = baseEntry('other', { sessionId: ctx.opts.sessionId }, `usage:${event.id}:${model}`, at);
     entry['gen_ai.response.model'] = model;
     entry['agent.copilot.usage.scope'] = 'session';
-    const fields: Array<[string, number | undefined]> = [
-      ['gen_ai.usage.input_tokens', numeric(usage.inputTokens)],
-      ['gen_ai.usage.output_tokens', numeric(usage.outputTokens)],
-      ['gen_ai.usage.cache_read.input_tokens', numeric(usage.cacheReadTokens)],
-      ['gen_ai.usage.cache_creation.input_tokens', numeric(usage.cacheWriteTokens)],
-      ['agent.copilot.usage.reasoning_tokens', numeric(usage.reasoningTokens)],
-      ['agent.copilot.usage.nano_aiu', numeric(metric.totalNanoAiu)],
-    ];
-    for (const [key, value] of fields) {
-      if (value !== undefined) entry[key] = value;
-    }
+    for (const [field, key] of reported) entry[key] = delta[field] as number;
     push(ctx, entry);
   }
 }

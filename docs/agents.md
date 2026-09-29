@@ -76,8 +76,10 @@ What is not collected, and why:
   cache and reasoning token totals. If the host is killed or crashes, no totals are
   reported for that session. The summary has no turn, so it reaches JSONL, SLS and
   HTTP outputs but not OTLP trace export, which discards `other` events that carry
-  no input messages. If Copilot resumes a closed session and closes it again, each
-  `session.shutdown` produces its own summaries; do not assume they are additive.
+  no input messages. Copilot repeats its cumulative totals at every shutdown,
+  including after a resumed session closes again, so each summary carries only the
+  increment since the previous summary of the same session (the first one is the
+  total so far). Summing the summaries of a session gives the correct total.
 - The Copilot system prompt (`system.message`) is never emitted.
 - History that predates installing Pilot is not replayed.
 

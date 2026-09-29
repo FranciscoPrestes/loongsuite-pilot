@@ -16,8 +16,20 @@ export interface CopilotSessionHead {
   autoModel?: string;
 }
 
+/** Cumulative per-model usage as Copilot reports it in session.shutdown. */
+export interface CopilotUsageTotals {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  nanoAiu?: number;
+}
+
 export interface CopilotBuildOptions extends CopilotSessionHead {
   sessionId: string;
+  /** Totals already reported for this session, keyed by model. Summaries carry only the increment. */
+  priorUsage?: Record<string, CopilotUsageTotals>;
 }
 
 export interface ReadEventsResult {

@@ -261,3 +261,42 @@ describe('robustness of session discovery', () => {
     expect(seen.filter(e => e['event.name'] === 'other')).toHaveLength(1);
   });
 });
+
+describe('token totals across resumed sessions', () => {
+  const totals = (i: number, o: number) => ({ 'model-a': { inputTokens: i, outputTokens: o } });
+
+  it('does not report the same session totals twice and emits only later increments', async () => {
+    const { run } = await makeInput();
+    await run();
+    const file = await sessionFile('s');
+    await writeFile(file, toJsonl([...textOnlyTurn(), shutdownEvent(T0 + 9_000, totals(1000, 50))]));
+    const first = (await run()).filter(e => e['event.name'] === 'other');
+    expect(first.map(e => e['gen_ai.usage.input_tokens'])).toEqual([1000]);
+
+    // Resume and close again without new usage: Copilot repeats the cumulative totals.
+    await appendFile(file, toJsonl([
+      ev('session.resume', {}, T0 + 20_000),
+      shutdownEvent(T0 + 21_000, totals(1000, 50)),
+    ]));
+    expect((await run()).filter(e => e['event.name'] === 'other')).toEqual([]);
+
+    // Resume, use more tokens, close: only the increment is reported.
+    await appendFile(file, toJsonl([
+      ev('session.resume', {}, T0 + 40_000),
+      shutdownEvent(T0 + 41_000, totals(1600, 90)),
+    ]));
+    const later = (await run()).filter(e => e['event.name'] === 'other');
+    expect(later.map(e => [e['gen_ai.usage.input_tokens'], e['gen_ai.usage.output_tokens']])).toEqual([[600, 40]]);
+  });
+
+  it('remembers reported totals across a restart', async () => {
+    const a = await makeInput();
+    await a.run();
+    const file = await sessionFile('s');
+    await writeFile(file, toJsonl([...textOnlyTurn(), shutdownEvent(T0 + 9_000, totals(1000, 50))]));
+    await a.run();
+    await appendFile(file, toJsonl([ev('session.resume', {}, T0 + 20_000), shutdownEvent(T0 + 21_000, totals(1000, 50))]));
+    const b = await makeInput();
+    expect((await b.run()).filter(e => e['event.name'] === 'other')).toEqual([]);
+  });
+});

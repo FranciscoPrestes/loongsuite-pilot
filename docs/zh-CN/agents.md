@@ -71,8 +71,9 @@ Prompt、工具输入或结果），用于立即触发采集。对 transcript �
   上报一条 `event.name=other` 汇总，带 `agent.copilot.usage.scope=session`，
   以及输入、输出、缓存和推理 Token 总量。host 被杀或崩溃时，该会话不上报总量。
   该汇总不属于任何 Turn，因此会进入 JSONL、SLS 和 HTTP 输出，但不会进入 OTLP
-  Trace 导出（转换器会丢弃不含输入消息的 `other` 事件）。若 Copilot 恢复已关闭的
-  会话并再次关闭，每次 `session.shutdown` 都会产生各自的汇总，请勿假定它们可累加。
+  Trace 导出（转换器会丢弃不含输入消息的 `other` 事件）。Copilot 在每次关闭时都会重复
+  其累计总量（包括恢复后再次关闭），因此每条汇总只携带自同一会话上一条汇总以来的
+  增量（第一条为截至当时的总量）；对同一会话的汇总求和即得到正确总量。
 - 不输出 Copilot 系统提示词（`system.message`）。
 - 不回放安装 Pilot 之前的历史。
 
