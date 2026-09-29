@@ -138,6 +138,16 @@ message content alone does not remove this metadata. All other agent-scoped
 extensions retain their existing JSONL/SLS filtering behavior. This field does
 not automatically create an SLS index or a dedicated ARMS UI column.
 
+## GitHub Copilot Usage Keys
+
+Copilot's session cost (`agent.copilot.usage.nano_aiu`, `premium_requests`, `source`, `scope`, `turn_id`)
+and the per-model breakdown on token summaries (`reasoning_tokens`, `model_nano_aiu`) have no standard
+`gen_ai.*` equivalent. Log outputs normally drop agent-scoped extension attributes
+(`agent.<agent>.<field>`), so these keys are the one exception, together with the OpenClaw session key:
+for entries whose `gen_ai.agent.type` is `copilot`, only keys of the exact form
+`agent.copilot.usage.<field>` are kept in JSONL, SLS and HTTP output. Every other agent-scoped key is
+still dropped. Token counts and the model use the standard `gen_ai.usage.*` and `gen_ai.*.model` fields.
+
 ## System Instructions
 
 `gen_ai.system_instructions` carries the system prompt as an array of `text` parts on the `llm.request` event. It rides the existing message-content controls (Opt-In requirement level, per-agent `captureMessageContent`, and the masking pipeline), so it is omitted entirely when content capture is disabled.
