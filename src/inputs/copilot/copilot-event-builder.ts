@@ -28,6 +28,8 @@ interface Ctx {
   cwd?: string;
   interactionId: string;
   firstStep: boolean;
+  /** True from the prompt until a main-agent round ends the turn (answer or model error). */
+  turnOpen: boolean;
   /** Pending request delta per agent scope: '' is the main agent, otherwise the parent tool call id. */
   deltas: Map<string, JsonValue[]>;
   /** Cumulative usage already reported, per model. */
@@ -62,7 +64,7 @@ export function buildCopilotEvents(events: CopilotEvent[], opts: CopilotBuildOpt
   const ctx: Ctx = {
     opts, out: [], steps: new Map(), toolSteps: new Map(), tools: new Map(),
     selectedModel: opts.selectedModel, autoModel: opts.autoModel, cwd: opts.cwd,
-    interactionId: '', firstStep: false, deltas: new Map(),
+    interactionId: '', firstStep: false, turnOpen: false, deltas: new Map(),
     usage: new Map(Object.entries(opts.priorUsage ?? {})),
     cost: { ...(opts.priorCost ?? {}) },
   };
@@ -89,6 +91,7 @@ function handle(ctx: Ctx, event: CopilotEvent, at: number): void {
     case 'assistant.message': emitStep(ctx, event, at); break;
     case 'tool.execution_start': emitToolCall(ctx, event, at); break;
     case 'tool.execution_complete': emitToolResult(ctx, event, at); break;
+    case 'session.error': emitModelError(ctx, event, at); break;
     case 'session.usage_checkpoint': emitCost(ctx, event, at, 'checkpoint'); break;
     case 'session.shutdown':
       emitCost(ctx, event, at, 'shutdown');
@@ -109,6 +112,7 @@ function startInteraction(ctx: Ctx, event: CopilotEvent): void {
   ctx.interactionId = str(d.interactionId) ?? str(d.messageId) ?? event.id;
   ctx.deltas = new Map([['', [{ role: 'user', parts: [{ type: 'text', content: str(d.content) ?? '' }] }]]]);
   ctx.firstStep = true;
+  ctx.turnOpen = true;
   ctx.steps.clear();
   ctx.toolSteps.clear();
   ctx.tools.clear();
@@ -146,6 +150,46 @@ function assistantParts(d: Record<string, unknown>): { parts: Part[]; toolParts:
   return { parts: [...parts, ...toolParts], toolParts };
 }
 
+function requestEntry(
+  ctx: Ctx, step: Step, identity: { sessionId: string; turnId: string; stepId: string },
+  delta: JsonValue[], subagent: boolean, apiCallId: string | undefined, responseModel: string | undefined,
+): AgentActivityEntry {
+  const request = baseEntry('llm.request', identity, `request:${step.seed}`, step.startMs);
+  request['gen_ai.request.id'] = apiCallId ?? step.stepId;
+  const requested = ctx.selectedModel ?? responseModel;
+  if (requested) request['gen_ai.request.model'] = requested;
+  if (ctx.firstStep && !subagent) request['gen_ai.turn.start'] = true;
+  if (delta.length > 0) request['gen_ai.input.messages_delta'] = delta;
+  return request;
+}
+
+/**
+ * A model call that never answered leaves no assistant.message, only session.error. Without this
+ * the prompt and the failure would both vanish from the log. The round that was waiting (or a
+ * synthetic one when the error came before any round started) becomes an error response.
+ */
+function emitModelError(ctx: Ctx, event: CopilotEvent, at: number): void {
+  if (!ctx.turnOpen) return;
+  const pending = [...ctx.steps.values()].pop();
+  const step = pending ?? newStep('error', ctx.interactionId, at, event.id);
+  const identity = { sessionId: ctx.opts.sessionId, turnId: step.turnId, stepId: step.stepId };
+  const request = requestEntry(ctx, step, identity, ctx.deltas.get('') ?? [], false, undefined, ctx.autoModel);
+  const response = baseEntry('llm.response', identity, `response:${event.id}`, at);
+  const model = ctx.autoModel ?? ctx.selectedModel;
+  if (model) response['gen_ai.response.model'] = model;
+  response['gen_ai.response.finish_reasons'] = ['error'];
+  response['gen_ai.turn.end'] = true;
+  response['error.type'] = str(event.data.errorType) ?? 'model_request_failed';
+  const message = str(event.data.message);
+  if (message) response['error.message'] = message;
+  push(ctx, request);
+  push(ctx, response);
+  ctx.deltas.set('', []);
+  ctx.steps.clear();
+  ctx.firstStep = false;
+  ctx.turnOpen = false;
+}
+
 function emitStep(ctx: Ctx, event: CopilotEvent, at: number): void {
   const d = event.data;
   const nativeTurnId = str(d.turnId) ?? '';
@@ -160,19 +204,17 @@ function emitStep(ctx: Ctx, event: CopilotEvent, at: number): void {
   const identity = { sessionId: ctx.opts.sessionId, turnId: step.turnId, stepId: step.stepId };
   const responseModel = str(d.model) ?? ctx.autoModel ?? ctx.selectedModel;
 
-  const request = baseEntry('llm.request', identity, `request:${step.seed}`, step.startMs);
-  request['gen_ai.request.id'] = str(d.apiCallId) ?? step.stepId;
-  const requested = ctx.selectedModel ?? responseModel;
-  if (requested) request['gen_ai.request.model'] = requested;
-  if (ctx.firstStep && !subagent) request['gen_ai.turn.start'] = true;
-  if (delta.length > 0) request['gen_ai.input.messages_delta'] = delta;
+  const request = requestEntry(ctx, step, identity, delta, subagent, str(d.apiCallId), responseModel);
 
   const finish = toolParts.length > 0 ? 'tool_call' : 'stop';
   const response = baseEntry('llm.response', identity, `response:${event.id}`, at);
   response['gen_ai.response.id'] = str(d.messageId) ?? event.id;
   if (responseModel) response['gen_ai.response.model'] = responseModel;
   response['gen_ai.response.finish_reasons'] = [finish];
-  if (finish === 'stop' && !subagent) response['gen_ai.turn.end'] = true;
+  if (finish === 'stop' && !subagent) {
+    response['gen_ai.turn.end'] = true;
+    ctx.turnOpen = false;
+  }
   if (parts.length > 0) response['gen_ai.output.messages'] = [{ role: 'assistant', parts, finish_reason: finish }];
   const outputTokens = d.outputTokens;
   if (typeof outputTokens === 'number' && Number.isFinite(outputTokens) && outputTokens >= 0) {

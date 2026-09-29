@@ -67,6 +67,10 @@ What is collected:
   (for example a file viewed by line range, cut mid-file) is wrapped as
   `{"type":"text","content":"..."}` without losing any character.
 - Turn boundaries. One user message is one turn; each model round inside it is a step.
+- Model failures. When a model call never answers (Copilot writes `session.error` and no
+  assistant message), the prompt is still emitted with an `llm.response` marked
+  `finish_reasons=["error"]`, `error.type` (Copilot's error type) and `error.message`, and the
+  turn ends there.
 
 What is not collected, and why:
 

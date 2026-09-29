@@ -108,6 +108,31 @@ export function failedToolTurn(): CopilotEvent[] {
   ];
 }
 
+export function modelErrorTurn(withEarlierStep = false): CopilotEvent[] {
+  resetFixtureIds();
+  const earlier = withEarlierStep ? [
+    ev('assistant.turn_start', { turnId: '0', interactionId: 'i-1' }, T0 + 1_100),
+    ev('assistant.message', {
+      messageId: 'am-1', content: '', model: 'model-a', apiCallId: 'api-1', interactionId: 'i-1', turnId: '0',
+      toolRequests: [{ toolCallId: 'call-x', name: 'view', arguments: { path: 'a' }, type: 'function' }],
+    }, T0 + 2_000),
+    ev('tool.execution_start', { toolCallId: 'call-x', toolName: 'view', arguments: { path: 'a' }, turnId: '0' }, T0 + 2_100),
+    ev('tool.execution_complete', { toolCallId: 'call-x', success: true, result: { content: 'A' }, turnId: '0' }, T0 + 2_200),
+    ev('assistant.turn_start', { turnId: '1', interactionId: 'i-1' }, T0 + 2_300),
+  ] : [
+    ev('assistant.turn_start', { turnId: '0', interactionId: 'i-1' }, T0 + 1_100),
+  ];
+  return [
+    ...head(),
+    userMessage('do it', 'i-1', T0 + 1_000),
+    ...earlier,
+    ev('assistant.turn_end', { turnId: withEarlierStep ? '1' : '0' }, T0 + 60_000),
+    ev('session.error', {
+      errorType: 'query', message: 'Execution failed: CAPIError: 400 The requested model is not supported.',
+    }, T0 + 60_100),
+  ];
+}
+
 export function shutdownEvent(
   atMs: number,
   models: Record<string, {
