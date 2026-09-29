@@ -1,5 +1,7 @@
 # loongsuite-pilot 项目导航
 
+> **Fork NTConsult:** no inicio da sessao rode `bash tools/sync-reminder.sh`. Se ele imprimir algo, avise o usuario ANTES de qualquer outra coisa e ofereca sincronizar com `bash tools/sync-upstream.sh` (use `--dry-run` primeiro). Nao sincronize sem o consentimento dele. Detalhes em [FORK.md](./FORK.md).
+
 > 多 AI Agent 轻量数据采集平台 — 自动发现、多种采集方式、多目标数据输出
 
 ## 架构总览

@@ -22,7 +22,11 @@
 # the branch you have checked out.
 #
 # History lives in git itself: `git log --first-parent NTConsult-main` shows
-# every sync as a merge commit.
+# every sync as a merge commit. Each real run (not --dry-run) also records its
+# outcome, ok or failed with the reason, in this clone's git config
+# (ntconsult.lastSync*). tools/sync-reminder.sh reads that to remind you when a
+# sync is due and to keep flagging a failed one (for example a conflict) until a
+# later run succeeds.
 #
 # Settings (environment): SYNC_UPSTREAM_REMOTE (upstream), SYNC_ORIGIN_REMOTE
 # (origin), SYNC_MIRROR_BRANCH (main), SYNC_OURS_BRANCH (NTConsult-main),
@@ -43,10 +47,25 @@ VERIFY=1
 UPDATE_PR=0
 WORKTREES=()
 WT_DIR=
+RECORD_ENABLED=0
 
 info() { printf '[sync] %s\n' "$*"; }
 warn() { printf '[sync] WARNING: %s\n' "$*" >&2; }
-die() { printf '[sync] ERROR: %s\n' "$*" >&2; exit 1; }
+# Remembers the outcome of the last real run so tools/sync-reminder.sh can surface it.
+record_status() {
+  [ "$RECORD_ENABLED" -eq 1 ] || return 0
+  local now
+  now="$(date +%s)"
+  git config --local ntconsult.lastSyncAttemptEpoch "$now"
+  git config --local ntconsult.lastSyncStatus "$1"
+  git config --local ntconsult.lastSyncMessage "$2"
+  if [ "$1" = "ok" ]; then
+    git config --local ntconsult.lastSyncEpoch "$now"
+    git config --local ntconsult.lastSyncAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+}
+
+die() { printf '[sync] ERROR: %s\n' "$*" >&2; record_status failed "$*"; exit 1; }
 
 usage() { sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -71,6 +90,7 @@ done
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repository"
 cd "$ROOT"
+[ "$DRY_RUN" -eq 0 ] && RECORD_ENABLED=1
 
 for remote in "$UPSTREAM" "$ORIGIN"; do
   git remote get-url "$remote" >/dev/null 2>&1 || die "remote '$remote' is not configured"
@@ -185,4 +205,5 @@ for branch in $PR_BRANCHES; do
   fi
 done
 
+record_status ok "synced"
 info "done"
