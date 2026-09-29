@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildCopilotEvents } from '../../../../src/inputs/copilot/copilot-event-builder.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 import {
-  ev, failedToolTurn, parallelToolTurn, resetFixtureIds, T0, textOnlyTurn, toolTurn,
+  ev, failedToolTurn, modelErrorTurn, parallelToolTurn, resetFixtureIds, T0, textOnlyTurn, toolTurn,
 } from '../../../fixtures/copilot/events.js';
 
 const opts = { sessionId: 's-1' };
@@ -115,6 +115,49 @@ describe('failed tool', () => {
     expect(result['error.type']).toBe('tool_execution_failed');
     expect(result['error.message']).toBe('boom');
     expect(result['gen_ai.tool.call.result']).toBeUndefined();
+  });
+});
+
+describe('model error', () => {
+  it('keeps the prompt and reports the failed call as an error response that ends the turn', () => {
+    const entries = buildCopilotEvents(modelErrorTurn(), opts);
+    expect(names(entries)).toEqual(['llm.request', 'llm.response']);
+    const [request, response] = entries;
+    expect(request['gen_ai.turn.start']).toBe(true);
+    expect(request['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'do it' }] },
+    ]);
+    expect(response['gen_ai.response.finish_reasons']).toEqual(['error']);
+    expect(response['gen_ai.turn.end']).toBe(true);
+    expect(response['error.type']).toBe('query');
+    expect(response['error.message']).toContain('requested model is not supported');
+    expect(response['gen_ai.output.messages']).toBeUndefined();
+    expect(response['gen_ai.turn.id']).toBe(request['gen_ai.turn.id']);
+  });
+
+  it('fails the round that was waiting after earlier rounds succeeded', () => {
+    const entries = buildCopilotEvents(modelErrorTurn(true), opts);
+    expect(names(entries)).toEqual([
+      'llm.request', 'llm.response', 'tool.call', 'tool.result', 'llm.request', 'llm.response',
+    ]);
+    const [, , , , request, response] = entries;
+    expect(request['gen_ai.turn.start']).toBeUndefined();
+    expect(request['gen_ai.input.messages_delta']).toHaveLength(2);
+    expect(response['gen_ai.response.finish_reasons']).toEqual(['error']);
+    expect(response['gen_ai.turn.end']).toBe(true);
+  });
+
+  it('emits nothing for an error outside a turn, and only once per turn', () => {
+    resetFixtureIds();
+    const idle = [ev('session.error', { errorType: 'x', message: 'm' }, T0)];
+    expect(buildCopilotEvents(idle, opts)).toEqual([]);
+    const twice = [...modelErrorTurn(), ev('session.error', { errorType: 'x', message: 'again' }, T0 + 61_000)];
+    expect(buildCopilotEvents(twice, opts)).toHaveLength(2);
+  });
+
+  it('does not add an error to a turn that already ended normally', () => {
+    const done = [...textOnlyTurn(), ev('session.error', { errorType: 'x', message: 'late' }, T0 + 9_000)];
+    expect(names(buildCopilotEvents(done, opts))).toEqual(['llm.request', 'llm.response']);
   });
 });
 
