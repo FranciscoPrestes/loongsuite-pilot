@@ -3,16 +3,19 @@
 # schedule-sync.sh
 # ---------------------------------------------------------------------------
 # Runs tools/sync-upstream.sh on a schedule (macOS launchd LaunchAgent).
+# This only keeps the CODE of the fork current with the original repository. It has
+# nothing to do with telemetry collection, which runs continuously in the Pilot daemon.
+# A run with nothing new upstream only does a fetch, so a short interval is cheap.
 # The job stops on anything that needs a human (conflict, failed gate) and the
 # reason is in the log; the sync history itself lives in git.
 #
-#   tools/schedule-sync.sh install     # weekly, Monday 09:00 by default
+#   tools/schedule-sync.sh install     # every 4 hours by default
 #   tools/schedule-sync.sh status      # job state and the last log lines
 #   tools/schedule-sync.sh run-now     # start the job once, right now
 #   tools/schedule-sync.sh uninstall
 #
 # Settings (environment, read at install time):
-#   SYNC_WEEKDAY (0-6, Sunday=0; default 1)   SYNC_HOUR (default 9)   SYNC_MINUTE (default 0)
+#   SYNC_INTERVAL_HOURS (default 4; the job also fires after the Mac wakes from sleep)
 #   SYNC_LOG_FILE (default ~/Library/Logs/loongsuite-pilot-sync.log)
 #   SYNC_LAUNCHD_LABEL (default com.NTConsult.loongsuite-pilot-sync)
 #   SYNC_JOB_ARGS (extra options passed to sync-upstream.sh, for example
@@ -27,9 +30,7 @@ LABEL="${SYNC_LAUNCHD_LABEL:-com.NTConsult.loongsuite-pilot-sync}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="${SYNC_LOG_FILE:-$HOME/Library/Logs/loongsuite-pilot-sync.log}"
-WEEKDAY="${SYNC_WEEKDAY:-1}"
-HOUR="${SYNC_HOUR:-9}"
-MINUTE="${SYNC_MINUTE:-0}"
+INTERVAL_HOURS="${SYNC_INTERVAL_HOURS:-4}"
 JOB_ARGS="${SYNC_JOB_ARGS:-}"
 DOMAIN="gui/$(id -u)"
 
@@ -39,9 +40,8 @@ info() { printf '[schedule] %s\n' "$*"; }
 [ "$(uname -s)" = "Darwin" ] || die "launchd is macOS only. See the cron example in this file's header."
 [ -f "$ROOT/tools/sync-upstream.sh" ] || die "tools/sync-upstream.sh not found in $ROOT"
 
-case "$WEEKDAY" in [0-6]) ;; *) die "SYNC_WEEKDAY must be 0-6" ;; esac
-case "$HOUR" in ''|*[!0-9]*) die "SYNC_HOUR must be a number" ;; esac
-case "$MINUTE" in ''|*[!0-9]*) die "SYNC_MINUTE must be a number" ;; esac
+case "$INTERVAL_HOURS" in ''|*[!0-9]*|0) die "SYNC_INTERVAL_HOURS must be a positive whole number" ;; esac
+INTERVAL_SECONDS=$((INTERVAL_HOURS * 3600))
 
 write_plist() {
   mkdir -p "$(dirname "$PLIST")" "$(dirname "$LOG")"
@@ -68,15 +68,8 @@ $args_xml  </array>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Weekday</key>
-    <integer>$WEEKDAY</integer>
-    <key>Hour</key>
-    <integer>$HOUR</integer>
-    <key>Minute</key>
-    <integer>$MINUTE</integer>
-  </dict>
+  <key>StartInterval</key>
+  <integer>$INTERVAL_SECONDS</integer>
   <key>StandardOutPath</key>
   <string>$LOG</string>
   <key>StandardErrorPath</key>
@@ -94,7 +87,7 @@ case "${1:-}" in
     write_plist
     is_loaded && launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
     launchctl bootstrap "$DOMAIN" "$PLIST"
-    info "installed $LABEL: weekday=$WEEKDAY at $(printf '%02d:%02d' "$HOUR" "$MINUTE"), repo=$ROOT"
+    info "installed $LABEL: every ${INTERVAL_HOURS}h, repo=$ROOT"
     info "log: $LOG"
     ;;
   uninstall)
@@ -110,7 +103,7 @@ case "${1:-}" in
   status)
     if is_loaded; then
       launchctl print "$DOMAIN/$LABEL" | grep -E "^\s*(state|runs|last exit code|program) " || true
-      info "schedule: weekday=$WEEKDAY at $(printf '%02d:%02d' "$HOUR" "$MINUTE") (as installed)"
+      launchctl print "$DOMAIN/$LABEL" | grep -E "^\s*run interval" || true
     else
       info "not installed"
     fi
