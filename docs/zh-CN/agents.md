@@ -59,13 +59,20 @@ Prompt、工具输入或结果），用于立即触发采集。对 transcript �
 - 用户 Prompt 和助手回复（存在时包含推理文本）。
 - 每次 LLM 调用的模型。`gen_ai.request.model` 是界面上选择的模型（例如
   `auto`），`gen_ai.response.model` 是实际应答的模型。
-- 按 `toolCallId` 配对的工具调用与结果，包括并行调用和失败。
+- 按 `toolCallId` 配对的工具调用与结果，包括并行调用和失败。工具输出若是 JSON，则输出为
+  原生对象；以 JSON 形式开头但并非合法 JSON 的文本（例如按行区间查看、在文件中途被截断的
+  文件）会被包装为 `{"type":"text","content":"..."}`，不丢失任何字符。
 - Turn 边界：一条用户消息是一个 Turn，其内部每一轮模型调用是一个 Step。
 
 未采集及原因：
 
 - **逐次调用的 Token 用量。** Copilot 将 `assistant.usage` 标记为临时事件，
   从不写入磁盘，因此不上报，也不做估算。
+- **会话成本**（`agent.copilot.usage.nano_aiu`，Copilot 自己的计费单位，以及
+  `agent.copilot.usage.premium_requests`）来自 Copilot 在每次交互后写入的用量 checkpoint，
+  因此即使 host 被杀也能获得。每条记录是自同一会话上一条成本记录以来的增量，关闭时只补充
+  checkpoint 尚未覆盖的部分。对这些字段求和即得会话成本。Token 汇总上的
+  `agent.copilot.usage.model_nano_aiu` 是同一成本按模型的拆分，切勿与 `nano_aiu` 相加。
 - **会话 Token 总量**只有在 Copilot 写入 `session.shutdown` 时才可用，即 host
   正常关闭（例如退出 VS Code；Reload Window 不会关闭它）。此时 Pilot 为每个模型
   上报一条 `event.name=other` 汇总，带 `agent.copilot.usage.scope=session`，

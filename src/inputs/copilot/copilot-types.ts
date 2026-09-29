@@ -26,10 +26,18 @@ export interface CopilotUsageTotals {
   nanoAiu?: number;
 }
 
+/** Cumulative session-wide cost as Copilot reports it (checkpoints and shutdown). */
+export interface CopilotSessionCost {
+  nanoAiu?: number;
+  premiumRequests?: number;
+}
+
 export interface CopilotBuildOptions extends CopilotSessionHead {
   sessionId: string;
   /** Totals already reported for this session, keyed by model. Summaries carry only the increment. */
   priorUsage?: Record<string, CopilotUsageTotals>;
+  /** Session cost already reported; cost entries carry only the increment. */
+  priorCost?: CopilotSessionCost;
 }
 
 export interface ReadEventsResult {

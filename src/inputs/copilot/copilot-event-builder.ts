@@ -1,6 +1,6 @@
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { baseEntry } from './copilot-entry-factory.js';
-import type { CopilotBuildOptions, CopilotEvent, CopilotUsageTotals } from './copilot-types.js';
+import type { CopilotBuildOptions, CopilotEvent, CopilotSessionCost, CopilotUsageTotals } from './copilot-types.js';
 
 type Part = Record<string, JsonValue>;
 
@@ -32,6 +32,8 @@ interface Ctx {
   deltas: Map<string, JsonValue[]>;
   /** Cumulative usage already reported, per model. */
   usage: Map<string, CopilotUsageTotals>;
+  /** Session-wide cost already reported. */
+  cost: CopilotSessionCost;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
@@ -40,7 +42,11 @@ const obj = (v: unknown): Record<string, unknown> | undefined =>
 const scopeOf = (d: Record<string, unknown>): string => str(d.parentToolCallId) ?? '';
 const json = (v: unknown): JsonValue | undefined => (v === undefined ? undefined : v as JsonValue);
 
-/** Copilot stores tool output as text; JSON-looking text becomes a native value (schema gate). */
+/**
+ * Copilot stores tool output as text. JSON text becomes a native value (schema gate). Text that
+ * only looks like JSON (a file viewed by line range is cut mid-file) cannot be native, so it is
+ * wrapped as a text part instead of being left as a string the gate would reject.
+ */
 function nativeValue(v: unknown): JsonValue | undefined {
   if (typeof v !== 'string') return json(v);
   const head = v.trimStart()[0];
@@ -48,7 +54,7 @@ function nativeValue(v: unknown): JsonValue | undefined {
   try {
     return JSON.parse(v) as JsonValue;
   } catch {
-    return v;
+    return { type: 'text', content: v };
   }
 }
 
@@ -58,6 +64,7 @@ export function buildCopilotEvents(events: CopilotEvent[], opts: CopilotBuildOpt
     selectedModel: opts.selectedModel, autoModel: opts.autoModel, cwd: opts.cwd,
     interactionId: '', firstStep: false, deltas: new Map(),
     usage: new Map(Object.entries(opts.priorUsage ?? {})),
+    cost: { ...(opts.priorCost ?? {}) },
   };
   for (const event of events) {
     const at = Date.parse(event.timestamp);
@@ -82,7 +89,11 @@ function handle(ctx: Ctx, event: CopilotEvent, at: number): void {
     case 'assistant.message': emitStep(ctx, event, at); break;
     case 'tool.execution_start': emitToolCall(ctx, event, at); break;
     case 'tool.execution_complete': emitToolResult(ctx, event, at); break;
-    case 'session.shutdown': emitUsageSummary(ctx, event, at); break;
+    case 'session.usage_checkpoint': emitCost(ctx, event, at, 'checkpoint'); break;
+    case 'session.shutdown':
+      emitCost(ctx, event, at, 'shutdown');
+      emitUsageSummary(ctx, event, at);
+      break;
     default: break;
   }
 }
@@ -237,7 +248,7 @@ const USAGE_FIELDS: ReadonlyArray<readonly [keyof CopilotUsageTotals, string]> =
   ['cacheReadTokens', 'gen_ai.usage.cache_read.input_tokens'],
   ['cacheWriteTokens', 'gen_ai.usage.cache_creation.input_tokens'],
   ['reasoningTokens', 'agent.copilot.usage.reasoning_tokens'],
-  ['nanoAiu', 'agent.copilot.usage.nano_aiu'],
+  ['nanoAiu', 'agent.copilot.usage.model_nano_aiu'],
 ];
 
 function totalsOf(metric: Record<string, unknown> | undefined): CopilotUsageTotals | undefined {
@@ -254,22 +265,30 @@ function totalsOf(metric: Record<string, unknown> | undefined): CopilotUsageTota
 }
 
 /** Only the fields the source actually reported. */
-function definedOnly(totals: CopilotUsageTotals): CopilotUsageTotals {
-  return Object.fromEntries(Object.entries(totals).filter(([, v]) => v !== undefined)) as CopilotUsageTotals;
+function definedOnly<T extends object>(totals: T): T {
+  return Object.fromEntries(Object.entries(totals).filter(([, v]) => v !== undefined)) as T;
 }
 
 /** Current cumulative totals minus what was already reported; a counter going backwards means a reset. */
-function increment(current: CopilotUsageTotals, prior: CopilotUsageTotals = {}): CopilotUsageTotals {
-  const reset = USAGE_FIELDS.some(([field]) => {
+function incrementOf<K extends string>(
+  fields: readonly K[],
+  current: Partial<Record<K, number>>,
+  prior: Partial<Record<K, number>> = {},
+): Partial<Record<K, number>> {
+  const reset = fields.some(field => {
     const now = current[field];
     return now !== undefined && now < (prior[field] ?? 0);
   });
-  const base = reset ? {} : prior;
-  return Object.fromEntries(USAGE_FIELDS.map(([field]) => {
+  const base: Partial<Record<K, number>> = reset ? {} : prior;
+  const out: Partial<Record<K, number>> = {};
+  for (const field of fields) {
     const now = current[field];
-    return [field, now === undefined ? undefined : now - (base[field] ?? 0)];
-  })) as CopilotUsageTotals;
+    if (now !== undefined) out[field] = now - (base[field] ?? 0);
+  }
+  return out;
 }
+
+const USAGE_KEYS = USAGE_FIELDS.map(([field]) => field);
 
 /**
  * Latest cumulative per-model totals after applying every session.shutdown in `events`.
@@ -299,7 +318,7 @@ function emitUsageSummary(ctx: Ctx, event: CopilotEvent, at: number): void {
   for (const [model, raw] of Object.entries(obj(event.data.modelMetrics) ?? {})) {
     const totals = totalsOf(obj(raw));
     if (!totals) continue;
-    const delta = increment(totals, ctx.usage.get(model));
+    const delta = incrementOf(USAGE_KEYS, totals, ctx.usage.get(model));
     ctx.usage.set(model, { ...(ctx.usage.get(model) ?? {}), ...definedOnly(totals) });
     const reported = USAGE_FIELDS.filter(([field]) => delta[field] !== undefined);
     if (reported.every(([field]) => delta[field] === 0)) continue;
@@ -309,4 +328,48 @@ function emitUsageSummary(ctx: Ctx, event: CopilotEvent, at: number): void {
     for (const [field, key] of reported) entry[key] = delta[field] as number;
     push(ctx, entry);
   }
+}
+
+const COST_FIELDS: ReadonlyArray<readonly [keyof CopilotSessionCost, string]> = [
+  ['nanoAiu', 'agent.copilot.usage.nano_aiu'],
+  ['premiumRequests', 'agent.copilot.usage.premium_requests'],
+];
+const COST_KEYS = COST_FIELDS.map(([field]) => field);
+
+function costTotalsOf(d: Record<string, unknown>): CopilotSessionCost {
+  return { nanoAiu: numeric(d.totalNanoAiu), premiumRequests: numeric(d.totalPremiumRequests) };
+}
+
+/**
+ * Latest cumulative session cost after applying every usage checkpoint and shutdown in `events`.
+ * The input stores it so cost is never reported twice.
+ */
+export function collectSessionCost(events: CopilotEvent[], prior: CopilotSessionCost = {}): CopilotSessionCost {
+  let result: CopilotSessionCost = { ...prior };
+  for (const event of events) {
+    if (event.type === 'session.usage_checkpoint' || event.type === 'session.shutdown') {
+      result = { ...result, ...definedOnly(costTotalsOf(event.data)) };
+    }
+  }
+  return result;
+}
+
+/**
+ * Session-wide cost (Copilot's own billing unit and premium requests). Copilot writes a checkpoint
+ * after every interaction, so this survives a host that never shuts down cleanly. Each entry carries
+ * only the increment since the previous cost entry of the session, and a shutdown adds only what the
+ * checkpoints had not covered, so summing a session's entries never double counts.
+ */
+function emitCost(ctx: Ctx, event: CopilotEvent, at: number, source: 'checkpoint' | 'shutdown'): void {
+  const totals = costTotalsOf(event.data);
+  const delta = incrementOf(COST_KEYS, totals, ctx.cost);
+  ctx.cost = { ...ctx.cost, ...definedOnly(totals) };
+  const reported = COST_FIELDS.filter(([field]) => delta[field] !== undefined);
+  if (reported.every(([field]) => delta[field] === 0)) return;
+  const entry = baseEntry('other', { sessionId: ctx.opts.sessionId }, `cost:${source}:${event.id}`, at);
+  entry['agent.copilot.usage.scope'] = 'session';
+  entry['agent.copilot.usage.source'] = source;
+  if (source === 'checkpoint' && ctx.interactionId) entry['agent.copilot.usage.turn_id'] = ctx.interactionId;
+  for (const [field, key] of reported) entry[key] = delta[field] as number;
+  push(ctx, entry);
 }

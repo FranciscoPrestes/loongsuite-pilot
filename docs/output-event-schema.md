@@ -65,9 +65,13 @@ Required levels follow OpenTelemetry wording:
 | `service.name` | string | Recommended | Service name used to distinguish agent instances or product lines. |
 | `gen_ai.session.id` | string | Conditionally Required when the agent maintains session context | User session or conversation ID. |
 | `agent.openclaw.session_key` | string | Recommended when exposed by OpenClaw | Native logical routing key; distinct from the conversation UUID in `gen_ai.session.id`. Preserved in canonical event logs and OpenClaw ENTRY/AGENT/STEP/LLM/TOOL Span attributes (not Resources) when the run has an unambiguous native key. |
-| `agent.copilot.usage.scope` | string | Present on GitHub Copilot usage summaries | `session`. Marks an `other` entry that carries the token usage of one model since the previous summary of the session (the first summary is the total so far), emitted when Copilot writes `session.shutdown`. It has no `gen_ai.turn.id` or `gen_ai.step.id`. Absent when the session never closed gracefully. |
-| `agent.copilot.usage.reasoning_tokens` | int | Recommended when exposed | Reasoning tokens for the model over the session. Present only on the usage summary. |
-| `agent.copilot.usage.nano_aiu` | double | Recommended when exposed | GitHub Copilot billing consumption for the model over the session, in nano AI units. Present only on the usage summary. |
+| `agent.copilot.usage.scope` | string | Present on GitHub Copilot usage entries | `session`. Marks an `other` entry that is not part of a turn (no `gen_ai.turn.id` or `gen_ai.step.id`). Either a cost entry (see `agent.copilot.usage.source`) or a token summary of one model, both emitted from Copilot session events. |
+| `agent.copilot.usage.source` | string | Present on Copilot cost entries | `checkpoint` (written by Copilot after every interaction, so it survives a host that never closes cleanly) or `shutdown` (only the cost the checkpoints had not covered). Token summaries do not carry it. |
+| `agent.copilot.usage.nano_aiu` | double | Recommended when exposed | Session cost in Copilot's own billing unit (nano AI units), as the increment since the previous cost entry of the session. Sum it over a session for the session cost. |
+| `agent.copilot.usage.premium_requests` | double | Recommended when exposed | Premium requests consumed by the session, as an increment like `nano_aiu`. |
+| `agent.copilot.usage.turn_id` | string | Present on checkpoint cost entries | The interaction (turn) that just finished; equals the `gen_ai.turn.id` of that interaction's events, so cost can be joined to a turn. |
+| `agent.copilot.usage.reasoning_tokens` | int | Recommended when exposed | Reasoning tokens of one model, as an increment since the previous summary of the session. Present only on token summaries. |
+| `agent.copilot.usage.model_nano_aiu` | double | Recommended when exposed | Per-model split of the cost, as an increment. It breaks down the same cost that `nano_aiu` reports, so never add the two together. Present only on token summaries. |
 | `gen_ai.turn.id` | string | Recommended | One user request through the agent's final response. |
 | `gen_ai.step.id` | string | Recommended | One ReAct loop or intermediate agent step. |
 | `gen_ai.response.id` | string | Recommended | LLM response ID returned by the model provider when available. |

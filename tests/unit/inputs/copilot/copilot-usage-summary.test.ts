@@ -20,7 +20,7 @@ describe('session.shutdown usage summary', () => {
     expect(summary['gen_ai.usage.cache_read.input_tokens']).toBe(800);
     expect(summary['gen_ai.usage.cache_creation.input_tokens']).toBe(10);
     expect(summary['agent.copilot.usage.reasoning_tokens']).toBe(7);
-    expect(summary['agent.copilot.usage.nano_aiu']).toBe(123);
+    expect(summary['agent.copilot.usage.model_nano_aiu']).toBe(123);
     expect(summary['agent.copilot.usage.scope']).toBe('session');
     expect(summary['gen_ai.turn.id']).toBeUndefined();
     expect(summary['gen_ai.step.id']).toBeUndefined();
@@ -51,7 +51,7 @@ describe('session.shutdown usage summary', () => {
     const [summary] = buildCopilotEvents([bare], opts);
     expect(summary['gen_ai.usage.input_tokens']).toBe(5);
     expect(summary['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
-    expect(summary['agent.copilot.usage.nano_aiu']).toBeUndefined();
+    expect(summary['agent.copilot.usage.model_nano_aiu']).toBeUndefined();
   });
 });
 
@@ -72,7 +72,7 @@ describe('cumulative totals across resumes', () => {
     expect(second['gen_ai.usage.output_tokens']).toBe(30);
     expect(second['gen_ai.usage.cache_read.input_tokens']).toBe(400);
     expect(second['agent.copilot.usage.reasoning_tokens']).toBe(2);
-    expect(second['agent.copilot.usage.nano_aiu']).toBe(60);
+    expect(second['agent.copilot.usage.model_nano_aiu']).toBe(60);
     expect(first['event.id']).not.toBe(second['event.id']);
   });
 

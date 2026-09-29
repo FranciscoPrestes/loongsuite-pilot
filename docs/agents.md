@@ -63,12 +63,22 @@ What is collected:
 - The model of every LLM call. `gen_ai.request.model` is the model selected in the
   UI (for example `auto`) and `gen_ai.response.model` is the model that answered.
 - Tool calls and results, paired by `toolCallId`, including parallel calls and failures.
+  Tool output that is JSON becomes a native object; text that starts like JSON but is not valid
+  (for example a file viewed by line range, cut mid-file) is wrapped as
+  `{"type":"text","content":"..."}` without losing any character.
 - Turn boundaries. One user message is one turn; each model round inside it is a step.
 
 What is not collected, and why:
 
 - **Per-call token usage.** Copilot marks `assistant.usage` as ephemeral and never
   writes it to disk, so per-call tokens are omitted rather than estimated.
+- **Session cost** (`agent.copilot.usage.nano_aiu`, Copilot's own billing unit, and
+  `agent.copilot.usage.premium_requests`) is reported from the usage checkpoint that Copilot
+  writes after every interaction, so it is available even when the host is killed. Each entry
+  is the increment since the previous cost entry of the session, and a shutdown only adds what
+  the checkpoints had not covered. Sum these fields for the session cost. The
+  `agent.copilot.usage.model_nano_aiu` field on the token summaries is the per-model split of
+  that same cost; do not add it to `nano_aiu`.
 - **Session token totals** are available only when Copilot writes
   `session.shutdown`, that is, when the host closes gracefully (for example quitting
   VS Code; Reload Window does not close it). Pilot then emits one `event.name=other`
