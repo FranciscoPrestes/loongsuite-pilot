@@ -65,6 +65,9 @@ Required levels follow OpenTelemetry wording:
 | `service.name` | string | Recommended | Service name used to distinguish agent instances or product lines. |
 | `gen_ai.session.id` | string | Conditionally Required when the agent maintains session context | User session or conversation ID. |
 | `agent.openclaw.session_key` | string | Recommended when exposed by OpenClaw | Native logical routing key; distinct from the conversation UUID in `gen_ai.session.id`. Preserved in canonical event logs and OpenClaw ENTRY/AGENT/STEP/LLM/TOOL Span attributes (not Resources) when the run has an unambiguous native key. |
+| `agent.copilot.usage.scope` | string | Present on GitHub Copilot usage summaries | `session`. Marks an `other` entry that carries token totals for one model over a whole session, emitted when Copilot writes `session.shutdown`. It has no `gen_ai.turn.id` or `gen_ai.step.id`. Absent when the session never closed gracefully. |
+| `agent.copilot.usage.reasoning_tokens` | int | Recommended when exposed | Reasoning tokens for the model over the session. Present only on the usage summary. |
+| `agent.copilot.usage.nano_aiu` | double | Recommended when exposed | GitHub Copilot billing consumption for the model over the session, in nano AI units. Present only on the usage summary. |
 | `gen_ai.turn.id` | string | Recommended | One user request through the agent's final response. |
 | `gen_ai.step.id` | string | Recommended | One ReAct loop or intermediate agent step. |
 | `gen_ai.response.id` | string | Recommended | LLM response ID returned by the model provider when available. |
@@ -115,7 +118,7 @@ Required levels follow OpenTelemetry wording:
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
-Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, and WorkBuddy. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
+Automatic working-directory collection covers Claude Code, Codex, Cursor / Cursor CLI, Kiro CLI, MiMo Code, OpenClaw, OpenCode, Pi Coding Agent, the Qoder family, Qoder Work / Qoder Work CN, Qwen Code CLI, Qwen Work CN, WorkBuddy, and GitHub Copilot. This context is not message content: `workspace.*` and any inferred `git.*` fields remain available when `captureMessageContent` is `false` for the Agent.
 
 ## OpenClaw Session Key
 
