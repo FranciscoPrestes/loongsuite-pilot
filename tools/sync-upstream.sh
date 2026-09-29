@@ -40,7 +40,9 @@ ORIGIN="${SYNC_ORIGIN_REMOTE:-origin}"
 MIRROR="${SYNC_MIRROR_BRANCH:-main}"
 OURS="${SYNC_OURS_BRANCH:-NTConsult-main}"
 PR_BRANCHES="${SYNC_PR_BRANCHES:-feat/copilot-collector}"
-VERIFY_CMD="${SYNC_VERIFY_CMD:-npm run typecheck && env -u LOONGSUITE_PILOT_DATA_DIR npx vitest run tests/unit/inputs/copilot tests/unit/deployment tests/unit/hooks/copilot-hook-event-writer.test.ts}"
+# The tests run with a throwaway HOME: some upstream deployment tests write into the real
+# ~/.claude/settings.json (and other agent homes), which breaks the machine's own collection.
+VERIFY_CMD="${SYNC_VERIFY_CMD:-npm run typecheck && env -u LOONGSUITE_PILOT_DATA_DIR HOME=\"\$(mktemp -d)\" ./node_modules/.bin/vitest run tests/unit/inputs/copilot tests/unit/deployment tests/unit/hooks/copilot-hook-event-writer.test.ts}"
 
 DRY_RUN=0
 VERIFY=1

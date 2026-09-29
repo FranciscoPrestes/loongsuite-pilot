@@ -53,6 +53,20 @@ git merge main            # resolva os arquivos, git add, git commit
 bash tools/sync-upstream.sh   # roda de novo; sucesso limpa o aviso de falha
 ```
 
+## Cuidado ao rodar a suite de testes
+
+Alguns testes de deploy do upstream (`tests/unit/deployment/inject-command.test.ts` e vizinhos) gravam no
+`~/.claude/settings.json` real (variavel `env.LOONGSUITE_PILOT_DATA_DIR` apontando para uma pasta temporaria e
+hooks do Pilot removidos ou trocados). Isso **quebra a coleta da propria maquina** ate alguem consertar.
+Ha um PR aberto no original para isolar isso (alibaba/loongsuite-pilot#456). Ate ele entrar, rode a suite
+sempre com um HOME descartavel:
+
+```bash
+env -u LOONGSUITE_PILOT_DATA_DIR HOME="$(mktemp -d)" ./node_modules/.bin/vitest run
+```
+
+O `tools/sync-upstream.sh` ja faz isso no seu gate de verificacao.
+
 ## Testes dos scripts
 
 `bash tools/tests/sync-tools-test.sh` simula upstream, fork e clone em pasta temporaria (50 checagens).
