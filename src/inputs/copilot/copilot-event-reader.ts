@@ -7,7 +7,7 @@ const HEAD_READ_BYTES = 64 * 1024;
 const HEAD_MAX_LINES = 20;
 
 const EMPTY: ReadEventsResult = {
-  events: [], offsets: [], nextOffset: 0, truncated: false, malformed: 0,
+  events: [], offsets: [], nextOffset: 0, truncated: false, capped: false, malformed: 0,
 };
 
 function parseEvent(line: string): CopilotEvent | undefined {
@@ -49,7 +49,7 @@ function splitLines(buffer: Buffer, offset: number, chunkIsFull: boolean): ReadE
   if (lastNewline < 0) {
     // A single line larger than the whole chunk can never complete: skip it.
     return chunkIsFull
-      ? { ...EMPTY, nextOffset: offset + buffer.length, malformed: 1 }
+      ? { ...EMPTY, nextOffset: offset + buffer.length, malformed: 1, capped: true }
       : { ...EMPTY, nextOffset: offset };
   }
   const events: CopilotEvent[] = [];
@@ -70,7 +70,7 @@ function splitLines(buffer: Buffer, offset: number, chunkIsFull: boolean): ReadE
     }
     cursor = end + 1;
   }
-  return { events, offsets, nextOffset: offset + lastNewline + 1, truncated: false, malformed };
+  return { events, offsets, nextOffset: offset + lastNewline + 1, truncated: false, capped: chunkIsFull, malformed };
 }
 
 /** Facts from the first lines (session.start, auto_mode_resolved) that later spans still need. */

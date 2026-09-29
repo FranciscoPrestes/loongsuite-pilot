@@ -28,5 +28,7 @@ export interface ReadEventsResult {
   nextOffset: number;
   /** True when the file is now smaller than the requested offset. */
   truncated: boolean;
+  /** True when the read stopped at the per-read byte cap and more data remains. */
+  capped: boolean;
   malformed: number;
 }

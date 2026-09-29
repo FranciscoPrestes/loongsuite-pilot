@@ -178,3 +178,51 @@ describe('native tool result types', () => {
     expect(broken['gen_ai.tool.call.result']).toBe('{not json');
   });
 });
+
+describe('subagent isolation', () => {
+  function parentWithSubagent() {
+    resetFixtureIds();
+    return [
+      ev('user.message', { content: 'delegate', interactionId: 'i-1', messageId: 'm-1' }, T0),
+      ev('assistant.turn_start', { turnId: '0', interactionId: 'i-1' }, T0 + 10),
+      ev('assistant.message', {
+        messageId: 'am-1', content: '', model: 'model-a', apiCallId: 'api-1', turnId: '0', interactionId: 'i-1',
+        toolRequests: [{ toolCallId: 'call-p', name: 'task', arguments: { prompt: 'sub work' }, type: 'function' }],
+      }, T0 + 100),
+      ev('tool.execution_start', { toolCallId: 'call-p', toolName: 'task', arguments: { prompt: 'sub work' }, turnId: '0' }, T0 + 110),
+      // The subagent restarts native turn numbering at "0".
+      ev('assistant.turn_start', { turnId: '0', interactionId: 'i-1' }, T0 + 120),
+      ev('assistant.message', {
+        messageId: 'am-sub', content: 'sub answer', model: 'model-a', apiCallId: 'api-sub', turnId: '0',
+        interactionId: 'i-1', parentToolCallId: 'call-p',
+      }, T0 + 200),
+      ev('tool.execution_complete', { toolCallId: 'call-p', success: true, result: { content: 'sub done' }, turnId: '0' }, T0 + 300),
+      ev('assistant.turn_start', { turnId: '1', interactionId: 'i-1' }, T0 + 310),
+      ev('assistant.message', {
+        messageId: 'am-2', content: 'all done', model: 'model-a', apiCallId: 'api-2', turnId: '1', interactionId: 'i-1',
+      }, T0 + 400),
+    ];
+  }
+
+  it('keeps the parent request delta intact and never leaks it into the subagent', () => {
+    const entries = buildCopilotEvents(parentWithSubagent(), opts);
+    const requests = entries.filter(e => e['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(3);
+    const [parentFirst, subagent, parentSecond] = requests;
+    expect(subagent['gen_ai.agent.scope']).toBe('subagent');
+    expect(subagent['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(parentSecond['gen_ai.agent.scope']).toBeUndefined();
+    expect(parentSecond['gen_ai.input.messages_delta']).toEqual([
+      { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-p', name: 'task', arguments: { prompt: 'sub work' } }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-p', response: 'sub done' }] },
+    ]);
+    expect(parentFirst['gen_ai.turn.start']).toBe(true);
+  });
+
+  it('gives the subagent step a distinct step id and event ids', () => {
+    const entries = buildCopilotEvents(parentWithSubagent(), opts);
+    const requests = entries.filter(e => e['event.name'] === 'llm.request');
+    expect(new Set(requests.map(e => e['gen_ai.step.id'])).size).toBe(3);
+    expect(new Set(entries.map(e => e['event.id'])).size).toBe(entries.length);
+  });
+});

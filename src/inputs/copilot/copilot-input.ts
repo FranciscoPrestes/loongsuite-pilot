@@ -71,9 +71,13 @@ export class CopilotInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
-    await fs.mkdir(this.wakeupDir, { recursive: true });
     try {
-      this.watcher = fsSync.watch(this.wakeupDir, () => this.requestCollection());
+      await fs.mkdir(this.wakeupDir, { recursive: true });
+      const watcher = fsSync.watch(this.wakeupDir, () => this.requestCollection());
+      // A watcher error (for example EPERM when the directory disappears on Windows)
+      // must degrade to polling, never take the collector process down.
+      watcher.on('error', err => this.logger.debug('wakeup watcher error; polling only', { error: String(err) }));
+      this.watcher = watcher;
     } catch (err) {
       this.logger.warn('wakeup watch unavailable; polling only', { error: String(err) });
     }
@@ -125,10 +129,12 @@ export class CopilotInput extends BaseInput {
     }
   }
 
+  /** Consume wakeups without removing the directory: the watcher is attached to it. */
   private async clearWakeups(): Promise<void> {
     try {
-      await fs.rm(this.wakeupDir, { recursive: true, force: true });
       await fs.mkdir(this.wakeupDir, { recursive: true });
+      const names = await fs.readdir(this.wakeupDir);
+      await Promise.all(names.map(name => fs.rm(path.join(this.wakeupDir, name), { force: true })));
     } catch (err) {
       this.logger.debug('wakeup cleanup failed', { error: String(err) });
     }
@@ -139,11 +145,16 @@ export class CopilotInput extends BaseInput {
     file: string,
     checkpoint: SessionCheckpoint,
   ): Promise<SessionResult> {
-    if (checkpoint.closed) return { checkpoint, entries: [] };
     try {
       const { size } = await fs.stat(file);
+      if (checkpoint.closed && size <= checkpoint.size) return { checkpoint, entries: [] };
+      // Growth after a shutdown (Copilot resumes the same transcript) or after a
+      // "dead" close means the session is alive again.
+      const current = checkpoint.closed
+        ? { ...checkpoint, closed: false, lastGrowthMs: Date.now() }
+        : checkpoint;
       // A file smaller than what was already consumed was truncated or replaced.
-      const base = size < checkpoint.size ? freshCheckpoint() : checkpoint;
+      const base = size < current.size ? freshCheckpoint() : current;
       const now = Date.now();
       // Growth is judged on file size: the open interaction is re-read from its start,
       // so "no new events" would never be observable from the read itself.
@@ -158,6 +169,8 @@ export class CopilotInput extends BaseInput {
       }
       return await this.buildSession(id, file, base, read, size, now);
     } catch (err) {
+      // A session directory can exist before Copilot writes its first event.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { checkpoint, entries: [] };
       if (this.isUnreadableError(err)) await this.diagnoseUnreadablePath(file, 'event file');
       this.logger.warn('session read failed', { session: id, error: String(err) });
       return { checkpoint, entries: [] };
@@ -181,7 +194,10 @@ export class CopilotInput extends BaseInput {
     const emitted = new Set(base.emitted);
     const entries = [...beforeEntries, ...tailEntries].filter(e => !emitted.has(e['event.id']));
     const shutdown = read.events.some(e => e.type === 'session.shutdown');
-    const keepOpen = tailStartsInteraction && !shutdown;
+    // A capped read cannot see the whole open interaction: advance instead of re-reading
+    // the same first chunk forever.
+    if (read.capped) this.logger.warn('open interaction exceeds the per-read cap; continuing mid-interaction', { session: id });
+    const keepOpen = tailStartsInteraction && !shutdown && !read.capped;
     return {
       entries,
       checkpoint: {
@@ -190,7 +206,7 @@ export class CopilotInput extends BaseInput {
         emitted: keepOpen ? tailEntries.map(e => e['event.id']).slice(-MAX_EMITTED_IDS) : [],
         closed: shutdown,
         lastGrowthMs: now,
-        size: fileSize,
+        size: read.capped ? read.nextOffset : fileSize,
       },
     };
   }

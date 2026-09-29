@@ -1,11 +1,11 @@
-import { appendFile, mkdir, mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readdir, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CopilotInput } from '../../../../src/inputs/copilot/copilot-input.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
-import { shutdownEvent, T0, textOnlyTurn, toJsonl, toolTurn } from '../../../fixtures/copilot/events.js';
+import { ev, shutdownEvent, T0, textOnlyTurn, toJsonl, toolTurn } from '../../../fixtures/copilot/events.js';
 
 let root: string;
 let dataDir: string;
@@ -123,8 +123,32 @@ describe('CopilotInput', () => {
     ]));
     const entries = await run();
     expect(entries.filter(e => e['event.name'] === 'other')).toHaveLength(1);
-    await appendFile(file, '{"type":"user.message","id":"late","timestamp":"2026-01-01T00:00:10.000Z","parentId":null,"data":{"content":"x"}}\n');
     expect(await run()).toEqual([]);
+  });
+
+  it('resumes a session that was closed by shutdown when the host appends more', async () => {
+    const { run } = await makeInput();
+    await run();
+    const file = await sessionFile('s');
+    const first = toJsonl([
+      ...textOnlyTurn(),
+      shutdownEvent(T0 + 9_000, { 'model-a': { inputTokens: 5, outputTokens: 1 } }),
+    ]);
+    await writeFile(file, first);
+    await run();
+    // Copilot resumes the same transcript: a new interaction after the shutdown line.
+    const resumed = [
+      ev('session.resume', {}, T0 + 20_000),
+      ev('user.message', { content: 'again', interactionId: 'i-2', messageId: 'm-2' }, T0 + 21_000),
+      ev('assistant.turn_start', { turnId: '7', interactionId: 'i-2' }, T0 + 21_100),
+      ev('assistant.message', {
+        messageId: 'am-7', content: 'welcome back', model: 'model-a', apiCallId: 'api-7', turnId: '7', interactionId: 'i-2',
+      }, T0 + 22_000),
+    ];
+    await appendFile(file, toJsonl(resumed));
+    const entries = await run();
+    expect(entries.map(e => e['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(entries[0]['gen_ai.turn.id']).toBe('i-2');
   });
 
   it('tolerates a missing session-state directory', async () => {
@@ -141,8 +165,16 @@ describe('CopilotInput', () => {
     await run();
     // No growth on this cycle, grace 0 and no inuse lock: the session is closed.
     await run();
-    await appendFile(file, toJsonl(toolTurn().slice(2, 6)));
-    expect(await run()).toEqual([]);
+    // The host was only quiet, not dead: later growth must be collected again.
+    await appendFile(file, toJsonl([
+      ev('user.message', { content: 'wake', interactionId: 'i-9', messageId: 'm-9' }, T0 + 50_000),
+      ev('assistant.turn_start', { turnId: '9', interactionId: 'i-9' }, T0 + 50_100),
+      ev('assistant.message', {
+        messageId: 'am-9', content: 'up again', model: 'model-a', apiCallId: 'api-9', turnId: '9', interactionId: 'i-9',
+      }, T0 + 51_000),
+    ]));
+    const entries = await run();
+    expect(entries.map(e => e['event.name'])).toEqual(['llm.request', 'llm.response']);
   });
 
   it('keeps watching an idle session while its lock belongs to a live process', async () => {
@@ -170,5 +202,62 @@ describe('CopilotInput default home', () => {
       if (previous === undefined) delete process.env.COPILOT_HOME;
       else process.env.COPILOT_HOME = previous;
     }
+  });
+});
+
+describe('wakeup directory lifecycle', () => {
+  it('keeps the watched wakeup directory across cycles and consumes the wakeups', async () => {
+    const wakeupDir = path.join(dataDir, 'wakeups');
+    const { run } = await makeInput();
+    await mkdir(wakeupDir, { recursive: true });
+    await writeFile(path.join(wakeupDir, 'a.json'), '{}');
+    const before = (await stat(wakeupDir)).ino;
+    await run();
+    expect((await stat(wakeupDir)).ino).toBe(before);
+    await expect(readdir(wakeupDir)).resolves.toEqual([]);
+  });
+
+  it('survives an error event from the directory watcher', async () => {
+    const { input } = await makeInput();
+    await input.start();
+    const watcher = (input as unknown as { watcher: NodeJS.EventEmitter | null }).watcher;
+    expect(() => watcher?.emit('error', Object.assign(new Error('EPERM'), { code: 'EPERM' }))).not.toThrow();
+    await input.stop();
+  });
+});
+
+describe('robustness of session discovery', () => {
+  it('does not warn for a session directory that has no events.jsonl yet', async () => {
+    const { input, run } = await makeInput();
+    await run();
+    await mkdir(path.join(root, 'session-state', 'empty'), { recursive: true });
+    const warn = vi.spyOn((input as unknown as { logger: { warn: (...a: unknown[]) => void } }).logger, 'warn');
+    await run();
+    await run();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does not wedge on an open interaction larger than one read', async () => {
+    const { run } = await makeInput();
+    await run();
+    const file = await sessionFile('big');
+    const head = textOnlyTurn().slice(0, 3);
+    const filler = Array.from({ length: 220 }, (_, i) => ev('assistant.message', {
+      messageId: `f-${i}`, content: 'x'.repeat(50_000), model: 'model-a', apiCallId: `f-api-${i}`,
+      turnId: String(i), interactionId: 'i-1',
+    }, T0 + 5_000 + i));
+    const tail = [
+      ev('user.message', { content: 'second', interactionId: 'i-2', messageId: 'm-2' }, T0 + 9_000_000),
+      ev('assistant.turn_start', { turnId: '900', interactionId: 'i-2' }, T0 + 9_000_100),
+      ev('assistant.message', {
+        messageId: 'am-900', content: 'done', model: 'model-a', apiCallId: 'api-900', turnId: '900', interactionId: 'i-2',
+      }, T0 + 9_001_000),
+      shutdownEvent(T0 + 9_002_000, { 'model-a': { inputTokens: 5, outputTokens: 1 } }),
+    ];
+    await writeFile(file, toJsonl([...head, ...filler, ...tail]));
+    const seen: AgentActivityEntry[] = [];
+    for (let cycle = 0; cycle < 6; cycle++) seen.push(...await run());
+    expect(seen.some(e => e['event.name'] === 'llm.response' && e['gen_ai.turn.id'] === 'i-2')).toBe(true);
+    expect(seen.filter(e => e['event.name'] === 'other')).toHaveLength(1);
   });
 });

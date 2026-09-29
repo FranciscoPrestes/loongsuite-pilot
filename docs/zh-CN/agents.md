@@ -70,11 +70,15 @@ Prompt、工具输入或结果），用于立即触发采集。对 transcript �
   正常关闭（例如退出 VS Code；Reload Window 不会关闭它）。此时 Pilot 为每个模型
   上报一条 `event.name=other` 汇总，带 `agent.copilot.usage.scope=session`，
   以及输入、输出、缓存和推理 Token 总量。host 被杀或崩溃时，该会话不上报总量。
+  该汇总不属于任何 Turn，因此会进入 JSONL、SLS 和 HTTP 输出，但不会进入 OTLP
+  Trace 导出（转换器会丢弃不含输入消息的 `other` 事件）。若 Copilot 恢复已关闭的
+  会话并再次关闭，每次 `session.shutdown` 都会产生各自的汇总，请勿假定它们可累加。
 - 不输出 Copilot 系统提示词（`system.message`）。
 - 不回放安装 Pilot 之前的历史。
 
-终端 `copilot` 的支持情况见所安装版本的验证说明；轮询覆盖
-`~/.copilot/session-state` 下写入的所有会话。
+终端 `copilot`：尚未验证。它是否触发已安装的 Hook 未经测试，但轮询会采集
+`~/.copilot/session-state` 下写入的所有会话（为 Pilot 设置了 `$COPILOT_HOME`
+时则为 `$COPILOT_HOME/session-state`）。
 
 ## Grok Build 采集与生命周期
 

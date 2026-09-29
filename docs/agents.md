@@ -74,12 +74,17 @@ What is not collected, and why:
   VS Code; Reload Window does not close it). Pilot then emits one `event.name=other`
   summary per model with `agent.copilot.usage.scope=session` and the input, output,
   cache and reasoning token totals. If the host is killed or crashes, no totals are
-  reported for that session.
+  reported for that session. The summary has no turn, so it reaches JSONL, SLS and
+  HTTP outputs but not OTLP trace export, which discards `other` events that carry
+  no input messages. If Copilot resumes a closed session and closes it again, each
+  `session.shutdown` produces its own summaries; do not assume they are additive.
 - The Copilot system prompt (`system.message`) is never emitted.
 - History that predates installing Pilot is not replayed.
 
-Terminal `copilot` support: see the verification notes in the release you install;
-polling covers any session written under `~/.copilot/session-state`.
+Terminal `copilot`: not verified yet. Whether it fires the installed Hooks is
+untested, but polling collects any session written under
+`~/.copilot/session-state` (or `$COPILOT_HOME/session-state` when that variable is
+set for Pilot).
 
 ## Grok Build Collection And Lifecycle
 

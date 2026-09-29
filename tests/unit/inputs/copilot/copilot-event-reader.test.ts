@@ -62,6 +62,25 @@ describe('readEventsFrom', () => {
   });
 });
 
+describe('readEventsFrom byte cap', () => {
+  it('flags a capped read and resumes exactly where it stopped', async () => {
+    const line = JSON.stringify({ type: 'x.y', id: 'e', timestamp: '2026-01-01T00:00:00.000Z', parentId: null, data: { pad: 'p'.repeat(1_000) } }) + '\n';
+    const count = Math.ceil((9 * 1024 * 1024) / Buffer.byteLength(line));
+    await writeFile(file, line.repeat(count));
+    const first = await readEventsFrom(file, 0);
+    expect(first.capped).toBe(true);
+    expect(first.events.length).toBeLessThan(count);
+    const rest = await readEventsFrom(file, first.nextOffset);
+    expect(first.events.length + rest.events.length).toBe(count);
+    expect(rest.capped).toBe(false);
+  });
+
+  it('does not flag a small read as capped', async () => {
+    await writeFile(file, toJsonl(textOnlyTurn()));
+    expect((await readEventsFrom(file, 0)).capped).toBe(false);
+  });
+});
+
 describe('readSessionHead', () => {
   it('extracts cwd, selected model and auto model from the first lines', async () => {
     await writeFile(file, toJsonl(textOnlyTurn()));
