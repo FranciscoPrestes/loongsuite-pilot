@@ -65,6 +65,7 @@ function handle(ctx: Ctx, event: CopilotEvent, at: number): void {
     case 'assistant.message': emitStep(ctx, event, at); break;
     case 'tool.execution_start': emitToolCall(ctx, event, at); break;
     case 'tool.execution_complete': emitToolResult(ctx, event, at); break;
+    case 'session.shutdown': emitUsageSummary(ctx, event, at); break;
     default: break;
   }
 }
@@ -203,4 +204,33 @@ function emitToolResult(ctx: Ctx, event: CopilotEvent, at: number): void {
     role: 'tool', parts: [{ type: 'tool_call_response', id: callId, response: content ?? null }],
   }];
   ctx.tools.delete(callId);
+}
+
+const numeric = (v: unknown): number | undefined =>
+  (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
+
+/** One session-level `other` entry per model; only fields the source actually persists. */
+function emitUsageSummary(ctx: Ctx, event: CopilotEvent, at: number): void {
+  const metrics = obj(event.data.modelMetrics);
+  if (!metrics) return;
+  for (const [model, raw] of Object.entries(metrics)) {
+    const metric = obj(raw);
+    const usage = obj(metric?.usage);
+    if (!metric || !usage) continue;
+    const entry = baseEntry('other', { sessionId: ctx.opts.sessionId }, `usage:${event.id}:${model}`, at);
+    entry['gen_ai.response.model'] = model;
+    entry['agent.copilot.usage.scope'] = 'session';
+    const fields: Array<[string, number | undefined]> = [
+      ['gen_ai.usage.input_tokens', numeric(usage.inputTokens)],
+      ['gen_ai.usage.output_tokens', numeric(usage.outputTokens)],
+      ['gen_ai.usage.cache_read.input_tokens', numeric(usage.cacheReadTokens)],
+      ['gen_ai.usage.cache_creation.input_tokens', numeric(usage.cacheWriteTokens)],
+      ['agent.copilot.usage.reasoning_tokens', numeric(usage.reasoningTokens)],
+      ['agent.copilot.usage.nano_aiu', numeric(metric.totalNanoAiu)],
+    ];
+    for (const [key, value] of fields) {
+      if (value !== undefined) entry[key] = value;
+    }
+    push(ctx, entry);
+  }
 }
