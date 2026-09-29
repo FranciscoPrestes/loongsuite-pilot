@@ -132,6 +132,15 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN、WorkBuddy 和 GitHub Copilot。该上下文不属于消息内容；即使对应 Agent 配置了 `captureMessageContent: false`，`workspace.*` 和可推断的 `git.*` 字段也会保留。
 
+## GitHub Copilot 用量字段
+
+Copilot 的会话成本（`agent.copilot.usage.nano_aiu`、`premium_requests`、`source`、`scope`、`turn_id`）
+以及 Token 汇总上的按模型明细（`reasoning_tokens`、`model_nano_aiu`）没有对应的标准 `gen_ai.*` 字段。
+日志输出通常会丢弃 Agent 专属扩展属性（`agent.<agent>.<field>`），这些键与 OpenClaw session key 一样是例外：
+对于 `gen_ai.agent.type` 为 `copilot` 的事件，只有严格形如 `agent.copilot.usage.<field>` 的键会保留在
+JSONL、SLS 和 HTTP 输出中，其余 Agent 专属键仍会被丢弃。Token 数量和模型使用标准的
+`gen_ai.usage.*` 与 `gen_ai.*.model` 字段。
+
 ## System Instructions（系统提示词）
 
 `gen_ai.system_instructions` 在 `llm.request` 事件上以 `text` parts 数组承载 system prompt。它复用消息内容的既有管控（Opt-In 要求级别 + 各 agent 的 `captureMessageContent` + 脱敏管道），关闭内容采集时该字段整体缺失。

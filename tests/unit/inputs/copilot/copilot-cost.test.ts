@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildCopilotEvents, collectSessionCost } from '../../../../src/inputs/copilot/copilot-event-builder.js';
+import { projectLogEntry } from '../../../../src/normalization/entry-builder.js';
 import { checkpointEvent, ev, resetFixtureIds, shutdownEvent, T0, textOnlyTurn } from '../../../fixtures/copilot/events.js';
 
 const opts = { sessionId: 's-1' };
@@ -92,5 +93,22 @@ describe('collectSessionCost', () => {
     const events = [checkpointEvent(T0, 100, 1), shutdownEvent(T0 + 1, {}, { nanoAiu: 160, premiumRequests: 2 }), ev('user.message', { content: 'x' }, T0 + 2)];
     expect(collectSessionCost(events)).toEqual({ nanoAiu: 160, premiumRequests: 2 });
     expect(collectSessionCost([], { nanoAiu: 5 })).toEqual({ nanoAiu: 5 });
+  });
+});
+
+describe('what reaches the log outputs', () => {
+  it('keeps cost and premium requests after the JSONL/SLS projection instead of an empty other entry', () => {
+    const events = [...textOnlyTurn(), checkpointEvent(T0 + 3_000, 100, 1),
+      shutdownEvent(T0 + 9_000, { 'model-a': { inputTokens: 10, outputTokens: 1, reasoningTokens: 3, totalNanoAiu: 100 } }, { nanoAiu: 100, premiumRequests: 1 })];
+    const projected = buildCopilotEvents(events, opts)
+      .filter(e => e['event.name'] === 'other')
+      .map(e => projectLogEntry(e, { dropAgentScopedFields: true }));
+    const cost = projected.find(e => e['agent.copilot.usage.source'] === 'checkpoint')!;
+    expect(cost['agent.copilot.usage.nano_aiu']).toBe(100);
+    expect(cost['agent.copilot.usage.premium_requests']).toBe(1);
+    const tokens = projected.find(e => e['gen_ai.usage.input_tokens'] !== undefined)!;
+    expect(tokens['gen_ai.usage.output_tokens']).toBe(1);
+    expect(tokens['agent.copilot.usage.reasoning_tokens']).toBe(3);
+    expect(tokens['agent.copilot.usage.model_nano_aiu']).toBe(100);
   });
 });
