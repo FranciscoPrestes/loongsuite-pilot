@@ -18,6 +18,10 @@ export interface AutoUpdateConfig {
   checkIntervalMs: number;
   manifestUrl?: string;
   packageUrl?: string;
+  /** Mirror for the managed Node.js runtime; overrides the upstream OSS default. */
+  nodeDepsUrl?: string;
+  /** Mirror for the prebuilt node_modules archives. */
+  nodeModulesUrl?: string;
   installId?: string;
   canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
