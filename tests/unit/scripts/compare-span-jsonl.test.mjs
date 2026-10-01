@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { compareSpanJsonl, exitCodeFor } from '../../../tools/compare-span-jsonl.mjs';
 
 const ev = (id, attrs) => JSON.stringify({ 'event.id': id, 'event.name': 'llm.request', ...attrs });
@@ -123,6 +123,15 @@ describe('compareSpanJsonl per session', () => {
     expect(report.faltando).toHaveLength(1);
   });
 
+  it('ignores empty content strings like empty plain strings', () => {
+    const report = compareSpanJsonl({
+      jsonlLines: [evS('e1', 'A', { 'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: '' }] }] })],
+      spanLines: [],
+    });
+    expect(report.entradas).toBe(0);
+    expect(report.faltando).toEqual([]);
+  });
+
   it('counts events without session id and unparseable lines', () => {
     const report = compareSpanJsonl({
       jsonlLines: [ev('e1', { 'gen_ai.input.messages_delta': msgs('user', texto) }), '{quebrado'],
@@ -137,13 +146,22 @@ describe('compareSpanJsonl per session', () => {
 
 describe('exitCodeFor', () => {
   const ok = { exists: true, lines: 3 };
-  const rep = (o) => ({ entradas: 1, saidas: 1, faltando: [], ...o });
+  const rep = (o) => ({ entradas: 1, saidas: 1, entradasCompletas: 1, saidasCompletas: 1, inconclusivos: 0, faltando: [], ...o });
 
   it('is inconclusive (3) when a file is missing or empty or nothing was compared', () => {
     expect(exitCodeFor(rep(), { jsonl: { exists: false, lines: 0 }, spans: ok })).toBe(3);
     expect(exitCodeFor(rep(), { jsonl: ok, spans: { exists: true, lines: 0 } })).toBe(3);
     expect(exitCodeFor(rep({ entradas: 0 }), { jsonl: ok, spans: ok })).toBe(3);
     expect(exitCodeFor(rep({ saidas: 0 }), { jsonl: ok, spans: ok })).toBe(3);
+  });
+
+  it('is inconclusive (3) when anything is inconclusive or a side has no complete item', () => {
+    const f = { jsonl: ok, spans: ok };
+    expect(exitCodeFor(rep({ inconclusivos: 1 }), f)).toBe(3);
+    expect(exitCodeFor(rep({ entradasCompletas: 0, inconclusivos: 1 }), f)).toBe(3); // all inconclusive
+    expect(exitCodeFor(rep({ entradasCompletas: 0 }), f)).toBe(3);
+    expect(exitCodeFor(rep({ saidasCompletas: 0 }), f)).toBe(3);
+    expect(exitCodeFor(rep({ inconclusivos: 1, faltando: [{}] }), f)).toBe(1); // faltando wins
   });
 
   it('is 1 with missing content and 0 when conclusive and complete', () => {
@@ -155,10 +173,13 @@ describe('exitCodeFor', () => {
 describe('compare-span-jsonl CLI', () => {
   const script = path.resolve(__dirname, '../../../tools/compare-span-jsonl.mjs');
   const texto = 'texto longo o bastante para valer como evidência';
+  const dirs = [];
+  afterEach(() => { while (dirs.length) fs.rmSync(dirs.pop(), { recursive: true, force: true }); });
   const run = (dir, extra = []) =>
     spawnSync(process.execPath, [script, '--agent', 'fake', '--date', '2026-01-01', '--data-dir', dir, ...extra], { encoding: 'utf8' });
   const setup = ({ spans, events }) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cmp-span-'));
+    dirs.push(dir);
     fs.mkdirSync(path.join(dir, 'logs', 'output'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'logs', 'otlp-debug'), { recursive: true });
     if (events) fs.writeFileSync(path.join(dir, 'logs', 'output', 'fake-2026-01-01.jsonl'), events.join('\n') + '\n');
@@ -197,6 +218,20 @@ describe('compare-span-jsonl CLI', () => {
 
   it('exits 3 when there are no outputs to compare', () => {
     expect(run(setup({ spans: goodSpans, events: [events[0]] })).status).toBe(3);
+  });
+
+  it('exits 3 and explains when everything is inconclusive (short texts outside the session)', () => {
+    const curto = [
+      evS('a', 'S', { 'gen_ai.input.messages_delta': msgs('user', 'ok') }),
+      evS('b', 'S', { 'gen_ai.output.messages': msgs('assistant', 'sim') }),
+    ];
+    const outra = [spanS('OUTRA', {
+      'gen_ai.input.messages': JSON.stringify(msgs('user', 'ok')),
+      'gen_ai.output.messages': JSON.stringify(msgs('assistant', 'sim')),
+    })];
+    const r = run(setup({ spans: outra, events: curto }));
+    expect(r.status).toBe(3);
+    expect(r.stderr).toMatch(/inconclusiv/i);
   });
 
   it('exits 2 without --agent/--date', () => {

@@ -2,7 +2,7 @@
 // Verificação 5 da fase 0 (fork NTConsult): confere se os textos que o JSONL de eventos tem
 // (prompts, respostas, prompt de sistema) chegam inteiros aos spans do otlp-debug.
 // Compara texto cru com texto cru: cada parte de texto do evento precisa aparecer inteira
-// nos atributos gen_ai.* de algum span.
+// nos atributos gen_ai.* de um span da mesma sessão. Fontes conhecidas de falso FAIL: ver FALSOS_FALHAS.
 import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import * as os from 'node:os';
@@ -25,13 +25,20 @@ function textos(valor) {
     if (typeof x === 'string') { if (x.length > 0) out.push(x); return; }
     if (Array.isArray(x)) { x.forEach(visitar); return; }
     if (x && typeof x === 'object') {
-      if (typeof x.content === 'string') out.push(x.content);
+      if (typeof x.content === 'string') { if (x.content.length > 0) out.push(x.content); }
       else Object.entries(x).forEach(([k, val]) => { if (k !== 'role' && k !== 'type') visitar(val); }); // role/type são rótulos, não conteúdo
     }
   };
   visitar(v);
   return out;
 }
+
+// Fontes conhecidas de falso FAIL (o conversor derruba ou move dados antes do span):
+const FALSOS_FALHAS = [
+  'campos de string da mensagem fora de role/parts (ex.: name, id) são descartados pelo conversor',
+  'mensagens com `content` mas sem `parts` são descartadas pelo conversor (perda real: mantida como faltando)',
+  'mensagens de sistema do Grok são movidas para gen_ai.system_instructions (o corpus por sessão as cobre)',
+];
 
 const MIN_TEXTO = 20; // abaixo disso, um casamento fora da própria sessão não prova nada
 const NAO_COMPARADOS = ['gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'gen_ai.tool.definitions', 'agent.content'];
@@ -119,12 +126,25 @@ export function compareSpanJsonl({ jsonlLines, spanLines }) {
 }
 
 // files: { jsonl: { exists, lines }, spans: { exists, lines } }
-// 0 ok, 1 faltando, 3 nada foi comparado (inconclusivo).
+// Motivo pelo qual a comparação não prova nada (null quando é conclusiva).
+export function razaoInconclusivo(report, files) {
+  if (!files.jsonl.exists || files.jsonl.lines === 0) return 'arquivo de eventos (logs/output) ausente ou vazio';
+  if (!files.spans.exists || files.spans.lines === 0) return 'arquivo otlp-debug ausente ou vazio (só existe com otlpTrace.debug ligado)';
+  if (report.entradas === 0 || report.saidas === 0) return 'nenhuma entrada ou nenhuma saída foi comparada';
+  return null;
+}
+
+function razaoSemProva(report) {
+  if (report.inconclusivos > 0) return `${report.inconclusivos} comparação(ões) inconclusiva(s): texto curto casou só fora da própria sessão`;
+  if (report.entradasCompletas === 0 || report.saidasCompletas === 0) return 'nenhuma entrada ou nenhuma saída foi confirmada por inteiro';
+  return null;
+}
+
+// 0 ok, 1 faltando, 3 inconclusivo (nada comparado, ou sem prova suficiente).
 export function exitCodeFor(report, files) {
-  if (!files.jsonl.exists || files.jsonl.lines === 0) return 3;
-  if (!files.spans.exists || files.spans.lines === 0) return 3;
-  if (report.entradas === 0 || report.saidas === 0) return 3;
-  return report.faltando.length === 0 ? 0 : 1;
+  if (razaoInconclusivo(report, files)) return 3;
+  if (report.faltando.length > 0) return 1;
+  return razaoSemProva(report) ? 3 : 0;
 }
 
 async function lerLinhas(p, onLinha) {
@@ -171,10 +191,11 @@ async function main() {
   const code = exitCodeFor(report, files);
   console.log(JSON.stringify({
     jsonl, spans: spanFiles, arquivos: files, ...report, faltando: report.faltando.slice(0, 50),
+    avisos: FALSOS_FALHAS,
     aviso: 'otlp-debug é datado pela hora do flush: turno que cruza a meia-noite pode aparecer como falso "faltando" (use --include-next-day).',
   }, null, 2));
   if (code === 3) {
-    console.error('INCONCLUSIVO: nada foi comparado. Confira --agent/--date/--data-dir; o otlp-debug só existe com otlpTrace.debug ligado; é preciso haver entradas e saídas.');
+    console.error(`INCONCLUSIVO: ${razaoInconclusivo(report, files) ?? razaoSemProva(report)}. Confira --agent/--date/--data-dir.`);
   }
   process.exit(code);
 }
