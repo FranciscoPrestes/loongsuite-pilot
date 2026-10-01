@@ -4,6 +4,7 @@
 // Compara texto cru com texto cru: cada parte de texto do evento precisa aparecer inteira
 // nos atributos gen_ai.* de algum span.
 import * as fs from 'node:fs';
+import * as readline from 'node:readline';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,57 +26,157 @@ function textos(valor) {
     if (Array.isArray(x)) { x.forEach(visitar); return; }
     if (x && typeof x === 'object') {
       if (typeof x.content === 'string') out.push(x.content);
-      else Object.values(x).forEach(visitar);
+      else Object.entries(x).forEach(([k, val]) => { if (k !== 'role' && k !== 'type') visitar(val); }); // role/type são rótulos, não conteúdo
     }
   };
   visitar(v);
   return out;
 }
 
-export function compareSpanJsonl({ jsonlLines, spanLines }) {
-  // Texto cru dos atributos gen_ai.* dos spans (o valor do atributo é, ele mesmo, JSON em string).
-  const corpusSpans = spanLines
-    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(Boolean)
-    .flatMap((s) => Object.entries(s.attributes ?? {})
+const MIN_TEXTO = 20; // abaixo disso, um casamento fora da própria sessão não prova nada
+const NAO_COMPARADOS = ['gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'gen_ai.tool.definitions', 'agent.content'];
+
+function parseLinha(linha) {
+  try { return JSON.parse(linha); } catch { return null; }
+}
+
+// Corpus de textos dos spans, por sessão (gen_ai.session.id). Spans sem sessão herdam a
+// sessão de outro span do mesmo traceId; os que restam só entram no corpus global.
+export function createComparer() {
+  const global = new Set();
+  const porSessao = new Map();
+  const sessaoDoTrace = new Map();
+  const pendentes = [];
+  const invalidas = { eventos: 0, spans: 0 };
+  const report = {
+    entradas: 0, entradasCompletas: 0, saidas: 0, saidasCompletas: 0, sistema: 0, sistemaNoSpan: 0,
+    inconclusivos: 0, semSessao: 0, linhasInvalidas: invalidas, naoComparados: NAO_COMPARADOS, faltando: [],
+  };
+  const conjunto = (sessao) => {
+    if (!porSessao.has(sessao)) porSessao.set(sessao, new Set());
+    return porSessao.get(sessao);
+  };
+
+  function addSpanLine(linha) {
+    const s = parseLinha(linha);
+    if (!s || typeof s !== 'object') { invalidas.spans += 1; return; }
+    const attrs = s.attributes ?? {};
+    const textosSpan = Object.entries(attrs)
       .filter(([k]) => k.startsWith('gen_ai.'))
-      .flatMap(([, v]) => textos(v)))
-    .join('\u0000');
-  const report = { entradas: 0, entradasCompletas: 0, saidas: 0, saidasCompletas: 0, sistema: 0, sistemaNoSpan: 0, faltando: [] };
-  for (const linha of jsonlLines) {
-    let ev;
-    try { ev = JSON.parse(linha); } catch { continue; }
-    if (ev['event.name'] === 'agent.input') continue; // cópia de compatibilidade, fora do trace
+      .flatMap(([, v]) => textos(v));
+    textosSpan.forEach((t) => global.add(t));
+    const sessao = attrs['gen_ai.session.id'];
+    if (sessao) {
+      textosSpan.forEach((t) => conjunto(sessao).add(t));
+      if (s.traceId) sessaoDoTrace.set(s.traceId, sessao);
+    } else if (s.traceId) {
+      pendentes.push([s.traceId, textosSpan]);
+    }
+  }
+
+  function resolverPendentes() {
+    for (const [trace, ts] of pendentes.splice(0)) {
+      const sessao = sessaoDoTrace.get(trace);
+      if (sessao) ts.forEach((t) => conjunto(sessao).add(t));
+    }
+  }
+
+  function addEventLine(linha) {
+    resolverPendentes();
+    const ev = parseLinha(linha);
+    if (!ev || typeof ev !== 'object') { invalidas.eventos += 1; return; }
+    if (ev['event.name'] === 'agent.input') return; // cópia de compatibilidade, fora do trace
+    const sessao = ev['gen_ai.session.id'];
+    const proprio = sessao ? (porSessao.get(sessao) ?? new Set()) : global;
+    let contouSemSessao = false;
     for (const [campo, total, completos] of CAMPOS) {
       if (ev[campo] === undefined) continue;
       const partes = textos(ev[campo]);
       if (partes.length === 0) continue; // marcador estrutural sem conteúdo (ex.: delta [])
       report[total] += 1;
-      const inteiro = partes.every((t) => corpusSpans.includes(t));
-      if (inteiro) report[completos] += 1;
-      else report.faltando.push({ eventId: ev['event.id'], campo });
+      if (!sessao && !contouSemSessao) { report.semSessao += 1; contouSemSessao = true; }
+      let faltou = false;
+      let fraco = false;
+      for (const t of partes) {
+        if (proprio.has(t) && (sessao || t.length >= MIN_TEXTO)) continue;
+        if (global.has(t) && t.length < MIN_TEXTO) fraco = true;
+        else if (!proprio.has(t)) faltou = true;
+      }
+      if (faltou) report.faltando.push({ eventId: ev['event.id'], campo });
+      else if (fraco) report.inconclusivos += 1;
+      else report[completos] += 1;
     }
   }
-  return report;
+
+  return { addSpanLine, addEventLine, report: () => { resolverPendentes(); return report; } };
 }
 
-function main() {
-  const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) => {
-    if (a.startsWith('--')) acc.push([a.slice(2), all[i + 1]]);
+export function compareSpanJsonl({ jsonlLines, spanLines }) {
+  const c = createComparer();
+  spanLines.forEach(c.addSpanLine);
+  jsonlLines.forEach(c.addEventLine);
+  return c.report();
+}
+
+// files: { jsonl: { exists, lines }, spans: { exists, lines } }
+// 0 ok, 1 faltando, 3 nada foi comparado (inconclusivo).
+export function exitCodeFor(report, files) {
+  if (!files.jsonl.exists || files.jsonl.lines === 0) return 3;
+  if (!files.spans.exists || files.spans.lines === 0) return 3;
+  if (report.entradas === 0 || report.saidas === 0) return 3;
+  return report.faltando.length === 0 ? 0 : 1;
+}
+
+async function lerLinhas(p, onLinha) {
+  if (!fs.existsSync(p)) return { exists: false, lines: 0 };
+  let lines = 0;
+  const rl = readline.createInterface({ input: fs.createReadStream(p, { encoding: 'utf8' }), crlfDelay: Infinity });
+  for await (const l of rl) { if (l) { lines += 1; onLinha(l); } }
+  return { exists: true, lines };
+}
+
+function diaSeguinte(data) {
+  const d = new Date(`${data}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const args = Object.fromEntries(argv.reduce((acc, a, i, all) => {
+    if (a.startsWith('--') && a !== '--include-next-day') acc.push([a.slice(2), all[i + 1]]);
     return acc;
   }, []));
   if (!args.agent || !args.date) {
-    console.error('uso: compare-span-jsonl.mjs --agent <tipo> --date AAAA-MM-DD [--data-dir DIR] [--service NOME]');
+    console.error('uso: compare-span-jsonl.mjs --agent <tipo> --date AAAA-MM-DD [--data-dir DIR] [--service NOME] [--include-next-day]');
     process.exit(2);
   }
   const dataDir = args['data-dir'] ?? path.join(os.homedir(), '.loongsuite-pilot');
   const service = args.service ?? 'loongsuite-pilot';
-  const ler = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8').split('\n').filter(Boolean) : []);
   const jsonl = path.join(dataDir, 'logs', 'output', `${args.agent}-${args.date}.jsonl`);
-  const spans = path.join(dataDir, 'logs', 'otlp-debug', `${service}-${args.agent}-${args.date}.jsonl`);
-  const report = compareSpanJsonl({ jsonlLines: ler(jsonl), spanLines: ler(spans) });
-  console.log(JSON.stringify({ jsonl, spans, ...report, faltando: report.faltando.slice(0, 50) }, null, 2));
-  process.exit(report.faltando.length === 0 ? 0 : 1);
+  const debugPath = (dia) => path.join(dataDir, 'logs', 'otlp-debug', `${service}-${args.agent}-${dia}.jsonl`);
+  const spanFiles = [debugPath(args.date)];
+  if (argv.includes('--include-next-day')) spanFiles.push(debugPath(diaSeguinte(args.date)));
+
+  const c = createComparer();
+  const spans = { exists: false, lines: 0 };
+  for (const f of spanFiles) {
+    const r = await lerLinhas(f, c.addSpanLine);
+    spans.exists = spans.exists || r.exists;
+    spans.lines += r.lines;
+  }
+  const events = await lerLinhas(jsonl, c.addEventLine);
+  const report = c.report();
+  const files = { jsonl: events, spans };
+  const code = exitCodeFor(report, files);
+  console.log(JSON.stringify({
+    jsonl, spans: spanFiles, arquivos: files, ...report, faltando: report.faltando.slice(0, 50),
+    aviso: 'otlp-debug é datado pela hora do flush: turno que cruza a meia-noite pode aparecer como falso "faltando" (use --include-next-day).',
+  }, null, 2));
+  if (code === 3) {
+    console.error('INCONCLUSIVO: nada foi comparado. Confira --agent/--date/--data-dir; o otlp-debug só existe com otlpTrace.debug ligado; é preciso haver entradas e saídas.');
+  }
+  process.exit(code);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) main();
