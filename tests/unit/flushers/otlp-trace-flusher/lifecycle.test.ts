@@ -121,4 +121,39 @@ describe('OtlpTraceFlusher - lifecycle', () => {
 
     await flusher.shutdown();
   });
+
+  it('a turn sent by idle timeout reopens when new content arrives', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const flusher = new OtlpTraceFlusher({
+      ...makeConfig(),
+      turnIdleTimeoutMs: 100,
+      failedReplayIntervalMs: 0,
+    });
+
+    await flusher.send({
+      'event.name': 'llm.request',
+      'gen_ai.agent.type': 'claude-code',
+      'gen_ai.turn.id': 'long-tool-turn',
+    } as unknown as AgentActivityEntry);
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+
+    // The tool finishes after the idle flush: its result must not be dropped.
+    await flusher.send({
+      'event.name': 'tool.result',
+      'gen_ai.agent.type': 'claude-code',
+      'gen_ai.turn.id': 'long-tool-turn',
+    } as unknown as AgentActivityEntry);
+    await new Promise((r) => setTimeout(r, 1200));
+
+    expect(mockConvert).toHaveBeenCalledTimes(2);
+    const second = JSON.stringify(mockConvert.mock.calls[1]);
+    expect(second).toContain('tool.result');
+    expect(second).not.toContain('llm.request');
+
+    await flusher.shutdown();
+  });
 });

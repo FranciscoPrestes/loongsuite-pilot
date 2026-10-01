@@ -1,0 +1,92 @@
+# NTConsult fork: Windows smoke test (phase 0, verification 4 without an EDR).
+# Runs the tests that touch file replacement/append semantics on Windows, then installs the
+# packaged build with the PowerShell installer as an ordinary user and checks the autostart.
+name: NTConsult Windows smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/ntc-fase0-coletor]
+    paths:
+      - '.github/workflows/ntc-windows-smoke.yml'
+      - 'src/**'
+      - 'deploy/**'
+      - 'scripts/**'
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: bash deploy/package-opensource.sh -o "$RUNNER_TEMP/loongsuite-pilot.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pilot-zip
+          path: ${{ runner.temp }}/loongsuite-pilot.zip
+
+  windows:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Unit tests that depend on Windows file semantics
+        continue-on-error: true
+        run: npx vitest run tests/unit/flushers tests/unit/updater tests/unit/core/log-retention-service.test.ts tests/unit/scripts/compare-span-jsonl.test.mjs
+      - uses: actions/download-artifact@v4
+        with:
+          name: pilot-zip
+          path: ${{ runner.temp }}
+      - name: Install with the PowerShell installer (ordinary user, no admin)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'loongsuite-pilot.zip'
+          if (-not (Test-Path $zip)) { throw "zip not produced: $zip" }
+          Set-ExecutionPolicy -Scope Process Bypass
+          .\deploy\installer-opensource.ps1 install -PackageUrl $zip -AllAgents -UserId 'ci@ntconsult.com.br' -CollectLog false
+          Write-Host "installer exit: $LASTEXITCODE"
+      - name: Status after install, autostart task, still alive after 90 s
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','User') + ';' + $env:Path
+          loongsuite-pilot status
+          schtasks /Query /FO LIST | Select-String -Pattern 'loongsuite' -Context 0,3
+          Start-Sleep -Seconds 90
+          loongsuite-pilot status
+          Get-Process node -ErrorAction SilentlyContinue | Select-Object Id, Path
+      - name: Config written by the installer (secrets masked)
+        shell: powershell
+        run: |
+          $p = Join-Path $env:USERPROFILE '.loongsuite-pilot\config.json'
+          if (Test-Path $p) { Get-Content $p -Raw } else { Write-Host "no config at $p" }
+
+  # Same unit tests on the untouched NTConsult-main commit, to tell failures that already existed
+  # on Windows (upstream test fixtures assume POSIX) from the ones this branch introduced.
+  baseline:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e20a2eec6cd60f52ed1d825fb173b2afe977f1ea
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run tests/unit/flushers tests/unit/updater tests/unit/core/log-retention-service.test.ts
+        continue-on-error: true

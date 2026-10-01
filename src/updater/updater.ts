@@ -63,6 +63,19 @@ const MANAGED_NODE_MODULES_BASE = (
   process.env.LOONGSUITE_PILOT_NODE_MODULES_URL ??
   'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules'
 ).replace(/\/+$/, '');
+/** `config` already merges env first (config-loader: env wins over config.json), then
+ *  config.json; both win over the upstream defaults above. The installer writes the
+ *  config values because a launchd/systemd service does not inherit its environment. */
+export function resolveManagedDepsBases(config: AutoUpdateConfig): {
+  nodeDepsBase: string;
+  nodeModulesBase: string;
+} {
+  const trim = (u: string) => u.replace(/\/+$/, '');
+  return {
+    nodeDepsBase: trim(config.nodeDepsUrl ?? MANAGED_NODE_DEPS_BASE),
+    nodeModulesBase: trim(config.nodeModulesUrl ?? MANAGED_NODE_MODULES_BASE),
+  };
+}
 const MANAGED_NODE_DOWNLOAD_TIMEOUT_MS = 10 * 60_000; // mirrors installer curl --max-time 600
 const ARCHIVE_EXTRACT_TIMEOUT_MS = 2 * 60_000;
 
@@ -805,7 +818,7 @@ export class Updater {
 
       const ext = osName === 'win' ? 'zip' : 'tar.gz';
       const archive = `node-v${MANAGED_NODE_VERSION}-${osName}-${arch}.${ext}`;
-      const base = `${MANAGED_NODE_DEPS_BASE}/${MANAGED_NODE_VERSION}`;
+      const base = `${resolveManagedDepsBases(this.config).nodeDepsBase}/${MANAGED_NODE_VERSION}`;
       tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-node-'));
 
       logger.info('downloading managed node', { version: MANAGED_NODE_VERSION, os: osName, arch });
@@ -850,7 +863,7 @@ export class Updater {
     const modulesDir = path.join(versionDir, 'node_modules');
     const stamp = `${appVersion} ${osName} ${arch}`;
     const archive = `node-modules-${osName}-${arch}.tar.gz`;
-    const base = `${MANAGED_NODE_MODULES_BASE}/${appVersion}`;
+    const base = `${resolveManagedDepsBases(this.config).nodeModulesBase}/${appVersion}`;
     let tmp = '';
 
     try {

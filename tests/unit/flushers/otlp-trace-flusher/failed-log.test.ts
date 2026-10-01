@@ -18,7 +18,7 @@ function mockSpan() {
     },
     status: { code: 2, message: 'failed' },
     resource: { attributes: { 'service.name': 'test-pilot-claude-code' } },
-    events: [],
+    events: [{ name: 'gen_ai.choice', time: [1000, 500] as [number, number], attributes: { index: 0 } }],
     links: [],
     duration: [1, 0] as [number, number],
     ended: true,
@@ -38,6 +38,7 @@ describe('OtlpTraceFlusher failed-log lifecycle', () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     await cleanupTempDir(dataDir);
   });
 
@@ -125,5 +126,94 @@ describe('OtlpTraceFlusher failed-log lifecycle', () => {
       expect.stringMatching(/-2026-08-20\.jsonl$/),
       expect.stringMatching(/-2026-08-21\.jsonl$/),
     ]));
+  });
+
+  it('keeps span events in the failed log so a replay loses nothing', async () => {
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0,
+    });
+    await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'x' });
+    const failedDir = path.join(dataDir, 'logs', 'otlp-failed');
+    const [file] = (await fs.readdir(failedDir)).filter(f => f.endsWith('.jsonl'));
+    const rec = JSON.parse(await fs.readFile(path.join(failedDir, file), 'utf8'));
+    expect(rec.events).toEqual([{ name: 'gen_ai.choice', timeUnixNano: '1000000000500', attributes: { index: 0 } }]);
+  });
+
+  it('replayFailed() sends the failed log to the endpoint and clears it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { Authorization: 'Bearer k' } }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0,
+    });
+    await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'x' });
+    await flusher.replayFailed();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('http://localhost:4318/v1/traces');
+    const left = (await fs.readdir(path.join(dataDir, 'logs', 'otlp-failed'))).filter(f => f.endsWith('.jsonl'));
+    expect(left).toEqual([]);
+  });
+
+  it('shutdown() flushes promptly even when a replay request hangs, and aborts it', async () => {
+    let aborted = false;
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => {
+      init.signal!.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')); });
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0,
+    });
+    await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'x' });
+    const run = flusher.replayFailed();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const flushSpy = vi.spyOn(flusher, 'flush');
+    const started = Date.now();
+    await flusher.shutdown();
+    await run;
+    expect(flushSpy).toHaveBeenCalled();
+    expect(aborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect((flusher as any).replayTimer).toBeUndefined();
+    const failedDir = path.join(dataDir, 'logs', 'otlp-failed');
+    const files = (await fs.readdir(failedDir)).filter(f => f.endsWith('.jsonl'));
+    expect(files).toHaveLength(1);
+    expect((await fs.readFile(path.join(failedDir, files[0]), 'utf8')).trim().split('\n')).toHaveLength(1);
+  });
+
+  it('flush() waits for the failed-log writes of a failed export', async () => {
+    const failingExporter = {
+      export: (_spans: unknown, cb: (r: { code: number; error: Error }) => void) => cb({ code: 1, error: new Error('down') }),
+      shutdown: async () => undefined,
+      forceFlush: async () => undefined,
+    };
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0,
+    }, undefined, (() => failingExporter) as any);
+    const spans = Array.from({ length: 200 }, (_, i) => ({ ...mockSpan(), spanContext: () => ({ traceId: 'a'.repeat(32), spanId: i.toString(16).padStart(16, '0') }) }));
+    await flusher.exportSpansForAgent('claude-code', spans as any);
+    await flusher.flush();
+    expect((flusher as any).pendingFailedWrites.size).toBe(0);
+    const failedDir = path.join(dataDir, 'logs', 'otlp-failed');
+    const [file] = (await fs.readdir(failedDir)).filter(f => f.endsWith('.jsonl'));
+    expect((await fs.readFile(path.join(failedDir, file), 'utf8')).trim().split('\n')).toHaveLength(200);
   });
 });

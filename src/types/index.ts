@@ -18,6 +18,10 @@ export interface AutoUpdateConfig {
   checkIntervalMs: number;
   manifestUrl?: string;
   packageUrl?: string;
+  /** Mirror for the managed Node.js runtime; overrides the upstream OSS default. */
+  nodeDepsUrl?: string;
+  /** Mirror for the prebuilt node_modules archives. */
+  nodeModulesUrl?: string;
   installId?: string;
   canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
@@ -85,6 +89,7 @@ export interface OtlpTraceRawConfig {
   debug?: boolean;
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
+  failedReplayIntervalMs?: number;
   resourceAttributeKeys?: string[];
   /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
   spanAttributePassthroughPrefixes?: string[];
@@ -282,6 +287,8 @@ export interface OtlpTraceFlusherConfig {
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
+  /** Interval to resend logs/otlp-failed; 0 disables. Default 300000. */
+  failedReplayIntervalMs?: number;
   resourceAttributeKeys?: string[];
   /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
   spanAttributePassthroughPrefixes?: string[];

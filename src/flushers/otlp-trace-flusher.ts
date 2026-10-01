@@ -20,6 +20,7 @@ import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
+import { replayFailedSpans } from './otlp-failed-replayer.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -413,6 +414,8 @@ const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression
   new OTLPTraceExporter({ url, headers, compression });
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
+const DEFAULT_FAILED_REPLAY_INTERVAL_MS = 5 * 60_000;
+const REPLAY_SHUTDOWN_WAIT_MS = 2_000;
 const MAX_CONVERT_STATES = 64;
 const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.turn.id',
@@ -537,6 +540,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
+  private replayTimer?: ReturnType<typeof setInterval>;
+  private replaying = false;
+  private replayRun?: Promise<void>;
+  private stopping = false;
+  private replayAbort = new AbortController();
+  private readonly pendingFailedWrites = new Set<Promise<void>>();
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
@@ -600,6 +609,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
       this.idleTimer.unref();
+    }
+
+    const replayMs = cfg.failedReplayIntervalMs ?? DEFAULT_FAILED_REPLAY_INTERVAL_MS;
+    if (replayMs > 0) {
+      this.replayTimer = setInterval(() => { void this.replayFailed(); }, replayMs);
+      this.replayTimer.unref();
     }
 
     logger.info(
@@ -793,8 +808,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
       buf.completed = true;
     }
     await this.flushCompleted();
-    while (this.inFlightExports.size > 0) {
-      const batch = [...this.inFlightExports];
+    while (this.inFlightExports.size > 0 || this.pendingFailedWrites.size > 0) {
+      const batch = [...this.inFlightExports, ...this.pendingFailedWrites];
       await Promise.allSettled(batch);
     }
     this.flushedTurnKeys.clear();
@@ -805,8 +820,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
     }
-
+    // Final flush first: the CLI stop path gives SIGTERM only ~10 s before kill -9.
+    this.beginStopReplay();
     await this.flush();
+    await this.awaitReplayStopped();
 
     const exportShutdowns = [...this.agentExportStates.values()].flatMap(
       (s) => s.exporters.map((e) => e.exporter.shutdown()),
@@ -819,6 +836,54 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.agentExportStates.clear();
     this.agentConvertStates.clear();
     logger.info('OTLP trace flusher shut down');
+  }
+
+  /** Resends logs/otlp-failed for every endpoint. Never throws; one run at a time. */
+  async replayFailed(): Promise<void> {
+    if (this.replaying || this.stopping) return;
+    this.replaying = true;
+    this.replayRun = this.runReplay().finally(() => {
+      this.replaying = false;
+      this.replayRun = undefined;
+    });
+    await this.replayRun;
+  }
+
+  private async runReplay(): Promise<void> {
+    try {
+      for (const ep of this.endpoints) {
+        const r = await replayFailedSpans(
+          this.failedDir,
+          { name: ep.name, url: ep.url, headers: ep.headers },
+          undefined,
+          () => this.stopping,
+          this.replayAbort.signal,
+        );
+        if (r.sent > 0 || r.rejected > 0) logger.info('otlp-failed replay', { endpoint: ep.name, ...r });
+      }
+    } catch (err) {
+      logger.warn('otlp-failed replay error', { err: String(err) });
+    }
+  }
+
+  /** Stops the replay timer and aborts the in-flight request; the run then ends on its own. */
+  private beginStopReplay(): void {
+    this.stopping = true;
+    if (this.replayTimer) {
+      clearInterval(this.replayTimer);
+      this.replayTimer = undefined;
+    }
+    this.replayAbort.abort();
+  }
+
+  /** Short bounded wait so the aborted run can finish its atomic file bookkeeping. */
+  private async awaitReplayStopped(): Promise<void> {
+    const run = this.replayRun;
+    if (!run) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, REPLAY_SHUTDOWN_WAIT_MS); });
+    await Promise.race([run, bound]);
+    if (timer) clearTimeout(timer);
   }
 
   // --- Test seam ---
@@ -1225,10 +1290,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
           if (counter) counter.outFailed += spans.length;
           const errMsg = result.error?.message ?? 'unknown export error';
           logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
-          this.writeFailedLog(agentType, endpointName, spans, {
+          const write = this.writeFailedLog(agentType, endpointName, spans, {
             code: result.code,
             message: errMsg,
-          }).catch(() => undefined);
+          }).catch(() => undefined).finally(() => { this.pendingFailedWrites.delete(write); });
+          this.pendingFailedWrites.add(write);
         } else if (counter) {
           counter.outSpans += spans.length;
           counter.outBytes += batchBytes;
@@ -1896,7 +1962,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
         buf.completed = true;
-        this.triggerFlush(buf);
+        // Like the session-successor and memory-cap flushes: send what we have but keep
+        // the turn open, so content that arrives later (a long tool) is sent too.
+        this.triggerFlush(buf, false);
       }
     }
   }

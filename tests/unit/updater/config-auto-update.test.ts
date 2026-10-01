@@ -99,4 +99,42 @@ describe('buildAutoUpdateConfig', () => {
     expect(config.canaryPolicy).toBe('auto');
     expect(config.canaryHotfixVersion).toBe(3);
   });
+
+  it('stays disabled with manifestUrl alone (installer must also write packageUrl)', () => {
+    const config = buildAutoUpdateConfig({
+      autoUpdate: { manifestUrl: 'https://pilot.example/manifest/latest.json' },
+    });
+    expect(config.enabled).toBe(false);
+  });
+
+  it('enables with packageUrl + manifestUrl and keeps our manifest', () => {
+    const config = buildAutoUpdateConfig({
+      autoUpdate: {
+        manifestUrl: 'https://pilot.example/manifest/latest.json',
+        packageUrl: 'https://pilot.example/releases/1.9.0-ntc.1/loongsuite-pilot.tar.gz',
+      },
+    });
+    expect(config.enabled).toBe(true);
+    expect(config.manifestUrl).toBe('https://pilot.example/manifest/latest.json');
+  });
+
+  it('reads the deps mirror from the config file', () => {
+    const config = buildAutoUpdateConfig({
+      autoUpdate: {
+        packageUrl: 'https://pilot.example/p.tar.gz',
+        nodeDepsUrl: 'https://pilot.example/deps/node',
+        nodeModulesUrl: 'https://pilot.example/deps/node-modules',
+      },
+    });
+    expect(config.nodeDepsUrl).toBe('https://pilot.example/deps/node');
+    expect(config.nodeModulesUrl).toBe('https://pilot.example/deps/node-modules');
+  });
+
+  it('env deps URLs win over the config file', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_NODE_DEPS_URL', 'https://env.example/node');
+    const config = buildAutoUpdateConfig({
+      autoUpdate: { packageUrl: 'https://p/x.tar.gz', nodeDepsUrl: 'https://file.example/node' },
+    });
+    expect(config.nodeDepsUrl).toBe('https://env.example/node');
+  });
 });

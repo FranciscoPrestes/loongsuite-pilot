@@ -190,6 +190,7 @@ export interface ConfigFile {
     debug?: boolean;
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
+    failedReplayIntervalMs?: number;
     resourceAttributeKeys?: string[];
     spanAttributePassthroughPrefixes?: string[];
   };
@@ -208,6 +209,8 @@ export interface ConfigFile {
     checkIntervalMs?: number;
     manifestUrl?: string;
     packageUrl?: string;
+    nodeDepsUrl?: string;
+    nodeModulesUrl?: string;
   };
 
   fileCollection?: {
@@ -1053,6 +1056,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    failedReplayIntervalMs: otlp?.failedReplayIntervalMs,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),
@@ -1457,6 +1461,8 @@ export function buildAutoUpdateConfig(
     ),
     manifestUrl,
     packageUrl,
+    nodeDepsUrl: env('LOONGSUITE_PILOT_NODE_DEPS_URL') ?? file?.autoUpdate?.nodeDepsUrl,
+    nodeModulesUrl: env('LOONGSUITE_PILOT_NODE_MODULES_URL') ?? file?.autoUpdate?.nodeModulesUrl,
     installId: file?.installId,
     canaryPolicy: file?.canary?.policy,
     canaryHotfixVersion: file?.canary?.hotfix_version ?? 0,

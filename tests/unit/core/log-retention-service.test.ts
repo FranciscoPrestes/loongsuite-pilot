@@ -253,6 +253,26 @@ describe('LogRetentionService', () => {
       await expect(fs.readFile(legacy, 'utf8')).resolves.toBe('legacy\n');
     });
 
+    it('also expires a claimed (.replaying) OTLP file', async () => {
+      const otlpDir = path.join(tmpDir, 'logs', 'otlp-failed');
+      await fs.mkdir(otlpDir, { recursive: true });
+      const claimed = path.join(otlpDir, `svc-claude-code__ntc.replaying-${daysAgo(40)}.jsonl`);
+      await fs.writeFile(claimed, 'old\n');
+      const service = new LogRetentionService(tmpDir, makeConfig({ otlpFailedDays: 30 }));
+      await service.runCleanup();
+      await expect(fs.access(claimed)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('keeps 20-day-old failed spans when otlpFailedDays is 30 (installer value)', async () => {
+      const otlpDir = path.join(tmpDir, 'logs', 'otlp-failed');
+      await fs.mkdir(otlpDir, { recursive: true });
+      const offline = path.join(otlpDir, `svc-claude-code__ntc-${daysAgo(20)}.jsonl`);
+      await fs.writeFile(offline, 'x\n');
+      const service = new LogRetentionService(tmpDir, makeConfig({ otlpFailedDays: 30 }));
+      await service.runCleanup();
+      await expect(fs.readFile(offline, 'utf8')).resolves.toBe('x\n');
+    });
+
     it('cleans expired metric daily and legacy files without touching unknown or state files', async () => {
       const metricDir = path.join(tmpDir, 'logs', 'metric_alarm');
       await fs.mkdir(metricDir, { recursive: true });
