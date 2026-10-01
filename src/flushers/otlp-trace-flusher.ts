@@ -1952,7 +1952,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
         buf.completed = true;
-        this.triggerFlush(buf);
+        // Like the session-successor and memory-cap flushes: send what we have but keep
+        // the turn open, so content that arrives later (a long tool) is sent too.
+        this.triggerFlush(buf, false);
       }
     }
   }
