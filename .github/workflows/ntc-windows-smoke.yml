@@ -32,7 +32,6 @@ jobs:
   windows:
     needs: package
     runs-on: windows-latest
-    runs-on: windows-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
