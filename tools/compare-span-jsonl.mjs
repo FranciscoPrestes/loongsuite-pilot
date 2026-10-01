@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Verificação 5 da fase 0 (fork NTConsult): confere se os textos que o JSONL de eventos tem
 // (prompts, respostas, prompt de sistema) chegam inteiros aos spans do otlp-debug.
 // Compara texto cru com texto cru: cada parte de texto do evento precisa aparecer inteira
