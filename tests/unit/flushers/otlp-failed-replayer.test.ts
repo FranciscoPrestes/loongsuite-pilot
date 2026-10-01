@@ -130,4 +130,55 @@ describe('replayFailedSpans', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
     expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 1, rejected: 1, kept: 0 });
   });
+
+  it('leaves the claimed file untouched when nothing was sent (no rewrite while offline)', async () => {
+    await writeFailed('svc-a__ntc.replaying-2026-09-20.jsonl', 2);
+    const file = path.join(dir, 'svc-a__ntc.replaying-2026-09-20.jsonl');
+    const old = new Date('2026-09-20T00:00:00Z');
+    await fs.utimes(file, old, old);
+    const before = await fs.readFile(file, 'utf8');
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ENETUNREACH'));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 0, rejected: 0, kept: 2 });
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect((await fs.stat(file)).mtimeMs).toBe(old.getTime());
+    expect(await fs.readdir(dir)).toEqual(['svc-a__ntc.replaying-2026-09-20.jsonl']);
+  });
+
+  it('recovers a staging file left by a crash between the claim rename and the append', async () => {
+    await writeFailed('svc-a__ntc.replaying-2026-09-20.jsonl', 1, '', 0);
+    await writeFailed('svc-a__ntc.replaying-2026-09-20.jsonl.4242.1790000000000.tmp', 2, '', 10);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 3, rejected: 0, kept: 0 });
+    expect(await fs.readdir(dir)).toEqual([]);
+  });
+
+  it('recovers a staging file even when the claimed file is gone', async () => {
+    await writeFailed('svc-a__ntc.replaying-2026-09-20.jsonl.4242.1790000000000.tmp', 2);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 2, rejected: 0, kept: 0 });
+    expect(await fs.readdir(dir)).toEqual([]);
+  });
+
+  it('does not glue a new failure onto a claimed file whose last line is unterminated', async () => {
+    await fs.writeFile(path.join(dir, 'svc-a__ntc.replaying-2026-09-20.jsonl'), JSON.stringify(record(1)));
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 1, '', 10);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 2, rejected: 0, kept: 0 });
+  });
+
+  it('stops before the next request when shouldStop turns true and keeps the rest', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 3, 'x'.repeat(3 * MiB)); // requests: [2 spans], [1 span]
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    const result = await replayFailedSpans(dir, TARGET, fetchMock, () => fetchMock.mock.calls.length >= 1);
+    expect(result).toEqual({ sent: 2, rejected: 0, kept: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await fs.readdir(dir)).toEqual(['svc-a__ntc.replaying-2026-09-20.jsonl']);
+  });
+
+  it('counts kept only for the file being processed', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 2);
+    await writeFailed('svc-a__ntc-2026-09-21.jsonl', 3, '', 10);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 503 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 0, rejected: 0, kept: 2 });
+  });
 });

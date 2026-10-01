@@ -415,6 +415,7 @@ const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_FAILED_REPLAY_INTERVAL_MS = 5 * 60_000;
+const REPLAY_SHUTDOWN_WAIT_MS = 10_000;
 const MAX_CONVERT_STATES = 64;
 const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.turn.id',
@@ -541,6 +542,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private idleTimer?: ReturnType<typeof setInterval>;
   private replayTimer?: ReturnType<typeof setInterval>;
   private replaying = false;
+  private replayRun?: Promise<void>;
+  private stopping = false;
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
@@ -815,7 +818,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
     }
-    if (this.replayTimer) clearInterval(this.replayTimer);
+    await this.stopReplay();
 
     await this.flush();
 
@@ -834,18 +837,44 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   /** Resends logs/otlp-failed for every endpoint. Never throws; one run at a time. */
   async replayFailed(): Promise<void> {
-    if (this.replaying) return;
+    if (this.replaying || this.stopping) return;
     this.replaying = true;
+    this.replayRun = this.runReplay().finally(() => {
+      this.replaying = false;
+      this.replayRun = undefined;
+    });
+    await this.replayRun;
+  }
+
+  private async runReplay(): Promise<void> {
     try {
       for (const ep of this.endpoints) {
-        const r = await replayFailedSpans(this.failedDir, { name: ep.name, url: ep.url, headers: ep.headers });
+        const r = await replayFailedSpans(
+          this.failedDir,
+          { name: ep.name, url: ep.url, headers: ep.headers },
+          undefined,
+          () => this.stopping,
+        );
         if (r.sent > 0 || r.rejected > 0) logger.info('otlp-failed replay', { endpoint: ep.name, ...r });
       }
     } catch (err) {
       logger.warn('otlp-failed replay error', { err: String(err) });
-    } finally {
-      this.replaying = false;
     }
+  }
+
+  /** Stops the replay timer and waits (bounded) for the in-flight run to wind down. */
+  private async stopReplay(): Promise<void> {
+    this.stopping = true;
+    if (this.replayTimer) {
+      clearInterval(this.replayTimer);
+      this.replayTimer = undefined;
+    }
+    const run = this.replayRun;
+    if (!run) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => { timer = setTimeout(resolve, REPLAY_SHUTDOWN_WAIT_MS); });
+    await Promise.race([run, bound]);
+    if (timer) clearTimeout(timer);
   }
 
   // --- Test seam ---

@@ -38,6 +38,7 @@ describe('OtlpTraceFlusher failed-log lifecycle', () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     await cleanupTempDir(dataDir);
   });
 
@@ -160,6 +161,33 @@ describe('OtlpTraceFlusher failed-log lifecycle', () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe('http://localhost:4318/v1/traces');
     const left = (await fs.readdir(path.join(dataDir, 'logs', 'otlp-failed'))).filter(f => f.endsWith('.jsonl'));
     expect(left).toEqual([]);
-    vi.unstubAllGlobals();
+  });
+
+  it('shutdown() waits for the in-flight replay and stops it between batches', async () => {
+    let release!: () => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      release = () => resolve(new Response('{}', { status: 200 }));
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0,
+    });
+    await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'x' });
+    const run = flusher.replayFailed();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    let shutDown = false;
+    const down = flusher.shutdown().then(() => { shutDown = true; });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(shutDown).toBe(false);
+    release();
+    await down;
+    await run;
+    expect(shutDown).toBe(true);
+    expect((flusher as any).replayTimer).toBeUndefined();
   });
 });
