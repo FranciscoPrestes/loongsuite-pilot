@@ -89,6 +89,7 @@ export interface OtlpTraceRawConfig {
   debug?: boolean;
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
+  failedReplayIntervalMs?: number;
   resourceAttributeKeys?: string[];
   /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
   spanAttributePassthroughPrefixes?: string[];
@@ -286,6 +287,8 @@ export interface OtlpTraceFlusherConfig {
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
+  /** Interval to resend logs/otlp-failed; 0 disables. Default 300000. */
+  failedReplayIntervalMs?: number;
   resourceAttributeKeys?: string[];
   /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
   spanAttributePassthroughPrefixes?: string[];

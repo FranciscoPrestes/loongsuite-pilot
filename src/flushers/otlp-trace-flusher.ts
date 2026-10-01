@@ -20,6 +20,7 @@ import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
+import { replayFailedSpans } from './otlp-failed-replayer.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -413,6 +414,7 @@ const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression
   new OTLPTraceExporter({ url, headers, compression });
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
+const DEFAULT_FAILED_REPLAY_INTERVAL_MS = 5 * 60_000;
 const MAX_CONVERT_STATES = 64;
 const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
   'gen_ai.turn.id',
@@ -537,6 +539,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
+  private replayTimer?: ReturnType<typeof setInterval>;
+  private replaying = false;
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
@@ -600,6 +604,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
       this.idleTimer.unref();
+    }
+
+    const replayMs = cfg.failedReplayIntervalMs ?? DEFAULT_FAILED_REPLAY_INTERVAL_MS;
+    if (replayMs > 0) {
+      this.replayTimer = setInterval(() => { void this.replayFailed(); }, replayMs);
+      this.replayTimer.unref();
     }
 
     logger.info(
@@ -805,6 +815,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
     }
+    if (this.replayTimer) clearInterval(this.replayTimer);
 
     await this.flush();
 
@@ -819,6 +830,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.agentExportStates.clear();
     this.agentConvertStates.clear();
     logger.info('OTLP trace flusher shut down');
+  }
+
+  /** Resends logs/otlp-failed for every endpoint. Never throws; one run at a time. */
+  async replayFailed(): Promise<void> {
+    if (this.replaying) return;
+    this.replaying = true;
+    try {
+      for (const ep of this.endpoints) {
+        const r = await replayFailedSpans(this.failedDir, { name: ep.name, url: ep.url, headers: ep.headers });
+        if (r.sent > 0 || r.rejected > 0) logger.info('otlp-failed replay', { endpoint: ep.name, ...r });
+      }
+    } catch (err) {
+      logger.warn('otlp-failed replay error', { err: String(err) });
+    } finally {
+      this.replaying = false;
+    }
   }
 
   // --- Test seam ---

@@ -18,7 +18,7 @@ function mockSpan() {
     },
     status: { code: 2, message: 'failed' },
     resource: { attributes: { 'service.name': 'test-pilot-claude-code' } },
-    events: [],
+    events: [{ name: 'gen_ai.choice', time: [1000, 500] as [number, number], attributes: { index: 0 } }],
     links: [],
     duration: [1, 0] as [number, number],
     ended: true,
@@ -125,5 +125,41 @@ describe('OtlpTraceFlusher failed-log lifecycle', () => {
       expect.stringMatching(/-2026-08-20\.jsonl$/),
       expect.stringMatching(/-2026-08-21\.jsonl$/),
     ]));
+  });
+
+  it('keeps span events in the failed log so a replay loses nothing', async () => {
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0,
+    });
+    await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'x' });
+    const failedDir = path.join(dataDir, 'logs', 'otlp-failed');
+    const [file] = (await fs.readdir(failedDir)).filter(f => f.endsWith('.jsonl'));
+    const rec = JSON.parse(await fs.readFile(path.join(failedDir, file), 'utf8'));
+    expect(rec.events).toEqual([{ name: 'gen_ai.choice', timeUnixNano: '1000000000500', attributes: { index: 0 } }]);
+  });
+
+  it('replayFailed() sends the failed log to the endpoint and clears it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { Authorization: 'Bearer k' } }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0,
+    });
+    await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'x' });
+    await flusher.replayFailed();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('http://localhost:4318/v1/traces');
+    const left = (await fs.readdir(path.join(dataDir, 'logs', 'otlp-failed'))).filter(f => f.endsWith('.jsonl'));
+    expect(left).toEqual([]);
+    vi.unstubAllGlobals();
   });
 });

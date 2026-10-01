@@ -1,0 +1,133 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import { cleanupTempDir, createTempDir } from '../../helpers/fixture-builder.js';
+import { replayFailedSpans, toOtlpJsonRequest } from '../../../src/flushers/otlp-failed-replayer.js';
+
+const TARGET = { name: 'ntc', url: 'https://beat.example/api/ingest/otlp/v1/traces', headers: { Authorization: 'Bearer k' } };
+const MiB = 1024 * 1024;
+
+function record(i: number, pad = '') {
+  return {
+    traceId: 'a'.repeat(32), spanId: i.toString(16).padStart(16, '0'), name: `span-${i}`, kind: 0,
+    startTimeUnixNano: '1000000000', endTimeUnixNano: '2000000000',
+    attributes: { 'gen_ai.input.messages': `prompt ${i}${pad}`, 'gen_ai.usage.input_tokens': 12, ratio: 0.5, ok: true },
+    status: { code: 0 },
+    resource: { 'service.name': 'loongsuite-pilot' },
+    events: [{ name: 'e', timeUnixNano: '1500000000', attributes: { k: 'v' } }],
+    _error: { code: 1, message: 'ECONNREFUSED' },
+  };
+}
+
+function spansIn(init: RequestInit): number {
+  const body = JSON.parse(gunzipSync(init.body as Buffer).toString('utf8'));
+  return body.resourceSpans.flatMap((rs: any) => rs.scopeSpans.flatMap((ss: any) => ss.spans)).length;
+}
+
+let dir: string;
+beforeEach(async () => { dir = await createTempDir('otlp-replay-'); });
+afterEach(async () => { await cleanupTempDir(dir); });
+
+async function writeFailed(name: string, n: number, pad = '', from = 0) {
+  const lines = Array.from({ length: n }, (_, i) => JSON.stringify(record(from + i, pad))).join('\n') + '\n';
+  await fs.writeFile(path.join(dir, name), lines);
+}
+
+describe('toOtlpJsonRequest', () => {
+  it('builds a valid OTLP/JSON body with typed attributes and events', () => {
+    const body: any = toOtlpJsonRequest([record(1)]);
+    const rs = body.resourceSpans[0];
+    expect(rs.resource.attributes).toEqual([{ key: 'service.name', value: { stringValue: 'loongsuite-pilot' } }]);
+    const span = rs.scopeSpans[0].spans[0];
+    expect(span.kind).toBe(1); // SDK INTERNAL(0) -> OTLP SPAN_KIND_INTERNAL(1)
+    expect(span.attributes).toContainEqual({ key: 'gen_ai.usage.input_tokens', value: { intValue: '12' } });
+    expect(span.attributes).toContainEqual({ key: 'ratio', value: { doubleValue: 0.5 } });
+    expect(span.attributes).toContainEqual({ key: 'ok', value: { boolValue: true } });
+    expect(span.events[0]).toEqual({ name: 'e', timeUnixNano: '1500000000', attributes: [{ key: 'k', value: { stringValue: 'v' } }] });
+    expect(JSON.stringify(body)).not.toContain('_error');
+  });
+});
+
+describe('replayFailedSpans', () => {
+  it('sends every span of the endpoint files gzipped and removes them', async () => {
+    await writeFailed('loongsuite-pilot-claude-code__ntc-2026-09-20.jsonl', 3);
+    await writeFailed('loongsuite-pilot-claude-code__other-2026-09-20.jsonl', 2);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    const result = await replayFailedSpans(dir, TARGET, fetchMock);
+    expect(result).toEqual({ sent: 3, rejected: 0, kept: 0 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(TARGET.url);
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer k', 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' });
+    expect(spansIn(init)).toBe(3);
+    expect(await fs.readdir(dir)).toEqual(['loongsuite-pilot-claude-code__other-2026-09-20.jsonl']);
+  });
+
+  it('splits large spans into requests of at most 8 MiB raw and sends them all', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 5, 'x'.repeat(3 * MiB));
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 5, rejected: 0, kept: 0 });
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(gunzipSync(init.body as Buffer).length).toBeLessThanOrEqual(9 * MiB);
+    }
+  });
+
+  it('halves a batch on 413 instead of dropping it', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 4);
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) =>
+      new Response('', { status: spansIn(init) > 1 ? 413 : 200 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 4, rejected: 0, kept: 0 });
+  });
+
+  it('rejects only a single span that is too large on its own', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 1);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 413 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 0, rejected: 1, kept: 0 });
+    expect(await fs.readdir(path.join(dir, 'rejected'))).toEqual(['svc-a__ntc-2026-09-20.jsonl']);
+  });
+
+  it('moves the batch to rejected/ on 400', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 2);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 400 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 0, rejected: 2, kept: 0 });
+  });
+
+  it('keeps unsent spans on network error and does not resend accepted ones', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 3, 'x'.repeat(3 * MiB)); // requests: [2 spans], [1 span]
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('{}', { status: 200 }))
+      .mockRejectedValueOnce(new Error('ENETUNREACH'));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 2, rejected: 0, kept: 1 });
+    const files = await fs.readdir(dir);
+    expect(files).toEqual(['svc-a__ntc.replaying-2026-09-20.jsonl']);
+    const left = (await fs.readFile(path.join(dir, files[0]), 'utf8')).trim().split('\n');
+    expect(left.map((l) => JSON.parse(l).spanId)).toEqual([(2).toString(16).padStart(16, '0')]);
+
+    const ok = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    expect(await replayFailedSpans(dir, TARGET, ok)).toEqual({ sent: 1, rejected: 0, kept: 0 });
+    expect(await fs.readdir(dir)).toEqual([]);
+  });
+
+  it('merges a new failure of the same day into a half-sent claimed file without losing either', async () => {
+    await writeFailed('svc-a__ntc.replaying-2026-09-20.jsonl', 2, '', 0);
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 3, '', 10);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 5, rejected: 0, kept: 0 });
+    expect(fetchMock.mock.calls.reduce((n, [, init]) => n + spansIn(init), 0)).toBe(5);
+    expect(await fs.readdir(dir)).toEqual([]);
+  });
+
+  it.each([401, 403, 429, 503])('keeps the file on %i (key rotated / backend busy)', async (status) => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 2);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 0, rejected: 0, kept: 2 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips unparseable lines into rejected/ and sends the rest', async () => {
+    await fs.writeFile(path.join(dir, 'svc-a__ntc-2026-09-20.jsonl'), `${JSON.stringify(record(1))}\n{broken\n`);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 1, rejected: 1, kept: 0 });
+  });
+});

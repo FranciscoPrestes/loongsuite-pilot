@@ -18,6 +18,11 @@ export function createReadableSpanToOtlpSpanJsonArray(spans: ReadableSpan[]): st
       attributes: span.attributes,
       status: span.status,
       resource: span.resource?.attributes,
+      events: (span.events ?? []).map((e) => ({
+        name: e.name,
+        timeUnixNano: hrTimeToNano(e.time),
+        attributes: e.attributes ?? {},
+      })),
     };
     return JSON.stringify(obj);
   });
