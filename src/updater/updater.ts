@@ -63,8 +63,9 @@ const MANAGED_NODE_MODULES_BASE = (
   process.env.LOONGSUITE_PILOT_NODE_MODULES_URL ??
   'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules'
 ).replace(/\/+$/, '');
-/** Config (written by the installer) wins over the env/upstream defaults above:
- *  a launchd/systemd service does not inherit the installer's environment. */
+/** `config` already merges env first (config-loader: env wins over config.json), then
+ *  config.json; both win over the upstream defaults above. The installer writes the
+ *  config values because a launchd/systemd service does not inherit its environment. */
 export function resolveManagedDepsBases(config: AutoUpdateConfig): {
   nodeDepsBase: string;
   nodeModulesBase: string;

@@ -118,7 +118,7 @@ describe('replayFailedSpans', () => {
     expect(await fs.readdir(dir)).toEqual([]);
   });
 
-  it.each([401, 403, 429, 503])('keeps the file on %i (key rotated / backend busy)', async (status) => {
+  it.each([401, 403, 404, 405, 408, 410, 415, 422, 429, 503])('keeps the file and stops the run on %i', async (status) => {
     await writeFailed('svc-a__ntc-2026-09-20.jsonl', 2);
     const fetchMock = vi.fn().mockResolvedValue(new Response('', { status }));
     expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 0, rejected: 0, kept: 2 });
@@ -180,5 +180,20 @@ describe('replayFailedSpans', () => {
     await writeFailed('svc-a__ntc-2026-09-21.jsonl', 3, '', 10);
     const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 503 }));
     expect(await replayFailedSpans(dir, TARGET, fetchMock)).toEqual({ sent: 0, rejected: 0, kept: 2 });
+  });
+
+  it('aborts the request in flight and keeps the file consistent', async () => {
+    await writeFailed('svc-a__ntc-2026-09-20.jsonl', 2);
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => {
+      init.signal!.addEventListener('abort', () => reject(new Error('aborted')));
+    }));
+    const run = replayFailedSpans(dir, TARGET, fetchMock, undefined, controller.signal);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    controller.abort();
+    expect(await run).toEqual({ sent: 0, rejected: 0, kept: 2 });
+    const files = await fs.readdir(dir);
+    expect(files).toEqual(['svc-a__ntc.replaying-2026-09-20.jsonl']);
+    expect((await fs.readFile(path.join(dir, files[0]), 'utf8')).trim().split('\n')).toHaveLength(2);
   });
 });

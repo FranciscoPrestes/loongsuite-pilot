@@ -35,11 +35,6 @@ const MAX_REQUEST_RAW_BYTES = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60_000;
 const CLAIM_TAG = '.replaying';
 
-/** 401/403 stay: the setup skill may re-enrol the machine with a new key. */
-function isRetryable(status: number): boolean {
-  return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
-}
-
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -105,14 +100,14 @@ function batchesBySize(items: Item[]): Item[][] {
 }
 
 /** Returns the HTTP status, or null on a network error/timeout. */
-async function post(target: ReplayTarget, fetchImpl: FetchLike, batch: Item[]): Promise<number | null> {
+async function post(target: ReplayTarget, fetchImpl: FetchLike, batch: Item[], abort?: AbortSignal): Promise<number | null> {
   try {
     const body = gzipSync(JSON.stringify(toOtlpJsonRequest(batch.map((b) => b.rec))));
     const resp = await fetchImpl(target.url, {
       method: 'POST',
       headers: { ...target.headers, 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
       body,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: abort ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), abort]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     return resp.status;
   } catch {
@@ -178,12 +173,14 @@ async function rewriteClaimed(claimedPath: string, lines: string[]): Promise<voi
  *  was accepted or rejected. Lines not accepted yet stay in the claimed file (rewritten
  *  atomically, and only if something changed). On the first retryable failure the run
  *  stops; `kept` counts the unsent lines of the file being processed at that point.
- *  `shouldStop` is checked before each request so a shutdown can end the run cleanly. */
+ *  `shouldStop` is checked before each request and `abort` cancels the one in flight (the
+ *  aborted request counts as a network error, so the file stays), for a clean shutdown. */
 export async function replayFailedSpans(
   failedDir: string,
   target: ReplayTarget,
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
   shouldStop?: () => boolean,
+  abort?: AbortSignal,
 ): Promise<ReplayResult> {
   const result: ReplayResult = { sent: 0, rejected: 0, kept: 0 };
   const safe = target.name.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -226,14 +223,17 @@ export async function replayFailedSpans(
     const pending = batchesBySize(parsed);
     while (pending.length > 0) {
       const batch = pending.shift()!;
-      const status = shouldStop?.() ? null : await post(target, fetchImpl, batch);
+      const status = shouldStop?.() ? null : await post(target, fetchImpl, batch, abort);
       if (status !== null && status >= 200 && status < 300) {
         result.sent += batch.length;
         changed = true;
       } else if (status === 413 && batch.length > 1) {
         const mid = Math.ceil(batch.length / 2);
         pending.unshift(batch.slice(0, mid), batch.slice(mid));
-      } else if (status !== null && !isRetryable(status)) {
+      } else if (status === 400 || status === 413) {
+        // Only a malformed batch (400) or a single span too large on its own (413,
+        // batches of more than one were halved above) is quarantined. Everything
+        // else (401/403 key rotation, 404/415/422 misrouting, 5xx, network) stays.
         await appendRejected(failedDir, claimed, batch.map((b) => b.line));
         result.rejected += batch.length;
         changed = true;
