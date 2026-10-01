@@ -14,7 +14,24 @@ on:
       - 'scripts/**'
 
 jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: bash deploy/package-opensource.sh -o "$RUNNER_TEMP/loongsuite-pilot.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pilot-zip
+          path: ${{ runner.temp }}/loongsuite-pilot.zip
+
   windows:
+    needs: package
+    runs-on: windows-latest
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -29,11 +46,10 @@ jobs:
       - name: Unit tests that depend on Windows file semantics
         continue-on-error: true
         run: npx vitest run tests/unit/flushers tests/unit/updater tests/unit/core/log-retention-service.test.ts tests/unit/scripts/compare-span-jsonl.test.mjs
-      - name: Package (tar.gz + zip)
-        shell: bash
-        run: |
-          bash deploy/package-opensource.sh -o "$RUNNER_TEMP/loongsuite-pilot.tar.gz" --skip-build
-          ls -la "$RUNNER_TEMP"
+      - uses: actions/download-artifact@v4
+        with:
+          name: pilot-zip
+          path: ${{ runner.temp }}
       - name: Install with the PowerShell installer (ordinary user, no admin)
         shell: powershell
         run: |
