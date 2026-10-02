@@ -21,10 +21,10 @@ if [ "$#" -ne 2 ]; then
 fi
 VERSION="$1"
 DEST="$2"
-case "$VERSION" in
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "mirror-node: version must look like 22.22.2" >&2; exit 2 ;;
-esac
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "mirror-node: version must look like 22.22.2 (got '$VERSION')" >&2
+  exit 2
+fi
 
 BASE_URL="https://nodejs.org/dist/v${VERSION}"
 TARGETS="darwin-arm64 darwin-x64 linux-x64 linux-arm64 win-x64"
@@ -53,41 +53,59 @@ archive_name() {
 }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+PENDING=""
+cleanup() {
+  rm -rf "$TMP"
+  [ -z "$PENDING" ] || rm -f $PENDING
+}
+trap cleanup EXIT
 
-curl -fsSL "${BASE_URL}/SHASUMS256.txt" -o "$TMP/SHASUMS256.txt"
+fetch() {
+  curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 "$1" -o "$2"
+}
+
+fetch "${BASE_URL}/SHASUMS256.txt" "$TMP/SHASUMS256.txt"
 
 OUT="${DEST%/}/${VERSION}"
 mkdir -p "$OUT"
 
-# Copy src to dst unless dst already exists; an existing file must be identical.
-place() {
-  local src="$1" dst="$2"
-  if [ -e "$dst" ]; then
-    if [ "$(sha256_of "$src")" = "$(sha256_of "$dst")" ]; then
-      echo "mirror-node: $(basename "$dst") already present, identical"
-      return 0
-    fi
-    echo "mirror-node: refusing to overwrite $dst with different content" >&2
-    return 1
-  fi
-  cp "$src" "$dst"
-}
-
+# Phase 1: download and verify everything against the official list. Nothing is
+# written to the destination until every archive has passed.
 for os_arch in $TARGETS; do
   name="$(archive_name "$os_arch")"
   expected="$(awk -v n="$name" '$2 == n {print $1}' "$TMP/SHASUMS256.txt")"
   [ -n "$expected" ] || { echo "mirror-node: SHASUMS256.txt has no entry for $name" >&2; exit 1; }
   echo "mirror-node: downloading $name"
-  curl -fsSL "${BASE_URL}/${name}" -o "$TMP/$name"
+  fetch "${BASE_URL}/${name}" "$TMP/$name"
   actual="$(sha256_of "$TMP/$name")"
   if [ "$actual" != "$expected" ]; then
     echo "mirror-node: checksum mismatch for $name" >&2
     exit 1
   fi
-  place "$TMP/$name" "$OUT/$name"
 done
 
-# SHASUMS256.txt is the official file, served as-is for the installer to verify.
-place "$TMP/SHASUMS256.txt" "$OUT/SHASUMS256.txt"
+# Phase 2: refuse up front if any existing destination file differs.
+NAMES=""
+for os_arch in $TARGETS; do NAMES="$NAMES $(archive_name "$os_arch")"; done
+NAMES="$NAMES SHASUMS256.txt"
+for name in $NAMES; do
+  dst="$OUT/$name"
+  if [ -e "$dst" ] && [ "$(sha256_of "$TMP/$name")" != "$(sha256_of "$dst")" ]; then
+    echo "mirror-node: refusing to overwrite $dst with different content" >&2
+    exit 1
+  fi
+done
+
+# Phase 3: place atomically (tmp + mv); SHASUMS256.txt goes last.
+for name in $NAMES; do
+  dst="$OUT/$name"
+  if [ -e "$dst" ]; then
+    echo "mirror-node: $name already present, identical"
+    continue
+  fi
+  PENDING="$dst.tmp.$$"
+  cp "$TMP/$name" "$PENDING"
+  mv "$PENDING" "$dst"
+  PENDING=""
+done
 echo "mirror-node: done -> $OUT"
