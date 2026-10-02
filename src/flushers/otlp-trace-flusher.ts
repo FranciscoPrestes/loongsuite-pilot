@@ -100,11 +100,14 @@ function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentA
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
-// Cap on turns whose unpaired calls are held across an early flush. Held
-// records of a truly abandoned turn live until this cap evicts them (oldest
-// first) or the final/shutdown flush drops them. No age-based expiry: a long
-// tool (e.g. `sleep 600`) legitimately outlives the idle timeout.
+// Bounds on unpaired calls held across an early flush. A truly abandoned
+// turn's held records are discarded (oldest first) by the turn cap, the byte
+// ceiling, the TTL sweep on the idle tick, or the final/shutdown flush. The
+// TTL is far beyond the idle timeout so a long tool (e.g. `sleep 600`) still
+// pairs with its call when the result arrives.
 const MAX_HELD_ORPHAN_TURNS = MAX_TURN_BUFFERS;
+const HELD_ORPHAN_MAX_BYTES = 32 * 1024 * 1024;
+const HELD_ORPHAN_TTL_MS = 3_600_000;
 // Bound diagnostics even if input supplies arbitrary agent names.
 const MAX_RUNTIME_AGENTS = 64;
 const SKILL_ATTRIBUTE_KEYS = [
@@ -131,6 +134,11 @@ interface TurnBuffer {
 
 interface HeldOrphans {
   records: AgentActivityEntry[];
+  agentType: string;
+  heldAtMs: number;
+  /** Measured logical bytes / unmeasured count of `records`, fixed at hold time. */
+  bytes: number;
+  unmeasured: number;
   runtimeCounters?: TraceRuntimeCounters;
 }
 
@@ -553,6 +561,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
    * final flush. Never converted while held, so never exported twice.
    */
   private readonly heldOrphans = new Map<string, HeldOrphans>();
+  private heldOrphanBytes = 0;
   /** Measured logical size per buffered record, to move exact bytes with held records. */
   private readonly recordLogicalBytes = new WeakMap<AgentActivityEntry, number>();
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
@@ -672,6 +681,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
         largest_buffer_records: 0,
         largest_buffer_age_ms: 0,
         oldest_buffer_age_ms: 0,
+        held_orphan_turns: 0,
+        held_orphan_logical_bytes: 0,
       });
     }
     // Inspect only existing bounded buffers, never walk or copy their records.
@@ -692,6 +703,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
         row.largest_buffer_turn_id = buf.keySource === 'turn_id' ? buf.keyValue : undefined;
         row.largest_buffer_session_id = buf.sessionId;
       }
+    }
+    for (const held of this.heldOrphans.values()) {
+      const row = rows.get(held.agentType);
+      if (!row) continue;
+      row.held_orphan_turns++;
+      row.held_orphan_logical_bytes += held.bytes;
     }
     return [...rows.values()];
   }
@@ -852,7 +869,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     await this.flushCompleted();
     // Final flush: whatever is still held never got its mate (interrupted
     // turn). Discard it, as dropOrphanPairs does for the final conversion.
-    for (const key of [...this.heldOrphans.keys()]) this.discardHeldOrphans(key);
+    for (const key of [...this.heldOrphans.keys()]) this.discardHeldOrphans(key, 'final');
     while (this.inFlightExports.size > 0 || this.pendingFailedWrites.size > 0) {
       const batch = [...this.inFlightExports, ...this.pendingFailedWrites];
       await Promise.allSettled(batch);
@@ -1080,37 +1097,61 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.records = paired;
     buf.logicalBytes = Math.max(0, buf.logicalBytes - bytes);
     buf.unmeasuredRecords = Math.max(0, buf.unmeasuredRecords - unmeasured);
-    // Re-insert so Map order stays oldest-first for cap eviction.
-    this.heldOrphans.delete(buf.key);
-    this.heldOrphans.set(buf.key, { records: orphans, runtimeCounters: buf.runtimeCounters });
-    while (this.heldOrphans.size > MAX_HELD_ORPHAN_TURNS) {
+    // A turn key is held at most once (it is restored when its buffer reopens);
+    // re-inserting keeps Map order oldest-first for eviction.
+    this.takeHeldOrphans(buf.key);
+    this.heldOrphans.set(buf.key, {
+      records: orphans,
+      agentType: buf.agentType,
+      heldAtMs: Date.now(),
+      bytes,
+      unmeasured,
+      runtimeCounters: buf.runtimeCounters,
+    });
+    this.heldOrphanBytes += bytes;
+    while (this.heldOrphans.size > MAX_HELD_ORPHAN_TURNS
+      || (this.heldOrphanBytes > HELD_ORPHAN_MAX_BYTES && this.heldOrphans.size > 0)) {
       const oldest = this.heldOrphans.keys().next().value as string;
-      logger.debug(`Dropping held unpaired records of turn ${oldest} (cap)`);
-      this.discardHeldOrphans(oldest);
+      this.discardHeldOrphans(oldest, 'cap');
     }
   }
 
-  /** Drops a held turn for good, crediting its bytes to the removed counters once. */
-  private discardHeldOrphans(key: string): void {
+  /** Discards held turns older than HELD_ORPHAN_TTL_MS; runs on the idle tick. */
+  private sweepExpiredHeldOrphans(now: number): void {
+    for (const [key, held] of this.heldOrphans) {
+      if (now - held.heldAtMs >= HELD_ORPHAN_TTL_MS) this.discardHeldOrphans(key, 'ttl');
+    }
+  }
+
+  /** Removes a held entry and keeps the held-bytes total in step. */
+  private takeHeldOrphans(key: string): HeldOrphans | undefined {
     const held = this.heldOrphans.get(key);
-    if (!held) return;
+    if (!held) return undefined;
     this.heldOrphans.delete(key);
+    this.heldOrphanBytes = Math.max(0, this.heldOrphanBytes - held.bytes);
+    return held;
+  }
+
+  /** Drops a held turn for good, crediting its bytes to the removed counters once. */
+  private discardHeldOrphans(key: string, reason: 'cap' | 'ttl' | 'final'): void {
+    const held = this.takeHeldOrphans(key);
+    if (!held) return;
+    if (reason !== 'final') {
+      logger.debug('Dropping held unpaired records', { turn: key, reason, records: held.records.length });
+    }
     const counters = held.runtimeCounters;
     if (!counters) return;
-    const { bytes, unmeasured } = this.sizeOf(held.records);
-    counters.removed_logical_bytes_total += bytes;
-    counters.removed_unmeasured_records_total += unmeasured;
+    counters.removed_logical_bytes_total += held.bytes;
+    counters.removed_unmeasured_records_total += held.unmeasured;
   }
 
   /** Prepends held records to a freshly (re)opened buffer of the same turn. */
   private restoreHeldOrphans(buf: TurnBuffer): void {
-    const held = this.heldOrphans.get(buf.key);
+    const held = this.takeHeldOrphans(buf.key);
     if (!held) return;
-    this.heldOrphans.delete(buf.key);
-    const { bytes, unmeasured } = this.sizeOf(held.records);
     buf.records = [...held.records];
-    buf.logicalBytes += bytes;
-    buf.unmeasuredRecords += unmeasured;
+    buf.logicalBytes += held.bytes;
+    buf.unmeasuredRecords += held.unmeasured;
   }
 
   private sizeOf(records: readonly AgentActivityEntry[]): { bytes: number; unmeasured: number } {
@@ -1359,6 +1400,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // turn is interrupted before llm.response / tool.result arrive (e.g.
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
+        //
+        // Pairing assumption (shared with the early-flush hold in
+        // holdUnpairedRecords, which pairs on the raw buffer records): the
+        // openclaw/grok prepare steps above and the agent.input filter never
+        // rename or synthesize tool.call / tool.result / llm.request /
+        // llm.response records, so raw and prepared records pair identically.
         const sanitized = dropOrphanPairs(traceConversionRecords);
         toolSpanIds.prepare(sanitized);
         llmSpanIds.prepare(sanitized);
@@ -2185,6 +2232,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
     if (timeout <= 0) return;
     const now = Date.now();
+    this.sweepExpiredHeldOrphans(now);
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
         buf.completed = true;

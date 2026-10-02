@@ -21,4 +21,8 @@ export interface TraceRuntimeSnapshot extends TraceRuntimeCounters {
   largest_buffer_turn_id?: string;
   largest_buffer_session_id?: string;
   oldest_buffer_age_ms: number;
+  /** Turns whose unpaired calls are held across an early flush (outside any buffer). */
+  held_orphan_turns: number;
+  /** Measured logical bytes of those held records. */
+  held_orphan_logical_bytes: number;
 }

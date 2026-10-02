@@ -1,107 +1,17 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { ExportResultCode } from '@opentelemetry/core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 
-import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
-import type { AgentActivityEntry } from '../../../../src/types/index.js';
-
-// Real converter, captured exporter: the assertions read exported span
-// attributes, not what a mocked converter received.
-const FIXTURE_EPOCH_MS = Date.parse('2026-10-02T10:00:00.000Z');
-const IDLE_MS = 100;
-// The idle tick runs every second; wait past one tick plus the idle window.
-const IDLE_WAIT_MS = 1_300;
-
-const base = {
-  'gen_ai.agent.type': 'claude-code',
-  'gen_ai.session.id': 'reopen-session',
-  'gen_ai.turn.id': 'reopen-turn',
-} as const;
-
-function record(
-  eventName: AgentActivityEntry['event.name'],
-  eventId: string,
-  millis: number,
-  fields: Record<string, unknown> = {},
-): AgentActivityEntry {
-  return {
-    ...base,
-    time_unix_nano: `${FIXTURE_EPOCH_MS + millis}000000`,
-    'event.id': eventId,
-    'event.name': eventName,
-    ...fields,
-  } as AgentActivityEntry;
-}
-
-const prompt = (): AgentActivityEntry => record('other', 'prompt', 0, {
-  'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'run it' }] }],
-});
-
-const firstStep = (): AgentActivityEntry[] => [
-  record('llm.request', 'req-1', 100, { 'gen_ai.step.id': 'step-1', 'gen_ai.request.model': 'm' }),
-  record('llm.response', 'resp-1', 200, {
-    'gen_ai.step.id': 'step-1',
-    'gen_ai.request.model': 'm',
-    'gen_ai.response.finish_reasons': ['tool_use'],
-    'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'tool_call', id: 'c1', name: 'Bash', arguments: {} }] }],
-  }),
-];
-
-const toolCall = (): AgentActivityEntry => record('tool.call', 'call-c1', 300, {
-  'gen_ai.step.id': 'step-1',
-  'gen_ai.tool.name': 'Bash',
-  'gen_ai.tool.call.id': 'c1',
-  'gen_ai.tool.call.arguments': { cmd: 'sleep 600' },
-});
-
-const toolResult = (): AgentActivityEntry => record('tool.result', 'result-c1', 600_300, {
-  'gen_ai.step.id': 'step-1',
-  'gen_ai.tool.name': 'Bash',
-  'gen_ai.tool.call.id': 'c1',
-  'gen_ai.tool.call.result': 'done',
-});
-
-const finalStep = (): AgentActivityEntry[] => [
-  record('llm.request', 'req-2', 600_400, { 'gen_ai.step.id': 'step-2', 'gen_ai.request.model': 'm' }),
-  record('llm.response', 'resp-2', 600_500, {
-    'gen_ai.step.id': 'step-2',
-    'gen_ai.request.model': 'm',
-    'gen_ai.response.finish_reasons': ['stop'],
-    'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'ok' }] }],
-  }),
-];
-
-function makeFlusher(exported: ReadableSpan[]): OtlpTraceFlusher {
-  return new OtlpTraceFlusher({
-    enabled: true,
-    endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }],
-    protocol: 'http/protobuf',
-    serviceName: 'reopen-unit',
-    turnIdleTimeoutMs: IDLE_MS,
-    failedReplayIntervalMs: 0,
-  }, undefined, () => ({
-    export: (spans, callback) => {
-      exported.push(...spans);
-      callback({ code: ExportResultCode.SUCCESS });
-    },
-    shutdown: async () => {},
-  }));
-}
-
-const toolSpans = (spans: ReadableSpan[], callId: string): ReadableSpan[] =>
-  spans.filter(s => s.attributes['gen_ai.tool.call.id'] === callId);
-
-const internals = (f: OtlpTraceFlusher) => f as unknown as {
-  turnBuffers: Map<string, unknown>;
-  heldOrphans: Map<string, unknown>;
-};
-
-const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+import type { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import {
+  IDLE_WAIT_MS, finalStep, firstStep, internals, llmSpans, makeFlusher, row, toolSpans, turn, wait,
+} from './held-orphans-fixtures.js';
 
 describe('OtlpTraceFlusher - tool call arguments across a reopened turn', () => {
   let flusher: OtlpTraceFlusher | undefined;
+  const t = turn();
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await flusher?.shutdown();
     flusher = undefined;
   });
@@ -110,9 +20,9 @@ describe('OtlpTraceFlusher - tool call arguments across a reopened turn', () => 
     const exported: ReadableSpan[] = [];
     flusher = makeFlusher(exported);
 
-    await flusher.send(prompt());
+    await flusher.send(t.prompt());
     for (const r of firstStep()) await flusher.send(r);
-    await flusher.send(toolCall());
+    await flusher.send(t.toolCall());
     await wait(IDLE_WAIT_MS);
 
     // The early (idle) flush sent the convertible part of the turn, but no
@@ -122,7 +32,7 @@ describe('OtlpTraceFlusher - tool call arguments across a reopened turn', () => 
     const firstExportCount = exported.length;
 
     // The tool finishes later; the turn reopens and then ends normally.
-    await flusher.send(toolResult());
+    await flusher.send(t.toolResult());
     for (const r of finalStep()) await flusher.send(r);
     await flusher.flush();
 
@@ -137,31 +47,33 @@ describe('OtlpTraceFlusher - tool call arguments across a reopened turn', () => 
     const exported: ReadableSpan[] = [];
     flusher = makeFlusher(exported);
 
-    await flusher.send(prompt(), 10);
-    await flusher.send(toolCall(), 70);
+    await flusher.send(t.prompt(), 10);
+    await flusher.send(t.toolCall(), 70);
     await wait(IDLE_WAIT_MS);
 
-    const afterIdle = flusher.getTraceRuntimeSnapshot().find(r => r.agent_type === 'claude-code');
-    expect(afterIdle?.removed_logical_bytes_total).toBe(10);
-    expect(afterIdle?.pending_buffers).toBe(0);
+    expect(row(flusher)).toMatchObject({
+      removed_logical_bytes_total: 10, pending_buffers: 0,
+      held_orphan_turns: 1, held_orphan_logical_bytes: 70,
+    });
 
-    await flusher.send(toolResult(), 5);
-    const reopened = flusher.getTraceRuntimeSnapshot().find(r => r.agent_type === 'claude-code');
-    expect(reopened?.pending_records).toBe(2);
-    expect(reopened?.pending_logical_bytes).toBe(75);
-    expect(reopened?.pending_unmeasured_records).toBe(0);
+    await flusher.send(t.toolResult(), 5);
+    expect(row(flusher)).toMatchObject({
+      pending_records: 2, pending_logical_bytes: 75, pending_unmeasured_records: 0,
+      held_orphan_turns: 0, held_orphan_logical_bytes: 0,
+    });
   });
 
   it('drops a tool.call that never gets a result at the final flush and leaves no buffer behind', async () => {
     const exported: ReadableSpan[] = [];
     flusher = makeFlusher(exported);
 
-    await flusher.send(prompt(), 10);
+    await flusher.send(t.prompt(), 10);
     for (const r of firstStep()) await flusher.send(r, 20);
-    await flusher.send(toolCall(), 70);
+    await flusher.send(t.toolCall(), 70);
     await wait(IDLE_WAIT_MS);
     expect(toolSpans(exported, 'c1')).toHaveLength(0);
     expect(internals(flusher).heldOrphans.size).toBe(1);
+    expect(row(flusher)).toMatchObject({ held_orphan_turns: 1, held_orphan_logical_bytes: 70 });
 
     // Shutdown is the final flush: the interrupted call is discarded, not
     // emitted as an empty TOOL span, and nothing is retained afterwards.
@@ -171,8 +83,89 @@ describe('OtlpTraceFlusher - tool call arguments across a reopened turn', () => 
     expect(internals(flusher).turnBuffers.size).toBe(0);
     expect(internals(flusher).heldOrphans.size).toBe(0);
     // Every accepted byte is counted as removed exactly once, held ones included.
-    const row = flusher.getTraceRuntimeSnapshot().find(r => r.agent_type === 'claude-code');
-    expect(row?.removed_logical_bytes_total).toBe(120);
-    expect(row?.removed_unmeasured_records_total).toBe(0);
+    expect(row(flusher)).toMatchObject({
+      removed_logical_bytes_total: 120, removed_unmeasured_records_total: 0,
+      held_orphan_turns: 0, held_orphan_logical_bytes: 0,
+    });
+  });
+
+  it('an early flush holding only orphans never calls the converter', async () => {
+    const exported: ReadableSpan[] = [];
+    flusher = makeFlusher(exported);
+    const convert = vi.spyOn(flusher as unknown as { doConvertAndExport: () => Promise<void> }, 'doConvertAndExport');
+
+    await flusher.send(t.toolCall(), 70);
+    await wait(IDLE_WAIT_MS);
+
+    expect(convert).not.toHaveBeenCalled();
+    expect(exported).toHaveLength(0);
+    expect(row(flusher)).toMatchObject({ held_orphan_turns: 1, held_orphan_logical_bytes: 70 });
+  });
+
+  it('a second early flush of the reopened turn holds the still-unpaired call again', async () => {
+    const exported: ReadableSpan[] = [];
+    flusher = makeFlusher(exported);
+
+    await flusher.send(t.prompt());
+    await flusher.send(t.toolCall());
+    await wait(IDLE_WAIT_MS);
+    expect(internals(flusher).heldOrphans.size).toBe(1);
+
+    // New content reopens the turn (restoring the call); it idles out again.
+    await flusher.send(t.prompt('still running'));
+    expect(internals(flusher).heldOrphans.size).toBe(0);
+    await wait(IDLE_WAIT_MS);
+    expect(internals(flusher).heldOrphans.size).toBe(1);
+    expect(toolSpans(exported, 'c1')).toHaveLength(0);
+
+    await flusher.send(t.toolResult());
+    for (const r of finalStep()) await flusher.send(r);
+    await flusher.flush();
+
+    const c1 = toolSpans(exported, 'c1');
+    expect(c1).toHaveLength(1);
+    expect(String(c1[0].attributes['gen_ai.tool.call.arguments'])).toContain('sleep 600');
+  });
+
+  it('holds the call when a same-session successor turn flushes the turn early', async () => {
+    const exported: ReadableSpan[] = [];
+    // No idle timer: only the successor signal flushes early here.
+    flusher = makeFlusher(exported, { turnIdleTimeoutMs: 0 });
+    const a = { turn: 'turn-a', session: 'shared-session' };
+    const ta = turn(a);
+    const tb = turn({ turn: 'turn-b', session: 'shared-session' });
+
+    await flusher.send(ta.prompt());
+    for (const r of firstStep(a)) await flusher.send(r);
+    await flusher.send(ta.toolCall());
+    await flusher.send(tb.prompt('next prompt'));
+    expect(internals(flusher).heldOrphans.size).toBe(1);
+
+    await flusher.send(ta.toolResult());
+    for (const r of finalStep(a)) await flusher.send(r);
+    await flusher.flush();
+
+    const c1 = toolSpans(exported, 'c1');
+    expect(c1).toHaveLength(1);
+    expect(String(c1[0].attributes['gen_ai.tool.call.arguments'])).toContain('sleep 600');
+  });
+
+  it('holds an unanswered llm.request and pairs it with the response after the reopen', async () => {
+    const exported: ReadableSpan[] = [];
+    flusher = makeFlusher(exported);
+
+    await flusher.send(t.prompt());
+    await flusher.send(t.llmRequest('step-1', 100));
+    await wait(IDLE_WAIT_MS);
+    expect(internals(flusher).heldOrphans.size).toBe(1);
+    expect(llmSpans(exported)).toHaveLength(0);
+
+    await flusher.send(t.llmResponse('step-1', 5_000, 'stop'));
+    await flusher.flush();
+
+    const llm = llmSpans(exported);
+    expect(llm).toHaveLength(1);
+    // The input comes from the held request, so the pair was really rebuilt.
+    expect(String(llm[0].attributes['gen_ai.input.messages'])).toContain('REQ-MARK');
   });
 });
