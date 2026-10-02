@@ -116,13 +116,19 @@ jobs:
           if ($cfg.retention.otlpFailedDays -ne 30) { $failures += "retention.otlpFailedDays is $($cfg.retention.otlpFailedDays), expected 30" }
 
           $me = "$env:USERDOMAIN\$env:USERNAME"
+          # config.json: current user (SYSTEM tolerated). Data dir: also local Administrators,
+          # who can take ownership anyway.
+          $allowed = @{
+            $cfgPath = @($me, 'NT AUTHORITY\SYSTEM')
+            $dataDir = @($me, 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')
+          }
           foreach ($p in @($cfgPath, $dataDir)) {
             Write-Host "icacls $p"
             icacls $p
             $acl = Get-Acl -LiteralPath $p
             foreach ($ace in $acl.Access) {
               $who = $ace.IdentityReference.Value
-              if ($who -ne $me -and $who -ne 'NT AUTHORITY\SYSTEM') { $failures += "unexpected ACE on ${p}: $who" }
+              if ($allowed[$p] -notcontains $who) { $failures += "unexpected ACE on ${p} (allowed: $($allowed[$p] -join ', ')): $who" }
             }
             if (-not ($acl.Access | Where-Object { $_.IdentityReference.Value -eq $me })) { $failures += "current user has no ACE on $p" }
           }

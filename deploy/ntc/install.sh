@@ -26,7 +26,7 @@ trap cleanup EXIT
 
 is_loopback_http() {
   [ "${NTC_PILOT_ALLOW_LOOPBACK_HTTP:-}" = "1" ] || return 1
-  printf '%s' "$1" | grep -Eq '^http://(127\.0\.0\.1|localhost)([:/]|$)'
+  printf '%s' "$1" | grep -Eq '^http://(127\.0\.0\.1|localhost)(:[0-9]+)?(/|$)'
 }
 
 # require_https <name> <url>: https only, except the loopback test exception.

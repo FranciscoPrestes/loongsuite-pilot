@@ -138,6 +138,13 @@ describe('deploy/ntc/install.sh', () => {
     expect(existsSync(join(mark, 'installer-args'))).toBe(false);
   });
 
+  it('rejects a loopback lookalike with userinfo even when the loopback flag is set', async () => {
+    const r = await run({ ...ok, NTC_PILOT_BLOB_URL: 'http://localhost:80@evil.test/pilot' });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('https');
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
   it('refuses a non-https package_url from the manifest', async () => {
     files['/manifest/stable.txt'] = `version=1.2.0-ntc.1\npackage_url=http://example.test/p.tgz\nsha256=${sha(PKG)}\n`;
     const r = await run(ok);
