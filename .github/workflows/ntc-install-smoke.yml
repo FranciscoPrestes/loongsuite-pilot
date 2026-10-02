@@ -180,9 +180,10 @@ jobs:
           $log = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'install.log') -Raw
           if ($log -match 'ntcp_') { $failures += 'installer log contains ntcp_' }
 
-          # The key may live only in config.json; scan every other file in the data dir.
+          # The key may live only in config.json; scan every other file in the data dir, except the shipped
+          # code (versions/, package/, runtime/), where the key-format regex literal legitimately appears.
           Get-ChildItem -LiteralPath $dataDir -Recurse -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -ne $cfgPath -and $_.Length -lt 64MB } | ForEach-Object {
+            Where-Object { $_.FullName -ne $cfgPath -and $_.Length -lt 64MB -and $_.FullName -notmatch '\\(versions|package|runtime)\\' } | ForEach-Object {
               try {
                 $bytes = [IO.File]::ReadAllBytes($_.FullName)
                 $text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
