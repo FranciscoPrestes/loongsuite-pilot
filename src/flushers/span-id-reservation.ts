@@ -30,8 +30,13 @@ function validSpanId(value: unknown): value is string {
 export class ReservedSpanIdGenerator implements IdGenerator {
   private readonly fallback = new RandomIdGenerator();
   private reserved?: string;
+  private reservedTraceId?: string;
 
-  generateTraceId = (): string => this.fallback.generateTraceId();
+  generateTraceId = (): string => {
+    const reserved = this.reservedTraceId;
+    this.reservedTraceId = undefined;
+    return reserved ?? this.fallback.generateTraceId();
+  };
 
   generateSpanId = (): string => {
     const reserved = this.reserved;
@@ -45,8 +50,14 @@ export class ReservedSpanIdGenerator implements IdGenerator {
     return true;
   }
 
+  /** Pins the trace id of the next ROOT span (a span with a parent ignores it). */
+  reserveTraceId(traceId: string): void {
+    this.reservedTraceId = traceId;
+  }
+
   clear(): void {
     this.reserved = undefined;
+    this.reservedTraceId = undefined;
   }
 }
 

@@ -1,5 +1,5 @@
 import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
-import { SpanStatusCode } from '@opentelemetry/api';
+import { ROOT_CONTEXT, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import { Resource } from '@opentelemetry/resources';
 import {
   BasicTracerProvider,
@@ -41,6 +41,12 @@ import {
   ReservedSpanIdGenerator,
   type SpanIdReservations,
 } from './span-id-reservation.js';
+import {
+  COPILOT_SESSION_USAGE_SPAN_NAME,
+  deriveSessionUsageIds,
+  isCopilotSessionUsage,
+  sessionUsageAttributes,
+} from './copilot-session-usage.js';
 
 import {
   OPENCLAW_SESSION_KEY, OPENCLAW_SESSION_KEY_AMBIGUOUS, isOpenClawSessionKey,
@@ -124,6 +130,7 @@ interface AgentConvertState {
   inMem: InMemorySpanExporter;
   toolSpanIds: SpanIdReservations;
   llmSpanIds: SpanIdReservations;
+  idGenerator: ReservedSpanIdGenerator;
   active: number;
 }
 
@@ -693,6 +700,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
       (entry['gen_ai.agent.type'] as string) ?? '',
     );
 
+    // Copilot session-scope usage has no turn, so it never reaches a span
+    // through the converter (it ignores message-less `other` events).
+    if (isCopilotSessionUsage(entry)) {
+      await this.exportCopilotSessionUsage(agentType, entry);
+      return;
+    }
+
     if (source === 'ephemeral') {
       // Drop metadata-only "other" events (e.g. OpenClaw before_message_write /
       // tool_result_persist records that lack turn.id/trace_id/session.id).
@@ -1028,12 +1042,28 @@ export class OtlpTraceFlusher extends BaseFlusher {
     agentType: string,
     records: AgentActivityEntry[],
   ): Promise<void> {
+    await this.runPerService(agentType, records, (serviceName, projected, identity, convertKey) =>
+      this.doConvertAndExport(agentType, serviceName, records, projected, identity, convertKey));
+  }
+
+  /**
+   * Runs `task` once per distinct service.name (backends may split into
+   * user/inner service names). Each service name owns an independent convert
+   * state, so the common single-name case still runs exactly once.
+   */
+  private async runPerService(
+    agentType: string,
+    records: AgentActivityEntry[],
+    task: (
+      serviceName: string,
+      projected: Record<string, ResourceProjectionValue>,
+      identity: AgentResourceIdentity,
+      convertKey: string,
+    ) => Promise<void>,
+  ): Promise<void> {
     if (records.length === 0) return;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
     const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
-    // Convert once per distinct service.name (backends may split into user/inner
-    // service names). Each service name owns an independent convert state, so the
-    // common single-name case still converts exactly once.
     const serviceNames = [...new Set(
       this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
@@ -1041,10 +1071,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
       serviceNames.map((serviceName) => {
         const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
         const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
-        const current = prev.then(() => this.doConvertAndExport(
-          agentType,
+        const current = prev.then(() => task(
           serviceName,
-          records,
           projectedResourceAttributes,
           resourceIdentity,
           convertKey,
@@ -1053,6 +1081,81 @@ export class OtlpTraceFlusher extends BaseFlusher {
         return current;
       }),
     );
+  }
+
+  private async exportCopilotSessionUsage(
+    agentType: string,
+    entry: AgentActivityEntry,
+  ): Promise<void> {
+    try {
+      const ids = deriveSessionUsageIds(entry);
+      if (!ids) {
+        logger.warn('Dropping Copilot session usage event without session id or trace_id', {
+          eventId: entry['event.id'],
+        });
+        return;
+      }
+      await this.runPerService(agentType, [entry], (serviceName, projected, identity, convertKey) =>
+        this.doExportCopilotSessionUsage(agentType, serviceName, entry, ids, projected, identity, convertKey));
+    } catch (err) {
+      logger.error('Copilot session usage export failed', { err: String(err) });
+    }
+  }
+
+  private async doExportCopilotSessionUsage(
+    agentType: string,
+    serviceName: string,
+    entry: AgentActivityEntry,
+    ids: { traceId: string; spanId: string },
+    projectedResourceAttributes: Record<string, ResourceProjectionValue>,
+    resourceIdentity: AgentResourceIdentity,
+    convertKey: string,
+  ): Promise<void> {
+    const state = this.getOrCreateConvertState(
+      agentType, serviceName, projectedResourceAttributes, resourceIdentity, convertKey,
+    );
+    state.active += 1;
+    try {
+      const attributes = sessionUsageAttributes(entry);
+      // Same fill-only custom attributes the converted spans receive.
+      for (const [k, v] of Object.entries(this.globalAttributesProvider?.resolve() ?? {})) {
+        if (attributes[k] === undefined) attributes[k] = v;
+      }
+      const nano = parseNano(entry['time_unix_nano'] as string | undefined)
+        ?? parseNano(entry['observed_time_unix_nano'] as string | undefined)
+        ?? BigInt(Date.now()) * 1_000_000n;
+      const time = nanoToHrTime(nano);
+
+      state.idGenerator.reserveTraceId(ids.traceId);
+      state.idGenerator.reserve(ids.spanId);
+      try {
+        const span = state.provider.getTracer('loongsuite-pilot').startSpan(
+          COPILOT_SESSION_USAGE_SPAN_NAME,
+          { kind: SpanKind.INTERNAL, startTime: time, attributes },
+          ROOT_CONTEXT,
+        );
+        span.end(time);
+      } finally {
+        state.idGenerator.clear();
+      }
+
+      await state.provider.forceFlush();
+      let spans = state.inMem.getFinishedSpans();
+      state.inMem.reset();
+      if (spans.length === 0) return;
+
+      spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
+      if (this.cfg.debug) {
+        await this.writeDebugLog(agentType, spans);
+      }
+      await this.exportInBatches(this.getOrCreateExportState(agentType, serviceName), agentType, spans);
+    } catch (err) {
+      state.inMem.reset();
+      logger.error(`Copilot session usage span failed for ${agentType}`, { err: String(err) });
+    } finally {
+      state.active -= 1;
+      this.evictConvertStates();
+    }
   }
 
   private async doConvertAndExport(
@@ -1201,6 +1304,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (agentType === 'grok-build') {
         this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
+      if (agentType === 'copilot') {
+        // The copilot.session_usage span is the single source of Copilot tokens
+        // (cumulative per session); the per-response counts on turn spans would
+        // double count them, so converted spans carry none.
+        for (const span of spans) {
+          for (const key of Object.keys(span.attributes)) {
+            if (key.startsWith('gen_ai.usage.')) delete span.attributes[key];
+          }
+        }
+      }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
       const exportState = this.getOrCreateExportState(agentType, serviceName);
@@ -1338,7 +1451,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
     const llmSpanIds = attachReservedLlmSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, idGenerator, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;
