@@ -1304,6 +1304,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (agentType === 'grok-build') {
         this.enrichGrokBuildSpans(records, spans, grokMetadata);
       }
+      if (agentType === 'copilot') {
+        // The copilot.session_usage span is the single source of Copilot tokens
+        // (cumulative per session); the per-response counts on turn spans would
+        // double count them, so converted spans carry none.
+        for (const span of spans) {
+          for (const key of Object.keys(span.attributes)) {
+            if (key.startsWith('gen_ai.usage.')) delete span.attributes[key];
+          }
+        }
+      }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
       const exportState = this.getOrCreateExportState(agentType, serviceName);

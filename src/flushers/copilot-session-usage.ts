@@ -79,6 +79,10 @@ export function sessionUsageAttributes(entry: AgentActivityEntry): Attributes {
   }
   const userId = nonEmpty(entry['gen_ai.user.id']) ?? nonEmpty(entry['user.id']);
   if (userId) attrs['gen_ai.user.id'] = userId;
+  // Panels group by the request model; session events only report the response one.
+  if (attrs['gen_ai.request.model'] === undefined && attrs['gen_ai.response.model'] !== undefined) {
+    attrs['gen_ai.request.model'] = attrs['gen_ai.response.model'];
+  }
   // A checkpoint carries cost only; marking it LLM would inflate LLM counts.
   attrs['gen_ai.span.kind'] = TOKEN_KEYS.some(key => isScalar(attrs[key])) ? 'LLM' : 'USAGE';
   return attrs;

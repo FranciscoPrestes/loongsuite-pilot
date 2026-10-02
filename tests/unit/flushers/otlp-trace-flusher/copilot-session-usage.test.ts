@@ -217,4 +217,78 @@ describe('Copilot session-scope usage span', () => {
     expect(span.spanContext().traceId).toBe(traceId);
     await flusher.shutdown();
   });
+
+  it('fills gen_ai.request.model from the response model without overwriting', async () => {
+    const { flusher, spans } = makeFlusher();
+    await flusher.sendBatch([
+      tokensEvent(),
+      tokensEvent({
+        'event.id': 'keep-request-model',
+        'gen_ai.request.model': 'gpt-requested',
+      }),
+    ]);
+    await flusher.flush();
+
+    const [filled, kept] = usageSpans(spans);
+    expect(filled.attributes['gen_ai.request.model']).toBe('gpt-6-luna');
+    expect(kept.attributes['gen_ai.request.model']).toBe('gpt-requested');
+    await flusher.shutdown();
+  });
+});
+
+function turnEntries(agentType: string, turnId: string): AgentActivityEntry[] {
+  const base = {
+    'gen_ai.session.id': SESSION_A,
+    'gen_ai.agent.type': agentType,
+    'gen_ai.turn.id': turnId,
+    'gen_ai.step.id': `${turnId}-s1`,
+    'user.id': 'francisco.prestes@ntconsult.com.br',
+  };
+  return [
+    {
+      ...base, 'event.id': `${turnId}-req`, 'event.name': 'llm.request',
+      time_unix_nano: '1790895233000000000', 'gen_ai.request.id': `${turnId}-r`,
+      'gen_ai.request.model': 'gpt-6-luna', 'gen_ai.turn.start': true,
+      'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'x' }] }],
+    },
+    {
+      ...base, 'event.id': `${turnId}-res`, 'event.name': 'llm.response',
+      time_unix_nano: '1790895233100000000', 'gen_ai.response.id': `${turnId}-r`,
+      'gen_ai.response.model': 'gpt-6-luna', 'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.turn.end': true, 'gen_ai.usage.output_tokens': 500,
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'y' }], finish_reason: 'stop' }],
+    },
+  ] as AgentActivityEntry[];
+}
+
+const llmOutputTotal = (spans: ReadableSpan[]) => spans
+  .filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')
+  .reduce((sum, s) => sum + (Number(s.attributes['gen_ai.usage.output_tokens']) || 0), 0);
+
+describe('Copilot session usage is the single source of tokens', () => {
+  it('counts a turn output_tokens plus the session event exactly once', async () => {
+    const { flusher, spans } = makeFlusher();
+    await flusher.sendBatch([
+      ...turnEntries('copilot', 'turn-1'),
+      tokensEvent({ 'gen_ai.usage.output_tokens': 500 }),
+    ]);
+    await flusher.flush();
+
+    expect(spans.some(s => s.name !== 'copilot.session_usage' && s.attributes['gen_ai.span.kind'] === 'LLM')).toBe(true);
+    expect(llmOutputTotal(spans)).toBe(500);
+    expect(usageSpans(spans)[0].attributes['gen_ai.usage.output_tokens']).toBe(500);
+    for (const s of spans.filter(x => x.name !== 'copilot.session_usage')) {
+      expect(Object.keys(s.attributes).filter(k => k.startsWith('gen_ai.usage.'))).toEqual([]);
+    }
+    await flusher.shutdown();
+  });
+
+  it('keeps gen_ai.usage.* on turn spans of other agents', async () => {
+    const { flusher, spans } = makeFlusher();
+    await flusher.sendBatch(turnEntries('claude-code', 'turn-2'));
+    await flusher.flush();
+
+    expect(llmOutputTotal(spans)).toBe(500);
+    await flusher.shutdown();
+  });
 });
