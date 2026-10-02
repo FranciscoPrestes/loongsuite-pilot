@@ -5,12 +5,6 @@ name: NTConsult install smoke
 
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/ntc-fase1-distribuicao]
-    paths:
-      - '.github/workflows/ntc-install-smoke.yml'
-      - 'deploy/**'
-      - 'tools/ntc-release/**'
 
 permissions:
   contents: read
@@ -26,8 +20,8 @@ jobs:
   blob:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -64,7 +58,7 @@ jobs:
           cp "$RUNNER_TEMP/manifest/latest.json" "$blob/manifest/latest.json"
           cat "$blob/manifest/stable.txt"
           (cd "$RUNNER_TEMP/blob" && find . -type f | sort)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fake-blob
           path: ${{ runner.temp }}/blob
@@ -74,13 +68,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The fake blob has no managed Node.js nor prebuilt node_modules: the installer falls
       # back to the system Node and `npm install` (needs the runner's network to npm).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: fake-blob
           path: ${{ runner.temp }}\blob

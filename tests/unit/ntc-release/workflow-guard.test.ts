@@ -76,4 +76,31 @@ describe('ntc-release.yml publish guards', () => {
       else expect(hasFalse, name).toBe(true);
     }
   });
+
+  it('prepare only accepts commits reachable from NTConsult-main', () => {
+    const prepare = jobs.get('prepare')!;
+    expect(prepare).toContain('git -C src merge-base --is-ancestor "$sha" refs/remotes/origin/NTConsult-main');
+    expect(prepare.indexOf('merge-base --is-ancestor')).toBeLessThan(prepare.indexOf('next-version'));
+  });
+
+  it('publish and assemble run the tooling from the workflow commit, never from source_ref', () => {
+    for (const name of ['prepare', 'assemble', 'publish']) {
+      const body = jobs.get(name)!;
+      expect(body, name).toMatch(/ref: \$\{\{ github\.sha \}\}\n\s+path: tooling/);
+      // every script path goes through tooling/
+      for (const m of body.matchAll(/(?:bash|node) (\S*tools\/ntc-release\/\S+)/g)) expect(m[1], name).toMatch(/^tooling\//);
+    }
+    const publish = jobs.get('publish')!;
+    expect(publish).not.toContain('needs.prepare.outputs.sha }}\n          path');
+    expect(publish).not.toMatch(/ref: \$\{\{ inputs\.source_ref/);
+  });
+});
+
+describe('ntc-install-smoke.yml', () => {
+  const smoke = readFileSync(join(__dirname, '../../../.github/workflows/ntc-install-smoke.yml'), 'utf8');
+  it('is manual only and pins its actions by commit sha', () => {
+    expect(smoke).not.toMatch(/^\s+(push|pull_request|schedule):/m);
+    expect(smoke).toMatch(/^on:\n  workflow_dispatch:\n/m);
+    for (const m of smoke.matchAll(/uses: (\S+)@(\S+)/g)) expect(m[2], m[1]).toMatch(/^[0-9a-f]{40}$/);
+  });
 });
