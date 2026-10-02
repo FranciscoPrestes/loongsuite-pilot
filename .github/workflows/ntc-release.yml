@@ -4,6 +4,13 @@
 name: NTConsult release
 
 on:
+  # TEMPORARY: dry-run from the feature branch; remove before merging into NTConsult-main (workflow_dispatch needs the file on the default branch)
+  push:
+    branches: [feat/ntc-fase1-distribuicao]
+    paths:
+      - '.github/workflows/ntc-release.yml'
+      - 'tools/ntc-release/**'
+      - 'deploy/**'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -43,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ inputs.source_ref || github.ref }}
           fetch-depth: 0
           fetch-tags: true
       - uses: actions/setup-node@v4
@@ -52,7 +59,7 @@ jobs:
       - name: Compute the next version and refuse an existing tag
         id: v
         env:
-          ROLLOUT: ${{ inputs.rollout }}
+          ROLLOUT: ${{ inputs.rollout || '10' }}
         run: |
           set -euo pipefail
           [[ "$ROLLOUT" =~ ^[0-9]+$ ]] && [ "$ROLLOUT" -ge 1 ] && [ "$ROLLOUT" -le 100 ] \
@@ -189,7 +196,7 @@ jobs:
       - name: Read the current latest.json (anonymous) and its ETag
         id: prev
         env:
-          DRY_RUN: ${{ inputs.dry_run }}
+          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
         run: |
           set -euo pipefail
           mode=allow-missing
@@ -200,7 +207,7 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           GIT_COMMIT: ${{ needs.package.outputs.git_commit }}
-          ROLLOUT: ${{ inputs.rollout }}
+          ROLLOUT: ${{ inputs.rollout || '10' }}
           PREV_STATUS: ${{ steps.prev.outputs.status }}
         run: |
           set -euo pipefail
@@ -224,13 +231,13 @@ jobs:
       - name: Summary
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          DRY_RUN: ${{ inputs.dry_run }}
+          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
         run: |
           echo "Version $VERSION assembled (dry_run=$DRY_RUN). Artifact: blob-stage." >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     # Unreachable when dry_run is true.
-    if: ${{ !inputs.dry_run }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}
     needs: [prepare, assemble]
     runs-on: ubuntu-24.04
     environment: ntc-canary
@@ -243,13 +250,15 @@ jobs:
       NTC_ETAG: ${{ needs.assemble.outputs.etag }}
       VERSION: ${{ needs.prepare.outputs.version }}
       SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
-      DRY_RUN: ${{ inputs.dry_run }}
+      DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
+      EVENT_NAME: ${{ github.event_name }}
       CONTAINER: pilot
       BLOB_VAR: ${{ vars.NTC_BLOB_BASE_URL }}
     steps:
       - name: Guard (publish must never run in a dry run)
         run: |
-          [ "$DRY_RUN" = "false" ] || { echo "::error::refusing to publish with dry_run=$DRY_RUN"; exit 1; }
+          [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ] \
+            || { echo "::error::refusing to publish (event=$EVENT_NAME, dry_run=$DRY_RUN)"; exit 1; }
           for v in NTC_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID BLOB_VAR; do
             [ -n "${!v}" ] || { echo "::error::repository variable $v (NTC_BLOB_BASE_URL for BLOB_VAR) is not set"; exit 1; }
           done
