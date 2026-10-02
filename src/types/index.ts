@@ -401,6 +401,8 @@ export interface LogRetentionConfig {
   outputDays: number;
   slsFailedDays: number;
   otlpFailedDays: number;
+  /** Total size cap of logs/otlp-failed (including rejected/) in MiB. */
+  otlpFailedMaxTotalMiB: number;
   metricAlarmDays: number;
 }
 

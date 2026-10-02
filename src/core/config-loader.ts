@@ -122,6 +122,7 @@ export interface ConfigFile {
     outputDays?: number;
     slsFailedDays?: number;
     otlpFailedDays?: number;
+    otlpFailedMaxTotalMiB?: number;
     metricAlarmDays?: number;
   };
 
@@ -879,6 +880,7 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
     outputDays: resolve(file?.retention?.outputDays, 7),
     slsFailedDays: resolve(file?.retention?.slsFailedDays, 7),
     otlpFailedDays: resolve(file?.retention?.otlpFailedDays, 7),
+    otlpFailedMaxTotalMiB: file?.retention?.otlpFailedMaxTotalMiB ?? 512, // not the unified-days fallback: this is MiB,
     metricAlarmDays: resolve(file?.retention?.metricAlarmDays, 7),
   };
 }

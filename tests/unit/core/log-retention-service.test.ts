@@ -29,6 +29,7 @@ function makeConfig(overrides: Partial<LogRetentionConfig> = {}): LogRetentionCo
     outputDays: 7,
     slsFailedDays: 7,
     otlpFailedDays: 7,
+    otlpFailedMaxTotalMiB: 512,
     metricAlarmDays: 7,
     ...overrides,
   };
@@ -271,6 +272,39 @@ describe('LogRetentionService', () => {
       const service = new LogRetentionService(tmpDir, makeConfig({ otlpFailedDays: 30 }));
       await service.runCleanup();
       await expect(fs.readFile(offline, 'utf8')).resolves.toBe('x\n');
+    });
+
+    it('applies the age rule to otlp-failed/rejected/ (31 days removed, 29 kept)', async () => {
+      const rejDir = path.join(tmpDir, 'logs', 'otlp-failed', 'rejected');
+      await fs.mkdir(rejDir, { recursive: true });
+      const old = path.join(rejDir, 'a__ntc-2026-01-01.jsonl');
+      const fresh = path.join(rejDir, 'b__ntc-2026-01-02.jsonl');
+      await fs.writeFile(old, 'x\n');
+      await fs.writeFile(fresh, 'x\n');
+      const day = 86_400_000;
+      await fs.utimes(old, new Date(Date.now() - 31 * day), new Date(Date.now() - 31 * day));
+      await fs.utimes(fresh, new Date(Date.now() - 29 * day), new Date(Date.now() - 29 * day));
+      await new LogRetentionService(tmpDir, makeConfig({ otlpFailedDays: 30 })).runCleanup();
+      await expect(fs.access(old)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.access(fresh)).resolves.toBeUndefined();
+    });
+
+    it('prunes the oldest files, rejected/ included, above otlpFailedMaxTotalMiB', async () => {
+      const otlpDir = path.join(tmpDir, 'logs', 'otlp-failed');
+      const rejDir = path.join(otlpDir, 'rejected');
+      await fs.mkdir(rejDir, { recursive: true });
+      const parent = path.join(otlpDir, `svc__ntc-${daysAgo(3)}.jsonl`);
+      const rej = path.join(rejDir, `svc__ntc-${daysAgo(3)}.jsonl`);
+      const parentNew = path.join(otlpDir, `svc__ntc-${daysAgo(2)}.jsonl`);
+      await writeSizedFile(parent, 400 * 1024);
+      await writeSizedFile(rej, 400 * 1024);
+      await writeSizedFile(parentNew, 400 * 1024);
+      const old = new Date(Date.now() - 5 * 86_400_000);
+      await fs.utimes(rej, old, old);
+      await new LogRetentionService(tmpDir, makeConfig({ otlpFailedMaxTotalMiB: 1 })).runCleanup();
+      await expect(fs.access(rej)).rejects.toMatchObject({ code: 'ENOENT' }); // oldest, 1.2 MiB -> 0.8 MiB
+      await expect(fs.access(parent)).resolves.toBeUndefined();
+      await expect(fs.access(parentNew)).resolves.toBeUndefined();
     });
 
     it('cleans expired metric daily and legacy files without touching unknown or state files', async () => {

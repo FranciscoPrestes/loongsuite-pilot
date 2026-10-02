@@ -25,7 +25,13 @@ export interface ReplayTarget {
   headers: Record<string, string>;
 }
 
-export interface ReplayResult { sent: number; rejected: number; kept: number }
+export interface ReplayResult {
+  sent: number;
+  rejected: number;
+  kept: number;
+  /** True when the run stopped on a 401/403, so the caller can back off. */
+  authFailed: boolean;
+}
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 interface Item { line: string; rec: FailedSpanRecord }
@@ -99,6 +105,32 @@ function batchesBySize(items: Item[]): Item[][] {
   return out;
 }
 
+/** AbortSignal.any with a listener-based fallback for Node < 18.17. */
+export function anySignal(signals: AbortSignal[]): AbortSignal {
+  const native = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
+  if (typeof native === 'function') return native.call(AbortSignal, signals);
+  const controller = new AbortController();
+  const already = signals.find((s) => s.aborted);
+  if (already) {
+    controller.abort(already.reason);
+    return controller.signal;
+  }
+  const listeners: Array<[AbortSignal, () => void]> = [];
+  const cleanup = (): void => {
+    for (const [sig, fn] of listeners) sig.removeEventListener('abort', fn);
+    listeners.length = 0;
+  };
+  for (const sig of signals) {
+    const onAbort = (): void => {
+      cleanup();
+      controller.abort(sig.reason);
+    };
+    sig.addEventListener('abort', onAbort, { once: true });
+    listeners.push([sig, onAbort]);
+  }
+  return controller.signal;
+}
+
 /** Returns the HTTP status, or null on a network error/timeout. */
 async function post(target: ReplayTarget, fetchImpl: FetchLike, batch: Item[], abort?: AbortSignal): Promise<number | null> {
   try {
@@ -107,7 +139,7 @@ async function post(target: ReplayTarget, fetchImpl: FetchLike, batch: Item[], a
       method: 'POST',
       headers: { ...target.headers, 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
       body,
-      signal: abort ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), abort]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: abort ? anySignal([AbortSignal.timeout(REQUEST_TIMEOUT_MS), abort]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     return resp.status;
   } catch {
@@ -182,7 +214,7 @@ export async function replayFailedSpans(
   shouldStop?: () => boolean,
   abort?: AbortSignal,
 ): Promise<ReplayResult> {
-  const result: ReplayResult = { sent: 0, rejected: 0, kept: 0 };
+  const result: ReplayResult = { sent: 0, rejected: 0, kept: 0, authFailed: false };
   const safe = target.name.replace(/[^A-Za-z0-9._-]/g, '_');
   const pattern = new RegExp(`__${escapeRegExp(safe)}(${escapeRegExp(CLAIM_TAG)})?-(\\d{4}-\\d{2}-\\d{2})\\.jsonl$`);
   const stagingPattern = new RegExp(`^(.*__${escapeRegExp(safe)}${escapeRegExp(CLAIM_TAG)}-\\d{4}-\\d{2}-\\d{2}\\.jsonl)\\.\\d+\\.\\d+\\.tmp$`);
@@ -227,17 +259,18 @@ export async function replayFailedSpans(
       if (status !== null && status >= 200 && status < 300) {
         result.sent += batch.length;
         changed = true;
-      } else if (status === 413 && batch.length > 1) {
+      } else if ((status === 413 || status === 400) && batch.length > 1) {
         const mid = Math.ceil(batch.length / 2);
         pending.unshift(batch.slice(0, mid), batch.slice(mid));
       } else if (status === 400 || status === 413) {
-        // Only a malformed batch (400) or a single span too large on its own (413,
-        // batches of more than one were halved above) is quarantined. Everything
+        // Only a single span answered 400 or 413 is quarantined (larger batches were
+        // halved above to isolate the bad span). Everything
         // else (401/403 key rotation, 404/415/422 misrouting, 5xx, network) stays.
         await appendRejected(failedDir, claimed, batch.map((b) => b.line));
         result.rejected += batch.length;
         changed = true;
       } else {
+        if (status === 401 || status === 403) result.authFailed = true;
         const rest = [batch, ...pending].flat().map((b) => b.line);
         if (changed) await rewriteClaimed(claimedPath, rest);
         result.kept += rest.length;

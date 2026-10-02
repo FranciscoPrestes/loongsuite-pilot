@@ -422,6 +422,7 @@ const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_FAILED_REPLAY_INTERVAL_MS = 5 * 60_000;
+const MAX_AUTH_BACKOFF_MS = 3_600_000;
 const REPLAY_SHUTDOWN_WAIT_MS = 2_000;
 const MAX_CONVERT_STATES = 64;
 const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
@@ -549,6 +550,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private idleTimer?: ReturnType<typeof setInterval>;
   private replayTimer?: ReturnType<typeof setInterval>;
   private replaying = false;
+  private replayIntervalMs = DEFAULT_FAILED_REPLAY_INTERVAL_MS;
+  /** Replay pause after consecutive 401/403 runs: min(2^failures x interval, 1 h). */
+  private authBackoff = { failures: 0, nextAt: 0 };
   private replayRun?: Promise<void>;
   private stopping = false;
   private replayAbort = new AbortController();
@@ -619,6 +623,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     const replayMs = cfg.failedReplayIntervalMs ?? DEFAULT_FAILED_REPLAY_INTERVAL_MS;
+    this.replayIntervalMs = replayMs;
     if (replayMs > 0) {
       this.replayTimer = setInterval(() => { void this.replayFailed(); }, replayMs);
       this.replayTimer.unref();
@@ -864,6 +869,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private async runReplay(): Promise<void> {
+    if (Date.now() < this.authBackoff.nextAt) return;
+    let authFailed = false;
     try {
       for (const ep of this.endpoints) {
         const r = await replayFailedSpans(
@@ -873,11 +880,24 @@ export class OtlpTraceFlusher extends BaseFlusher {
           () => this.stopping,
           this.replayAbort.signal,
         );
+        if (r.authFailed) authFailed = true;
         if (r.sent > 0 || r.rejected > 0) logger.info('otlp-failed replay', { endpoint: ep.name, ...r });
       }
     } catch (err) {
       logger.warn('otlp-failed replay error', { err: String(err) });
     }
+    this.updateAuthBackoff(authFailed);
+  }
+
+  private updateAuthBackoff(authFailed: boolean): void {
+    if (!authFailed) {
+      this.authBackoff = { failures: 0, nextAt: 0 };
+      return;
+    }
+    const failures = this.authBackoff.failures + 1;
+    const delay = Math.min(2 ** failures * this.replayIntervalMs, MAX_AUTH_BACKOFF_MS);
+    this.authBackoff = { failures, nextAt: Date.now() + delay };
+    logger.warn('otlp-failed replay got 401/403; backing off', { failures, delayMs: delay });
   }
 
   /** Stops the replay timer and aborts the in-flight request; the run then ends on its own. */

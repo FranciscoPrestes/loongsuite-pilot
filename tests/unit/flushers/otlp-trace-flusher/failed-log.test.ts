@@ -163,6 +163,41 @@ describe('OtlpTraceFlusher failed-log lifecycle', () => {
     expect(left).toEqual([]);
   });
 
+  it('backs off replay after consecutive 401s (2x, then 4x interval) and resets on success', async () => {
+    let status = 401;
+    const fetchMock = vi.fn(async () => new Response('', { status }));
+    vi.stubGlobal('fetch', fetchMock);
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir,
+      failedReplayIntervalMs: 0, // no timer; the interval still drives the delay below
+    });
+    (flusher as any).replayIntervalMs = 1000;
+    await (flusher as any).writeFailedLog('claude-code', 'primary', [mockSpan()], { code: 2, message: 'x' });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-02T00:00:00Z'));
+
+    await flusher.replayFailed(); // failure 1 -> pause 2000 ms
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + 1999);
+    await flusher.replayFailed();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + 2);
+    await flusher.replayFailed(); // failure 2 -> pause 4000 ms
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(Date.now() + 3999);
+    await flusher.replayFailed();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(Date.now() + 2);
+    status = 200;
+    await flusher.replayFailed();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect((flusher as any).authBackoff).toEqual({ failures: 0, nextAt: 0 });
+  });
+
   it('shutdown() flushes promptly even when a replay request hangs, and aborts it', async () => {
     let aborted = false;
     const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => {
