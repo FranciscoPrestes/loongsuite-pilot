@@ -148,6 +148,7 @@ function main(argv, env) {
   const root = resolve(dataDir);
   mkdirSync(root, { recursive: true });
   if (process.platform === 'win32') restrictWindowsDir(root, env);
+  else chmodSync(root, 0o700);
   // Supersede old batches first: a crash in between must not leave the new endpoint with old batches.
   const moved = endpointChanged ? supersedeFailed(root) : 0;
   writeConfig0600(file, config, env);

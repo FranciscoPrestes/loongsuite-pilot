@@ -216,7 +216,7 @@ case "$3" in
         grep "^$prefix" "$BLOBS" || true;;
 esac
 `);
-    writeFileSync(join(dir, 'bin', 'git'), '#!/bin/bash\n[ -n "$TAGGED" ] && echo "abc\trefs/tags/ntc-v1.2.0-ntc.3"\nexit 0\n');
+    writeFileSync(join(dir, 'bin', 'git'), '#!/bin/bash\n[ -n "$GIT_FAIL" ] && exit 2\n[ -n "$TAGGED" ] && echo "abc\trefs/tags/ntc-v1.2.0-ntc.3"\nexit 0\n');
     for (const f of ['az', 'git']) chmodSync(join(dir, 'bin', f), 0o755);
     writeFileSync(join(dir, 'blobs.txt'), `releases/${V}/a.tar.gz\nreleases/${V}/SHA256SUMS\ndeps/node-modules/${V}/x.tar.gz\nreleases/9.9.9-ntc.1/keep\n`);
   });
@@ -248,6 +248,14 @@ esac
     const r = await purge([V, '--yes'], { TAGGED: '1' });
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/tag ntc-v1\.2\.0-ntc\.3 exists/);
+    expect(azLog()).not.toMatch(/delete/);
+  });
+
+  it('fails closed when git ls-remote fails', async () => {
+    latest = { version: '1.2.0-ntc.1' };
+    const r = await purge([V, '--yes'], { GIT_FAIL: '1' });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/could not query tags/);
     expect(azLog()).not.toMatch(/delete/);
   });
 

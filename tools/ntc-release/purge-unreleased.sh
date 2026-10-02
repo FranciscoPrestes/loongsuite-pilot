@@ -41,7 +41,10 @@ if printf '%s\n' "$out" | grep -q '^status=existing'; then
   fi
 fi
 
-if [ -n "$(git ls-remote --tags origin "refs/tags/ntc-v${VERSION}" </dev/null)" ]; then
+# Fail closed: if the tag cannot be checked, do not delete anything.
+tags="$(git ls-remote --tags origin "refs/tags/ntc-v${VERSION}" </dev/null)" \
+  || { echo "purge-unreleased: could not query tags on origin (git ls-remote failed); refusing" >&2; exit 1; }
+if [ -n "$tags" ]; then
   echo "purge-unreleased: refusing, tag ntc-v${VERSION} exists on origin (the release is complete)" >&2
   exit 1
 fi

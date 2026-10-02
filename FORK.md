@@ -148,6 +148,17 @@ upstream subiu a versao base depois (por exemplo 1.2.0 para 1.3.0), o commit ant
 `prepare` recusa; nesse caso faca um commit de reversao **na base atual** e publique-o, para sair um `-ntc.N`
 maior na base corrente. Para um canary ruim, basta nao promove-lo e publicar a correcao por cima.
 
+### Notas operacionais
+
+- A **primeira release** (sem `latest.json` anterior) vira canary **e** stable ao mesmo tempo: o `manifest` usa a
+  propria release como stable. Dai em diante o stable so muda por promocao.
+- Ao trocar o endpoint, o `apply-config` move os lotes que falharam para `logs/otlp-superseded/` no diretorio de
+  dados. Esses spans antigos em quarentena ficam la **ate o usuario remover** a pasta; nada os apaga sozinho.
+- Quem instala digita a chave no prompt (sem eco) do `install.sh`/`install.ps1`; a variavel `NTC_PILOT_CHAVE` e so
+  para automacao (digitada na linha de comando ela fica no historico do shell).
+- So commits alcancaveis a partir de `NTConsult-main` podem ser publicados (inclusive rollbacks), e o publicador
+  (`tools/ntc-release`) sempre roda do commit do proprio workflow, nao do `source_ref`.
+
 ### O que e mutavel
 
 Tudo em `releases/<v>/` e `deps/` e imutavel (publicado com `--overwrite false`). So mudam: `manifest/latest.json`,

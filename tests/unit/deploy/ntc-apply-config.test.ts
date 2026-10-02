@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -191,6 +191,15 @@ describe('apply-config CLI', () => {
     expect(existsSync(join(dir, 'logs', 'otlp-superseded'))).toBe(false);
     const lb = run({ NTC_PILOT_ENDPOINT: 'http://localhost:9/x', NTC_PILOT_ALLOW_LOOPBACK_HTTP: '1' });
     expect(lb.status).toBe(0);
+  });
+
+  it.skipIf(process.platform === 'win32')('restricts the data directory to 0700 on POSIX, new or pre-existing', () => {
+    const fresh = join(dir, 'fresh-data');
+    expect(spawnSync('node', [SCRIPT, '--data-dir', fresh], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', NTC_PILOT_CHAVE: KEY } }).status).toBe(0);
+    expect(statSync(fresh).mode & 0o777).toBe(0o700);
+    chmodSync(dir, 0o755);
+    expect(run({ NTC_PILOT_CHAVE: KEY }).status).toBe(0);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 
   it.skipIf(process.platform !== 'win32')('applies icacls on Windows (file stays readable by owner)', () => {
