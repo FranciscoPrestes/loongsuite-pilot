@@ -115,7 +115,7 @@ function Get-PowerShellExe {
 }
 
 function Invoke-NtcInstall {
-    Write-Host 'Configurando o SDLC NTConsult e o coletor de métricas.'
+    Write-Host "Configurando o SDLC NTConsult e o coletor de m$([char]0xE9)tricas."
     Test-Key
     Assert-Https 'NTC_PILOT_BLOB_URL' $Blob
     if ($Channel -ne 'stable' -and $Channel -ne 'canary') { Fail 'NTC_PILOT_CHANNEL deve ser stable ou canary' }
@@ -202,7 +202,7 @@ function Invoke-NtcInstall {
             if ($LASTEXITCODE -ne 0) { Fail "loongsuite-pilot restart terminou com erro (codigo $LASTEXITCODE)" }
             & $cli status
         }
-        Write-Host 'Concluído.'
+        Write-Host "Conclu$([char]0xED)do."
     } finally {
         # The key and the env we exported must not outlive this run in the caller session.
         Remove-Item Env:NTC_PILOT_CHAVE -ErrorAction SilentlyContinue

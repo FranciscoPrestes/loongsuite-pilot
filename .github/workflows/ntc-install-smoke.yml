@@ -124,6 +124,7 @@ jobs:
           if (Test-Path $dataDir) { throw "installer ran despite the hash mismatch: $dataDir exists" }
           if ((Get-Content -LiteralPath $log -Raw) -notmatch 'nao confere') { throw 'abort reason is not the hash mismatch' }
           Write-Host 'Negative run aborted as expected.'
+          exit 0
       - name: Run install.ps1 as an ordinary user (output goes to a log)
         shell: cmd
         env:
