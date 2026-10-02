@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -56,5 +56,25 @@ describe('overlay.mjs CLI', () => {
     const r = run(['--stage', stage, '--blob', BLOB]);
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('missing --installers-out');
+  });
+
+  it('ships apply-config.mjs as scripts/ntc-apply-config.mjs', () => {
+    const r = run(full());
+    expect(r.status).toBe(0);
+    expect(readFileSync(join(stage, 'scripts', 'ntc-apply-config.mjs'), 'utf8')).toBe(
+      readFileSync(resolve('deploy/ntc/apply-config.mjs'), 'utf8'),
+    );
+  });
+
+  it('fails with a clear error when apply-config.mjs is missing', () => {
+    const fake = mkdtempSync(join(tmpdir(), 'ntc-overlay-noapply-'));
+    mkdirSync(join(fake, 'deploy', 'ntc'), { recursive: true });
+    for (const f of ['overlay.mjs', 'rewrite-origins.mjs']) {
+      copyFileSync(resolve('deploy/ntc', f), join(fake, 'deploy', 'ntc', f));
+    }
+    const r = spawnSync('node', [join(fake, 'deploy', 'ntc', 'overlay.mjs'), ...full()], { encoding: 'utf8' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('required file missing');
+    expect(r.stderr).toContain('apply-config.mjs');
   });
 });

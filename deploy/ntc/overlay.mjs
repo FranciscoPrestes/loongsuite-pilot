@@ -44,6 +44,10 @@ function main() {
   const stage = resolve(args.stage);
   const blob = args.blob.replace(/\/+$/, '');
   const installersOut = resolve(args['installers-out']);
+  const applyConfig = join(HERE, 'apply-config.mjs');
+  if (!existsSync(applyConfig)) {
+    throw new Error(`required file missing: ${applyConfig}`);
+  }
   const problems = [];
   let rewritten = 0;
 
@@ -79,12 +83,8 @@ function main() {
     check(dest, text);
   }
 
-  // Task 5 creates apply-config.mjs; until then the copy is optional.
-  const applyConfig = join(HERE, 'apply-config.mjs');
-  if (existsSync(applyConfig)) {
-    mkdirSync(join(stage, 'scripts'), { recursive: true });
-    copyFileSync(applyConfig, join(stage, 'scripts', 'ntc-apply-config.mjs'));
-  }
+  mkdirSync(join(stage, 'scripts'), { recursive: true });
+  copyFileSync(applyConfig, join(stage, 'scripts', 'ntc-apply-config.mjs'));
 
   if (problems.length > 0) {
     console.error('Forbidden origins remain after rewrite:');

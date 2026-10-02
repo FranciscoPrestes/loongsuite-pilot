@@ -65,6 +65,18 @@ describe('update keeps the NTConsult config', () => {
     expect(after.canary).toEqual({ hotfix_version: 3 });
   });
 
+  it.skipIf(process.platform === 'win32')('installId and canary writes keep config.json at 0600', async () => {
+    await fs.chmod(configPath, 0o600);
+    const updater = new Updater(
+      { enabled: true, checkIntervalMs: 60_000, manifestUrl: ORIGINAL.autoUpdate.manifestUrl },
+      dir,
+    );
+    await (updater as any).ensureInstallId();
+    expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600);
+    await (updater as any).persistCanaryState(4);
+    expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600);
+  });
+
   it('postinstall.js of the package leaves config.json byte-identical', async () => {
     const before = await fs.readFile(configPath, 'utf8');
     execFileSync(process.execPath, ['scripts/postinstall.js'], {
