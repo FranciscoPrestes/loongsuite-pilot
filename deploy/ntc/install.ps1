@@ -59,10 +59,13 @@ function Get-Sha256([string]$Path) {
 }
 
 function Test-AgainstSums([string]$Sums, [string]$Dir, [string]$Name) {
-    $pattern = '^([0-9a-fA-F]{64})[ \t]+\*?' + [regex]::Escape($Name) + '\s*$'
+    # Plain string handling (no [regex]:: or other non-core .NET calls: Constrained Language Mode).
     $want = $null
     foreach ($line in (Get-Content -LiteralPath $Sums)) {
-        if ($line -match $pattern) { $want = $Matches[1].ToLowerInvariant(); break }
+        $parts = ([string]$line).Trim() -split '\s+', 2
+        if ($parts.Count -ne 2) { continue }
+        if ($parts[0] -cnotmatch '^[0-9a-fA-F]{64}\z') { continue }
+        if ($parts[1].TrimStart('*') -ceq $Name) { $want = $parts[0].ToLowerInvariant(); break }
     }
     if (-not $want) { Fail "$Name ausente em SHA256SUMS" }
     if ((Get-Sha256 (Join-Path $Dir $Name)) -ne $want) {
@@ -86,7 +89,7 @@ function Resolve-Node {
     $n = ''
     $file = Join-Path $DataDir 'node-bin'
     if (Test-Path -LiteralPath $file) {
-        $n = ((Get-Content -LiteralPath $file -Encoding UTF8 -TotalCount 1) | Out-String).Trim()
+        $n = ((Get-Content -LiteralPath $file -Encoding UTF8 -TotalCount 1) | Out-String).Trim([char]0xFEFF).Trim()
     }
     if (-not $n -or -not (Test-Path -LiteralPath $n)) {
         $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
@@ -120,7 +123,7 @@ function Invoke-NtcInstall {
     Assert-Https 'NTC_PILOT_BLOB_URL' $Blob
     if ($Channel -ne 'stable' -and $Channel -ne 'canary') { Fail 'NTC_PILOT_CHANNEL deve ser stable ou canary' }
 
-    $work = Join-Path ([IO.Path]::GetTempPath()) ('ntc-pilot-' + [guid]::NewGuid().ToString('N'))
+    $work = Join-Path $env:TEMP ('ntc-pilot-' + (Get-Random) + '-' + (Get-Random))
     New-Item -ItemType Directory -Path $work -Force | Out-Null
     try {
         Get-Remote "$Blob/manifest/$Channel.txt" (Join-Path $work 'channel.txt')
@@ -163,7 +166,7 @@ function Invoke-NtcInstall {
 
         $installer = $env:NTC_PILOT_INSTALLER
         if ($installer) {
-            [Console]::Error.WriteLine('Aviso: NTC_PILOT_INSTALLER definido; verificacao sha256 do instalador ignorada.')
+            Write-Warning 'NTC_PILOT_INSTALLER definido; verificacao sha256 do instalador ignorada.'
         } else {
             $installer = Join-Path $work 'installer.ps1'
             Get-Remote "$rel/installer.ps1" $installer
@@ -214,7 +217,7 @@ function Invoke-NtcInstall {
 try {
     Invoke-NtcInstall
 } catch {
-    [Console]::Error.WriteLine("Erro: $($_.Exception.Message)")
+    Write-Host "Erro: $($_.Exception.Message)" -ForegroundColor Red
     # Run as a file: set the exit code. Under `irm | iex` there is no file, and `exit`
     # would close the user's terminal.
     if ($PSCommandPath) { exit 1 }
