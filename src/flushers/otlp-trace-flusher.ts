@@ -423,6 +423,8 @@ const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_FAILED_REPLAY_INTERVAL_MS = 5 * 60_000;
 const MAX_AUTH_BACKOFF_MS = 3_600_000;
+/** Timer ticks are fixed; counting from the run start minus slack makes the 2^k-th tick the retry. */
+const AUTH_BACKOFF_SLACK_MS = 1000;
 const REPLAY_SHUTDOWN_WAIT_MS = 2_000;
 const MAX_CONVERT_STATES = 64;
 const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
@@ -869,7 +871,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private async runReplay(): Promise<void> {
-    if (Date.now() < this.authBackoff.nextAt) return;
+    const runStart = Date.now();
+    if (runStart < this.authBackoff.nextAt) return;
     let authFailed = false;
     try {
       for (const ep of this.endpoints) {
@@ -881,23 +884,27 @@ export class OtlpTraceFlusher extends BaseFlusher {
           this.replayAbort.signal,
         );
         if (r.authFailed) authFailed = true;
+        if (r.systemicReject) {
+          authFailed = true;
+          logger.warn('otlp-failed replay: backend rejected consecutive spans; keeping the rest', { endpoint: ep.name, kept: r.kept });
+        }
         if (r.sent > 0 || r.rejected > 0) logger.info('otlp-failed replay', { endpoint: ep.name, ...r });
       }
     } catch (err) {
       logger.warn('otlp-failed replay error', { err: String(err) });
     }
-    this.updateAuthBackoff(authFailed);
+    this.updateAuthBackoff(authFailed, runStart);
   }
 
-  private updateAuthBackoff(authFailed: boolean): void {
+  private updateAuthBackoff(authFailed: boolean, runStart: number): void {
     if (!authFailed) {
       this.authBackoff = { failures: 0, nextAt: 0 };
       return;
     }
     const failures = this.authBackoff.failures + 1;
     const delay = Math.min(2 ** failures * this.replayIntervalMs, MAX_AUTH_BACKOFF_MS);
-    this.authBackoff = { failures, nextAt: Date.now() + delay };
-    logger.warn('otlp-failed replay got 401/403; backing off', { failures, delayMs: delay });
+    this.authBackoff = { failures, nextAt: runStart + delay - AUTH_BACKOFF_SLACK_MS };
+    logger.warn('otlp-failed replay got 401/403 or systemic rejection; backing off', { failures, delayMs: delay });
   }
 
   /** Stops the replay timer and aborts the in-flight request; the run then ends on its own. */
