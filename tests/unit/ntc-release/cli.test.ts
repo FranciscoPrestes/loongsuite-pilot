@@ -101,3 +101,27 @@ describe('cli manifest', () => {
     expect(r.stderr).toMatch(/missing/);
   });
 });
+
+describe('cli check-newer', () => {
+  const prev = JSON.stringify({
+    version: '1.2.0-ntc.2', git_commit: 'abc1234', package_url: 'https://x.test/a.tgz', sha256: SHA,
+    released_at: '2026-10-02T12:00:00Z',
+    canary: { version: '1.2.0-ntc.4', git_commit: 'abc1234', package_url: 'https://x.test/b.tgz', sha256: SHA, released_at: '2026-10-02T12:00:00Z', rollout_percentage: 10, hotfix_version: 0 },
+  });
+  const check = (v: string, p: string) => run(['check-newer', '--version', v, '--prev', p]);
+
+  it('accepts a first release and a version above stable and canary', () => {
+    expect(check('1.2.0-ntc.1', '-').status).toBe(0);
+    expect(check('1.2.0-ntc.5', prev).status).toBe(0);
+    expect(check('1.3.0-ntc.1', prev).status).toBe(0);
+  });
+
+  it('refuses equal or lower than stable or canary, explaining the base-bump limit', () => {
+    for (const v of ['1.2.0-ntc.4', '1.2.0-ntc.3', '1.1.9-ntc.9']) {
+      const r = check(v, prev);
+      expect(r.status, v).toBe(1);
+      expect(r.stderr).toMatch(/strictly above/);
+      expect(r.stderr).toMatch(/CURRENT base/);
+    }
+  });
+});

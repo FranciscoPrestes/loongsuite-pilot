@@ -36,7 +36,7 @@ guard=(--if-none-match '*')
 if ! out="$(upload_mutable "$DIR/latest.json" latest.json "application/json" "${guard[@]}" 2>&1)"; then
   echo "$out" >&2
   if printf '%s' "$out" | grep -Eqi 'ConditionNotMet|412|BlobAlreadyExists'; then
-    echo "::error::latest.json changed since it was read (If-Match failed). Nothing else was written. Run the workflow again."
+    echo "::error::latest.json changed since it was read (If-Match failed). latest.json and the channel files were NOT changed (release files may already be uploaded; that is resumable). Run the workflow again."
   fi
   exit 1
 fi

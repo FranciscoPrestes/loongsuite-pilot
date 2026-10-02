@@ -44,7 +44,7 @@ describe('assemble-stage stage', () => {
     expect(r.stdout.trim()).toBe(sha('content of loongsuite-pilot.tar.gz'));
     const rel = join(out, 'releases', VERSION);
     expect(readdirSync(rel).sort()).toEqual(
-      ['SHA256SUMS', 'apply-config.mjs', 'installer.ps1', 'installer.sh', 'loongsuite-pilot.tar.gz', 'loongsuite-pilot.zip'],
+      ['SHA256SUMS', 'apply-config.mjs', 'installer.ps1', 'installer.sh', 'loongsuite-pilot.tar.gz', 'loongsuite-pilot.zip', 'thin'],
     );
     const sums = readFileSync(join(rel, 'SHA256SUMS'), 'utf8').trim().split('\n');
     expect(sums).toHaveLength(5);
@@ -52,6 +52,8 @@ describe('assemble-stage stage', () => {
     expect(sums.join('\n')).not.toMatch(/SHA256SUMS/);
     expect(readFileSync(join(out, 'install.sh'), 'utf8')).toBe('thin sh');
     expect(readFileSync(join(out, 'install.ps1'), 'utf8')).toBe('thin ps1');
+    expect(readFileSync(join(rel, 'thin', 'install.sh'), 'utf8')).toBe('thin sh');
+    expect(readFileSync(join(rel, 'thin', 'install.ps1'), 'utf8')).toBe('thin ps1');
   });
 
   it('concatenates the five platform fragments into deps/node-modules/<v>/SHASUMS256.txt', () => {

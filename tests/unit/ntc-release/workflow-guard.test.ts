@@ -46,4 +46,31 @@ describe('ntc-release.yml publish guards', () => {
     expect(head).toContain('# TEMPORARY: dry-run from the feature branch; remove before merging into NTConsult-main');
     expect(head).toMatch(/push:\n    branches: \[feat\/ntc-fase1-distribuicao\]/);
   });
+
+  it('release never overwrites the root thin installers; promotion owns them', () => {
+    const publish = jobs.get('publish')!;
+    expect(publish).not.toMatch(/--overwrite true/);
+    expect(publish).toMatch(/--overwrite false[^\n]*\\?\n?[^\n]*content-type/);
+    const promote = readFileSync(join(__dirname, '../../../.github/workflows/ntc-promote.yml'), 'utf8');
+    expect(promote).toMatch(/alias_copy "\$rel\/thin\/install\.sh" install\.sh/);
+    expect(promote).toMatch(/alias_copy "\$rel\/thin\/install\.ps1" install\.ps1/);
+  });
+
+  it('checks the ETag before and after the uploads and the channels afterwards', () => {
+    const publish = jobs.get('publish')!;
+    expect(publish.match(/assert-etag\.sh/g)).toHaveLength(2);
+    expect(publish.indexOf('assert-etag.sh')).toBeLessThan(publish.indexOf('upload-immutable.sh'));
+    expect(publish.lastIndexOf('assert-etag.sh')).toBeGreaterThan(publish.indexOf('upload-immutable.sh'));
+    expect(publish.indexOf('check-channels.mjs')).toBeGreaterThan(publish.indexOf('publish-manifest.sh'));
+    expect(publish.indexOf('git push origin')).toBeGreaterThan(publish.indexOf('check-channels.mjs'));
+  });
+
+  it('pins every action by commit sha and persists credentials only in publish', () => {
+    for (const m of text.matchAll(/uses: (\S+)@(\S+)/g)) expect(m[2], m[1]).toMatch(/^[0-9a-f]{40}$/);
+    for (const [name, body] of jobs) {
+      const hasFalse = /persist-credentials: false/.test(body);
+      if (name === 'publish') expect(hasFalse).toBe(false);
+      else expect(hasFalse, name).toBe(true);
+    }
+  });
 });

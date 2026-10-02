@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// CLI: next-version | manifest. See task 4/9 of the NTConsult phase-1 plan.
+// CLI: next-version | check-newer | manifest. See task 4/9 of the NTConsult phase-1 plan.
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { nextNtcVersion } from './version.mjs';
-import { buildManifest, renderChannelEnv } from './manifest.mjs';
+import { buildManifest, compareNtc, renderChannelEnv } from './manifest.mjs';
 
 const BOOLEAN_FLAGS = new Set(['allow-downgrade']);
 const VALUE_FLAGS = new Set([
@@ -46,6 +46,22 @@ function runNextVersion(args) {
   process.stdout.write(`${nextNtcVersion(need(args, 'base'), tags)}\n`);
 }
 
+function runCheckNewer(args) {
+  const version = need(args, 'version');
+  const prev = parsePrev(args.prev);
+  if (!prev) return;
+  const blockers = [['stable', prev.version], ['canary', prev.canary?.version]]
+    .filter(([, v]) => typeof v === 'string' && compareNtc(version, v) <= 0);
+  if (blockers.length === 0) return;
+  const which = blockers.map(([n, v]) => `${n} ${v}`).join(' and ');
+  throw new Error(
+    `version ${version} is not strictly above the published ${which}. The updater never downgrades, ` +
+    'so a release must beat both current stable and canary. A source_ref rollback only works while the ' +
+    "source commit's package.json base version is >= the published one; if upstream bumped the base since, " +
+    'publish a revert commit on the CURRENT base so the next -ntc.N is higher.',
+  );
+}
+
 function runManifest(args) {
   const kind = need(args, 'action');
   const release = {
@@ -73,8 +89,9 @@ try {
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
   if (cmd === 'next-version') runNextVersion(args);
+  else if (cmd === 'check-newer') runCheckNewer(args);
   else if (cmd === 'manifest') runManifest(args);
-  else throw new Error('usage: cli.mjs <next-version|manifest> ...');
+  else throw new Error('usage: cli.mjs <next-version|check-newer|manifest> ...');
 } catch (err) {
   process.stderr.write(`error: ${err.message}\n`);
   process.exit(1);
