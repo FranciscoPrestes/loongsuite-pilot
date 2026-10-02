@@ -1,0 +1,321 @@
+# NTConsult fork: build, test and (only when dry_run is false) publish a canary release to the blob.
+# dry_run defaults to true and ends in the `assemble` job: the `publish` job is unreachable then.
+# Rollback = republish a good commit through source_ref (the updater never downgrades), see FORK.md.
+name: NTConsult release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch, tag or commit to release (rollback = a known good commit)'
+        required: true
+        default: NTConsult-main
+        type: string
+      rollout:
+        description: 'Canary rollout percentage (1-100)'
+        required: true
+        default: '10'
+        type: string
+      dry_run:
+        description: 'Build and assemble only; publish nothing'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ntc-release
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 22.22.2
+  # Repository variables (never secrets). The URL falls back to the planned blob for dry runs.
+  NTC_BLOB_BASE_URL: ${{ vars.NTC_BLOB_BASE_URL || 'https://stntconsultpilot.blob.core.windows.net/pilot' }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compute the next version and refuse an existing tag
+        id: v
+        env:
+          ROLLOUT: ${{ inputs.rollout }}
+        run: |
+          set -euo pipefail
+          [[ "$ROLLOUT" =~ ^[0-9]+$ ]] && [ "$ROLLOUT" -ge 1 ] && [ "$ROLLOUT" -le 100 ] \
+            || { echo "::error::rollout must be an integer from 1 to 100"; exit 1; }
+          git tag -l 'ntc-v*' > "$RUNNER_TEMP/tags.txt"
+          base="$(node -p "require('./package.json').version")"
+          version="$(node tools/ntc-release/cli.mjs next-version --base "$base" --tags-file "$RUNNER_TEMP/tags.txt")"
+          if git rev-parse -q --verify "refs/tags/ntc-v${version}" >/dev/null; then
+            echo "::error::tag ntc-v${version} already exists"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version from $(git rev-parse HEAD)"
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Unit tests (throwaway HOME, as the suite writes to ~/.claude)
+        run: env -u LOONGSUITE_PILOT_DATA_DIR HOME="$(mktemp -d)" npx vitest run
+
+  package:
+    needs: [prepare, test]
+    runs-on: ubuntu-24.04
+    outputs:
+      git_commit: ${{ steps.pkg.outputs.git_commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Package (origins rewritten to the blob; the overlay rejects forbidden origins)
+        id: pkg
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm version "$VERSION" --no-git-tag-version
+          mkdir -p out/installers release
+          NTC_BLOB_BASE_URL="${NTC_BLOB_BASE_URL%/}" NTC_INSTALLERS_OUT=out/installers \
+            bash deploy/package-opensource.sh -o out/loongsuite-pilot.tar.gz
+          cp out/loongsuite-pilot.tar.gz out/loongsuite-pilot.zip release/
+          cp out/installers/installer.sh out/installers/installer.ps1 release/
+          cp deploy/ntc/apply-config.mjs release/
+          # The staged package carries the same apply-config as the one released next to it.
+          tar -xzOf release/loongsuite-pilot.tar.gz loongsuite-pilot/scripts/ntc-apply-config.mjs \
+            | cmp - release/apply-config.mjs
+          commit="$(tar -xzOf release/loongsuite-pilot.tar.gz loongsuite-pilot/VERSION | sed -n 's/^git_commit=//p')"
+          [[ "$commit" =~ ^[0-9a-f]{7,40}$ ]] || { echo "::error::bad git_commit in package VERSION: $commit"; exit 1; }
+          echo "git_commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ needs.prepare.outputs.version }}
+          path: release/
+          if-no-files-found: error
+
+  node-modules:
+    needs: [prepare, package]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: macos-14, os: darwin, arch: arm64 }
+          - { runner: macos-13, os: darwin, arch: x64 }
+          - { runner: ubuntu-24.04, os: linux, arch: x64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: arm64 }
+          - { runner: windows-2022, os: win, arch: x64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.prepare.outputs.version }}
+          path: release
+      - name: Build the production node_modules for this platform
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          tar -xzf release/loongsuite-pilot.tar.gz -C work
+          bash tools/ntc-release/build-node-modules.sh "$TARGET_OS" "$TARGET_ARCH" "$VERSION" nm-out work/loongsuite-pilot "$NODE_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nm-${{ matrix.os }}-${{ matrix.arch }}
+          path: nm-out/
+          if-no-files-found: error
+
+  assemble:
+    needs: [prepare, package, node-modules]
+    runs-on: ubuntu-24.04
+    outputs:
+      etag: ${{ steps.prev.outputs.etag }}
+      status: ${{ steps.prev.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.prepare.outputs.version }}
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nm-*
+          path: nm
+          merge-multiple: true
+      - name: Read the current latest.json (anonymous) and its ETag
+        id: prev
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          mode=allow-missing
+          # Before the blob exists a dry run cannot reach it; a real run must not guess.
+          [ "$DRY_RUN" = "true" ] && mode=lenient
+          bash tools/ntc-release/fetch-manifest.sh "$NTC_BLOB_BASE_URL" "$RUNNER_TEMP/prev.json" "$mode"
+      - name: Assemble the blob stage and the manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GIT_COMMIT: ${{ needs.package.outputs.git_commit }}
+          ROLLOUT: ${{ inputs.rollout }}
+          PREV_STATUS: ${{ steps.prev.outputs.status }}
+        run: |
+          set -euo pipefail
+          sha="$(node tools/ntc-release/assemble-stage.mjs stage --version "$VERSION" \
+            --pkg-dir release --thin-dir deploy/ntc --node-modules-dir nm --out stage)"
+          prev='-'
+          [ "$PREV_STATUS" = "existing" ] && prev="$(cat "$RUNNER_TEMP/prev.json")"
+          node tools/ntc-release/cli.mjs manifest --action canary --prev "$prev" --version "$VERSION" \
+            --git-commit "$GIT_COMMIT" \
+            --package-url "${NTC_BLOB_BASE_URL%/}/releases/${VERSION}/loongsuite-pilot.tar.gz" \
+            --sha256 "$sha" --released-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --rollout "$ROLLOUT" --out-dir "$RUNNER_TEMP/manifest"
+          node tools/ntc-release/assemble-stage.mjs place-manifest --manifest-dir "$RUNNER_TEMP/manifest" --out stage
+          cat stage/latest.json
+          (cd stage && find . -type f | sort)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blob-stage
+          path: stage/
+          if-no-files-found: error
+      - name: Summary
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          echo "Version $VERSION assembled (dry_run=$DRY_RUN). Artifact: blob-stage." >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    # Unreachable when dry_run is true.
+    if: ${{ !inputs.dry_run }}
+    needs: [prepare, assemble]
+    runs-on: ubuntu-24.04
+    environment: ntc-canary
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      NTC_STORAGE_ACCOUNT: ${{ vars.NTC_STORAGE_ACCOUNT }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      NTC_ETAG: ${{ needs.assemble.outputs.etag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      CONTAINER: pilot
+      BLOB_VAR: ${{ vars.NTC_BLOB_BASE_URL }}
+    steps:
+      - name: Guard (publish must never run in a dry run)
+        run: |
+          [ "$DRY_RUN" = "false" ] || { echo "::error::refusing to publish with dry_run=$DRY_RUN"; exit 1; }
+          for v in NTC_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID BLOB_VAR; do
+            [ -n "${!v}" ] || { echo "::error::repository variable $v (NTC_BLOB_BASE_URL for BLOB_VAR) is not set"; exit 1; }
+          done
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: blob-stage
+          path: stage
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Refuse to overwrite an existing release
+        run: |
+          set -euo pipefail
+          for prefix in "releases/${VERSION}/" "deps/node-modules/${VERSION}/"; do
+            n="$(az storage blob list --auth-mode login --account-name "$NTC_STORAGE_ACCOUNT" \
+              --subscription "$AZURE_SUBSCRIPTION_ID" --container-name "$CONTAINER" \
+              --prefix "$prefix" --query 'length(@)' --output tsv)"
+            [ "$n" = "0" ] || { echo "::error::$prefix already has $n blobs; releases are immutable"; exit 1; }
+          done
+      - name: Upload the immutable release paths (fails if any blob exists)
+        run: |
+          set -euo pipefail
+          for prefix in "releases/${VERSION}" "deps/node-modules/${VERSION}"; do
+            az storage blob upload-batch --auth-mode login --account-name "$NTC_STORAGE_ACCOUNT" \
+              --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors \
+              -d "$CONTAINER" -s stage --pattern "${prefix}/*" --overwrite false --output none
+          done
+      - name: Mirror the managed Node.js (only if absent)
+        run: |
+          set -euo pipefail
+          az_blob() { az storage blob "$@" --auth-mode login --account-name "$NTC_STORAGE_ACCOUNT" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors; }
+          # SHASUMS256.txt is uploaded last, so its presence means the mirror is complete.
+          done_flag="$(az_blob exists --container-name "$CONTAINER" --name "deps/node/${NODE_VERSION}/SHASUMS256.txt" --query exists --output tsv)"
+          if [ "$done_flag" = "true" ]; then echo "deps/node/${NODE_VERSION}/ already mirrored"; exit 0; fi
+          mirror="$RUNNER_TEMP/node-mirror"
+          bash tools/ntc-release/mirror-node.sh "$NODE_VERSION" "$mirror"
+          for f in "$mirror/${NODE_VERSION}"/*; do
+            name="$(basename "$f")"
+            [ "$name" = "SHASUMS256.txt" ] && continue
+            exists="$(az_blob exists --container-name "$CONTAINER" --name "deps/node/${NODE_VERSION}/${name}" --query exists --output tsv)"
+            [ "$exists" = "true" ] || az_blob upload --container-name "$CONTAINER" --file "$f" \
+              --name "deps/node/${NODE_VERSION}/${name}" --overwrite false --output none
+          done
+          az_blob upload --container-name "$CONTAINER" --file "$mirror/${NODE_VERSION}/SHASUMS256.txt" \
+            --name "deps/node/${NODE_VERSION}/SHASUMS256.txt" --overwrite false --output none
+      - name: Upload the thin installers (no-cache)
+        run: |
+          set -euo pipefail
+          for f in install.sh install.ps1; do
+            az storage blob upload --auth-mode login --account-name "$NTC_STORAGE_ACCOUNT" \
+              --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors \
+              --container-name "$CONTAINER" --file "stage/$f" --name "$f" --overwrite true \
+              --content-type "text/plain; charset=utf-8" --content-cache-control "no-cache" --output none
+          done
+      - name: Write latest.json (If-Match), stable.txt and canary.txt
+        run: bash tools/ntc-release/publish-manifest.sh stage
+      - name: Tag the release
+        run: |
+          set -euo pipefail
+          git tag "ntc-v${VERSION}" "$SOURCE_SHA"
+          git push origin "refs/tags/ntc-v${VERSION}"
