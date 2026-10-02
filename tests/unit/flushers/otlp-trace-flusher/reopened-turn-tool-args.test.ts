@@ -156,11 +156,12 @@ describe('OtlpTraceFlusher - tool call arguments across a reopened turn', () => 
     const exported: ReadableSpan[] = [];
     flusher = makeFlusher(exported);
 
-    await flusher.send(prompt());
-    for (const r of firstStep()) await flusher.send(r);
-    await flusher.send(toolCall());
+    await flusher.send(prompt(), 10);
+    for (const r of firstStep()) await flusher.send(r, 20);
+    await flusher.send(toolCall(), 70);
     await wait(IDLE_WAIT_MS);
     expect(toolSpans(exported, 'c1')).toHaveLength(0);
+    expect(internals(flusher).heldOrphans.size).toBe(1);
 
     // Shutdown is the final flush: the interrupted call is discarded, not
     // emitted as an empty TOOL span, and nothing is retained afterwards.
@@ -168,6 +169,10 @@ describe('OtlpTraceFlusher - tool call arguments across a reopened turn', () => 
 
     expect(toolSpans(exported, 'c1')).toHaveLength(0);
     expect(internals(flusher).turnBuffers.size).toBe(0);
-    expect(internals(flusher).heldOrphans?.size ?? 0).toBe(0);
+    expect(internals(flusher).heldOrphans.size).toBe(0);
+    // Every accepted byte is counted as removed exactly once, held ones included.
+    const row = flusher.getTraceRuntimeSnapshot().find(r => r.agent_type === 'claude-code');
+    expect(row?.removed_logical_bytes_total).toBe(120);
+    expect(row?.removed_unmeasured_records_total).toBe(0);
   });
 });

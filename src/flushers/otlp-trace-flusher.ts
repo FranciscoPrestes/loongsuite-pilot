@@ -129,6 +129,11 @@ interface TurnBuffer {
   runtimeCounters?: TraceRuntimeCounters;
 }
 
+interface HeldOrphans {
+  records: AgentActivityEntry[];
+  runtimeCounters?: TraceRuntimeCounters;
+}
+
 interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
@@ -547,7 +552,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
    * (so a late tool.result still finds its arguments) and are dropped at the
    * final flush. Never converted while held, so never exported twice.
    */
-  private readonly heldOrphans = new Map<string, AgentActivityEntry[]>();
+  private readonly heldOrphans = new Map<string, HeldOrphans>();
   /** Measured logical size per buffered record, to move exact bytes with held records. */
   private readonly recordLogicalBytes = new WeakMap<AgentActivityEntry, number>();
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
@@ -847,7 +852,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     await this.flushCompleted();
     // Final flush: whatever is still held never got its mate (interrupted
     // turn). Discard it, as dropOrphanPairs does for the final conversion.
-    this.heldOrphans.clear();
+    for (const key of [...this.heldOrphans.keys()]) this.discardHeldOrphans(key);
     while (this.inFlightExports.size > 0 || this.pendingFailedWrites.size > 0) {
       const batch = [...this.inFlightExports, ...this.pendingFailedWrites];
       await Promise.allSettled(batch);
@@ -1077,12 +1082,24 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.unmeasuredRecords = Math.max(0, buf.unmeasuredRecords - unmeasured);
     // Re-insert so Map order stays oldest-first for cap eviction.
     this.heldOrphans.delete(buf.key);
-    this.heldOrphans.set(buf.key, orphans);
+    this.heldOrphans.set(buf.key, { records: orphans, runtimeCounters: buf.runtimeCounters });
     while (this.heldOrphans.size > MAX_HELD_ORPHAN_TURNS) {
       const oldest = this.heldOrphans.keys().next().value as string;
       logger.debug(`Dropping held unpaired records of turn ${oldest} (cap)`);
-      this.heldOrphans.delete(oldest);
+      this.discardHeldOrphans(oldest);
     }
+  }
+
+  /** Drops a held turn for good, crediting its bytes to the removed counters once. */
+  private discardHeldOrphans(key: string): void {
+    const held = this.heldOrphans.get(key);
+    if (!held) return;
+    this.heldOrphans.delete(key);
+    const counters = held.runtimeCounters;
+    if (!counters) return;
+    const { bytes, unmeasured } = this.sizeOf(held.records);
+    counters.removed_logical_bytes_total += bytes;
+    counters.removed_unmeasured_records_total += unmeasured;
   }
 
   /** Prepends held records to a freshly (re)opened buffer of the same turn. */
@@ -1090,8 +1107,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const held = this.heldOrphans.get(buf.key);
     if (!held) return;
     this.heldOrphans.delete(buf.key);
-    const { bytes, unmeasured } = this.sizeOf(held);
-    buf.records = [...held];
+    const { bytes, unmeasured } = this.sizeOf(held.records);
+    buf.records = [...held.records];
     buf.logicalBytes += bytes;
     buf.unmeasuredRecords += unmeasured;
   }
