@@ -2,7 +2,7 @@
 # package-opensource.sh — Build the project and create distributable packages
 #
 # Produces both .tar.gz (Linux/macOS) and .zip (Windows) packages.
-# Internal-only and updater files are stripped automatically.
+# Internal-only files are stripped automatically (the updater daemon is kept).
 #
 # Usage:
 #   bash deploy/package-opensource.sh                       # default output
@@ -116,8 +116,13 @@ chmod +x "$PKG_DIR/assets/hooks/"*.sh 2>/dev/null || true
 
 # Strip internal-only files (always for opensource)
 rm -f "$PKG_DIR/scripts/migrate-internal-config.js"
-rm -f "$PKG_DIR/scripts/updater-daemon.js"
 echo "    ✅ Stripped internal-only files"
+
+# NTConsult: rewrite download origins to our blob and refuse to ship Alibaba origins.
+if [ -n "${NTC_BLOB_BASE_URL:-}" ]; then
+    node "$PROJECT_ROOT/deploy/ntc/overlay.mjs" --stage "$PKG_DIR" \
+        --blob "$NTC_BLOB_BASE_URL" --installers-out "${NTC_INSTALLERS_OUT:-$STAGE_DIR/installers}"
+fi
 
 echo "    ✅ Staged into $PKG_DIR"
 
