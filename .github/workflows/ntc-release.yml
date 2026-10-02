@@ -1,6 +1,10 @@
 # NTConsult fork: build, test and (only when dry_run is false) publish a canary release to the blob.
 # dry_run defaults to true and ends in the `assemble` job: the `publish` job is unreachable then.
 # Only workflow_dispatch triggers it, and it must exist on the default branch (see FORK.md).
+# Trust split: the SOURCE (source_ref, must be reachable from NTConsult-main) is what gets built; the TOOLING that
+# decides versions, assembles and publishes (tools/ntc-release, deploy/ntc thin installers excepted) always comes
+# from the commit this workflow runs from (github.sha) in a separate `tooling` path, so a release of an old or odd
+# commit cannot change how publishing behaves. test/package/node-modules run unprivileged (no Azure) and use the source.
 # Rollback = republish a good commit through source_ref (the updater never downgrades), see FORK.md.
 name: NTConsult release
 
@@ -45,8 +49,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_ref }}
+          path: src
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -60,22 +70,28 @@ jobs:
           set -euo pipefail
           [[ "$ROLLOUT" =~ ^[0-9]+$ ]] && [ "$ROLLOUT" -ge 1 ] && [ "$ROLLOUT" -le 100 ] \
             || { echo "::error::rollout must be an integer from 1 to 100"; exit 1; }
-          git tag -l 'ntc-v*' > "$RUNNER_TEMP/tags.txt"
-          base="$(node -p "require('./package.json').version")"
-          version="$(node tools/ntc-release/cli.mjs next-version --base "$base" --tags-file "$RUNNER_TEMP/tags.txt")"
-          if git rev-parse -q --verify "refs/tags/ntc-v${version}" >/dev/null; then
+          sha="$(git -C src rev-parse HEAD)"
+          # Only commits reachable from NTConsult-main can be released (rollbacks included).
+          git -C src rev-parse -q --verify refs/remotes/origin/NTConsult-main >/dev/null \
+            || { echo "::error::origin/NTConsult-main was not fetched"; exit 1; }
+          git -C src merge-base --is-ancestor "$sha" refs/remotes/origin/NTConsult-main \
+            || { echo "::error::$sha is not reachable from NTConsult-main: only commits reachable from NTConsult-main can be released, rollbacks included"; exit 1; }
+          git -C src tag -l 'ntc-v*' > "$RUNNER_TEMP/tags.txt"
+          base="$(node -p "require('./src/package.json').version")"
+          version="$(node tooling/tools/ntc-release/cli.mjs next-version --base "$base" --tags-file "$RUNNER_TEMP/tags.txt")"
+          if git -C src rev-parse -q --verify "refs/tags/ntc-v${version}" >/dev/null; then
             echo "::error::tag ntc-v${version} already exists"; exit 1
           fi
           # The new version must beat the published stable AND canary (the updater never downgrades).
           mode=allow-missing
           [ "$DRY_RUN" = "true" ] && mode=lenient
-          bash tools/ntc-release/fetch-manifest.sh "$NTC_BLOB_BASE_URL" "$RUNNER_TEMP/prev.json" "$mode" | tee "$RUNNER_TEMP/prev.out"
+          bash tooling/tools/ntc-release/fetch-manifest.sh "$NTC_BLOB_BASE_URL" "$RUNNER_TEMP/prev.json" "$mode" | tee "$RUNNER_TEMP/prev.out"
           prev='-'
           grep -q '^status=existing' "$RUNNER_TEMP/prev.out" && prev="$(cat "$RUNNER_TEMP/prev.json")"
-          node tools/ntc-release/cli.mjs check-newer --version "$version" --prev "$prev"
+          node tooling/tools/ntc-release/cli.mjs check-newer --version "$version" --prev "$prev"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "Releasing $version from $(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version from $sha"
 
   test:
     needs: prepare
@@ -184,9 +200,16 @@ jobs:
       etag: ${{ steps.prev.outputs.etag }}
       status: ${{ steps.prev.outputs.status }}
     steps:
+      # The source supplies only the thin installers (deploy/ntc); every script comes from the tooling checkout.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}
+          path: src
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -209,7 +232,7 @@ jobs:
           mode=allow-missing
           # Before the blob exists a dry run cannot reach it; a real run must not guess.
           [ "$DRY_RUN" = "true" ] && mode=lenient
-          bash tools/ntc-release/fetch-manifest.sh "$NTC_BLOB_BASE_URL" "$RUNNER_TEMP/prev.json" "$mode"
+          bash tooling/tools/ntc-release/fetch-manifest.sh "$NTC_BLOB_BASE_URL" "$RUNNER_TEMP/prev.json" "$mode"
       - name: Assemble the blob stage and the manifest
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -218,17 +241,17 @@ jobs:
           PREV_STATUS: ${{ steps.prev.outputs.status }}
         run: |
           set -euo pipefail
-          sha="$(node tools/ntc-release/assemble-stage.mjs stage --version "$VERSION" \
-            --pkg-dir release --thin-dir deploy/ntc --node-modules-dir nm --out stage)"
+          sha="$(node tooling/tools/ntc-release/assemble-stage.mjs stage --version "$VERSION" \
+            --pkg-dir release --thin-dir src/deploy/ntc --node-modules-dir nm --out stage)"
           prev='-'
           [ "$PREV_STATUS" = "existing" ] && prev="$(cat "$RUNNER_TEMP/prev.json")"
-          node tools/ntc-release/cli.mjs check-newer --version "$VERSION" --prev "$prev"
-          node tools/ntc-release/cli.mjs manifest --action canary --prev "$prev" --version "$VERSION" \
+          node tooling/tools/ntc-release/cli.mjs check-newer --version "$VERSION" --prev "$prev"
+          node tooling/tools/ntc-release/cli.mjs manifest --action canary --prev "$prev" --version "$VERSION" \
             --git-commit "$GIT_COMMIT" \
             --package-url "${NTC_BLOB_BASE_URL%/}/releases/${VERSION}/loongsuite-pilot.tar.gz" \
             --sha256 "$sha" --released-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --rollout "$ROLLOUT" --out-dir "$RUNNER_TEMP/manifest"
-          node tools/ntc-release/assemble-stage.mjs place-manifest --manifest-dir "$RUNNER_TEMP/manifest" --out stage
+          node tooling/tools/ntc-release/assemble-stage.mjs place-manifest --manifest-dir "$RUNNER_TEMP/manifest" --out stage
           cat stage/manifest/latest.json
           (cd stage && find . -type f | sort)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -270,9 +293,12 @@ jobs:
           for v in NTC_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID BLOB_VAR; do
             [ -n "${!v}" ] || { echo "::error::repository variable $v (NTC_BLOB_BASE_URL for BLOB_VAR) is not set"; exit 1; }
           done
+      # Tooling from the workflow's own commit, never from source_ref. The full history is needed to tag SOURCE_SHA
+      # (the tag push uses this checkout's credentials, the only checkout that persists them).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.prepare.outputs.sha }}
+          ref: ${{ github.sha }}
+          path: tooling
           fetch-depth: 0
           fetch-tags: true
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -288,9 +314,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Check latest.json is unchanged since assemble (before writing anything)
-        run: bash tools/ntc-release/assert-etag.sh "$NTC_BLOB_BASE_URL" "$NTC_ETAG"
+        run: bash tooling/tools/ntc-release/assert-etag.sh "$NTC_BLOB_BASE_URL" "$NTC_ETAG"
       - name: Upload the immutable release paths (resumable; an existing blob must be identical)
-        run: bash tools/ntc-release/upload-immutable.sh stage "releases/${VERSION}" "deps/node-modules/${VERSION}"
+        run: bash tooling/tools/ntc-release/upload-immutable.sh stage "releases/${VERSION}" "deps/node-modules/${VERSION}"
       - name: Mirror the managed Node.js (only if absent)
         run: |
           set -euo pipefail
@@ -300,7 +326,7 @@ jobs:
           done_flag="$(az_blob exists --container-name "$CONTAINER" --name "deps/node/${NODE_VERSION}/SHASUMS256.txt" --query exists --output tsv)"
           if [ "$done_flag" = "true" ]; then echo "deps/node/${NODE_VERSION}/ already mirrored"; exit 0; fi
           mirror="$RUNNER_TEMP/node-mirror"
-          bash tools/ntc-release/mirror-node.sh "$NODE_VERSION" "$mirror"
+          bash tooling/tools/ntc-release/mirror-node.sh "$NODE_VERSION" "$mirror"
           for f in "$mirror/${NODE_VERSION}"/*; do
             name="$(basename "$f")"
             [ "$name" = "SHASUMS256.txt" ] && continue
@@ -324,24 +350,26 @@ jobs:
               --content-type "text/plain; charset=utf-8" --content-cache-control "no-cache" --output none
           done
       - name: Re-check latest.json is unchanged (after the long uploads, before the manifest)
-        run: bash tools/ntc-release/assert-etag.sh "$NTC_BLOB_BASE_URL" "$NTC_ETAG"
+        run: bash tooling/tools/ntc-release/assert-etag.sh "$NTC_BLOB_BASE_URL" "$NTC_ETAG"
       - name: Write latest.json (If-Match), stable.txt and canary.txt
         id: manifest
-        run: bash tools/ntc-release/publish-manifest.sh stage
+        run: bash tooling/tools/ntc-release/publish-manifest.sh stage
       - name: Check the published channels agree with latest.json
         id: channels
-        run: node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+        run: node tooling/tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
       - name: Repair the channel files from latest.json (only after a failed manifest write or check)
         if: ${{ failure() && (steps.manifest.conclusion == 'failure' || steps.channels.conclusion == 'failure') }}
         run: |
           set -euo pipefail
-          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL" --repair "$RUNNER_TEMP/repair"
-          NTC_TXT_ONLY=1 bash tools/ntc-release/publish-manifest.sh "$RUNNER_TEMP/repair"
-          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+          node tooling/tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL" --repair "$RUNNER_TEMP/repair"
+          NTC_TXT_ONLY=1 bash tooling/tools/ntc-release/publish-manifest.sh "$RUNNER_TEMP/repair"
+          node tooling/tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
           echo "::warning::channel files repaired from latest.json; the ntc-v tag was NOT pushed, push it by hand (see FORK.md)"
       - name: Tag the release (last; if this fails, create the tag by hand, see FORK.md)
         run: |
           set -euo pipefail
+          cd tooling
+          git cat-file -e "${SOURCE_SHA}^{commit}" || { echo "::error::source commit $SOURCE_SHA is not in the fetched history"; exit 1; }
           git tag "ntc-v${VERSION}" "$SOURCE_SHA"
           git push origin "refs/tags/ntc-v${VERSION}" \
             || { echo "::error::manifest is published but the tag push failed. Run: git tag ntc-v${VERSION} ${SOURCE_SHA} && git push origin ntc-v${VERSION}"; exit 1; }
