@@ -81,4 +81,20 @@ describe('compareVersions', () => {
       expect(compareVersions('100.200.300', '100.200.299')).toBe(1);
     });
   });
+
+  describe('compareVersions with -ntc.N builds', () => {
+    const cases: Array<[string, string, number]> = [
+      ['1.2.0-ntc.10', '1.2.0-ntc.9', 1],
+      ['1.2.0-ntc.9', '1.2.0-ntc.10', -1],
+      ['1.10.0-ntc.1', '1.9.0-ntc.3', 1],
+      ['1.2.0-ntc.1', '1.2.0', 1],
+      ['1.2.0', '1.2.0-ntc.1', -1],
+      ['1.3.0', '1.2.0-ntc.5', 1],
+      ['1.2.0-ntc.5', '1.3.0', -1],
+      ['1.2.0-ntc.3', '1.2.0-ntc.3', 0],
+    ];
+    it.each(cases)('compareVersions(%s, %s) = %i', (a, b, expected) => {
+      expect(compareVersions(a, b)).toBe(expected);
+    });
+  });
 });
