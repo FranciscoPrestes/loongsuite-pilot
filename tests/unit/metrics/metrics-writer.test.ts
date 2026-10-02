@@ -174,7 +174,7 @@ describe('MetricsWriter', () => {
       agent_type: 'codex', pending_buffers: 1, pending_records: 2, pending_logical_bytes: 100,
       pending_unmeasured_records: 0, largest_buffer_logical_bytes: 100, largest_buffer_records: 2,
       largest_buffer_age_ms: 60_000, largest_buffer_turn_id: 'turn', largest_buffer_session_id: 'session',
-      oldest_buffer_age_ms: 60_000, removed_buffers_total: 3, removed_logical_bytes_total: 400,
+      oldest_buffer_age_ms: 60_000, held_orphan_turns: 0, held_orphan_logical_bytes: 0, removed_buffers_total: 3, removed_logical_bytes_total: 400,
       removed_unmeasured_records_total: 0, converter_calls_total: 3, converter_duration_ms_total: 12,
       converter_failed_total: 0,
     };

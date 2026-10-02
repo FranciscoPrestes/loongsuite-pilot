@@ -106,10 +106,13 @@ describe('OtlpTraceFlusher - lifecycle', () => {
       turnIdleTimeoutMs: 100, // very short for testing
     });
 
+    // An input record, not a lone llm.request: an early flush holds unpaired
+    // llm.request/tool.call records for a reopened turn instead of sending them.
     await flusher.send({
-      'event.name': 'llm.request',
+      'event.name': 'other',
       'gen_ai.agent.type': 'claude-code',
       'gen_ai.turn.id': 'idle-turn',
+      'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'first-part' }] }],
     } as unknown as AgentActivityEntry);
 
     expect(mockConvert).not.toHaveBeenCalled();
@@ -134,9 +137,10 @@ describe('OtlpTraceFlusher - lifecycle', () => {
     });
 
     await flusher.send({
-      'event.name': 'llm.request',
+      'event.name': 'other',
       'gen_ai.agent.type': 'claude-code',
       'gen_ai.turn.id': 'long-tool-turn',
+      'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'first-part' }] }],
     } as unknown as AgentActivityEntry);
     await new Promise((r) => setTimeout(r, 1200));
     expect(mockConvert).toHaveBeenCalledTimes(1);
@@ -152,7 +156,7 @@ describe('OtlpTraceFlusher - lifecycle', () => {
     expect(mockConvert).toHaveBeenCalledTimes(2);
     const second = JSON.stringify(mockConvert.mock.calls[1]);
     expect(second).toContain('tool.result');
-    expect(second).not.toContain('llm.request');
+    expect(second).not.toContain('first-part');
 
     await flusher.shutdown();
   });

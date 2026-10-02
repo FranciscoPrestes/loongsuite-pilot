@@ -2,7 +2,8 @@
 # package-opensource.sh — Build the project and create distributable packages
 #
 # Produces both .tar.gz (Linux/macOS) and .zip (Windows) packages.
-# Internal-only and updater files are stripped automatically.
+# Internal-only and updater files are stripped automatically (NTConsult: the updater daemon is kept
+# when NTC_BLOB_BASE_URL is set).
 #
 # Usage:
 #   bash deploy/package-opensource.sh                       # default output
@@ -16,6 +17,13 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
+
+# NTConsult: the .zip is built from inside the stage dir, so the output path must be absolute.
+resolve_output_path() {
+    mkdir -p "$(dirname "$1")"
+    echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+}
+if [ "${NTC_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -31,6 +39,7 @@ done
 if [ -z "$OUTPUT_PATH" ]; then
     OUTPUT_PATH="$PROJECT_ROOT/$PACKAGE_NAME.tar.gz"
 fi
+OUTPUT_PATH="$(resolve_output_path "$OUTPUT_PATH")"
 ZIP_OUTPUT_PATH="${OUTPUT_PATH%.tar.gz}.zip"
 
 cd "$PROJECT_ROOT"
@@ -116,8 +125,18 @@ chmod +x "$PKG_DIR/assets/hooks/"*.sh 2>/dev/null || true
 
 # Strip internal-only files (always for opensource)
 rm -f "$PKG_DIR/scripts/migrate-internal-config.js"
-rm -f "$PKG_DIR/scripts/updater-daemon.js"
+[ -n "${NTC_BLOB_BASE_URL:-}" ] || rm -f "$PKG_DIR/scripts/updater-daemon.js"
 echo "    ✅ Stripped internal-only files"
+
+# NTConsult: rewrite download origins to our blob and refuse to ship Alibaba origins.
+if [ -n "${NTC_BLOB_BASE_URL:-}" ]; then
+    if [ -z "${NTC_INSTALLERS_OUT:-}" ]; then
+        echo "❌ NTC_BLOB_BASE_URL is set but NTC_INSTALLERS_OUT is not; the rewritten installers would be lost. Set NTC_INSTALLERS_OUT to a persistent directory." >&2
+        exit 1
+    fi
+    node "$PROJECT_ROOT/deploy/ntc/overlay.mjs" --stage "$PKG_DIR" \
+        --blob "$NTC_BLOB_BASE_URL" --installers-out "$NTC_INSTALLERS_OUT"
+fi
 
 echo "    ✅ Staged into $PKG_DIR"
 

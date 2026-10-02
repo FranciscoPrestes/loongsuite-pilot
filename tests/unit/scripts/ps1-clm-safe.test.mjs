@@ -52,6 +52,7 @@ const ALLOWED_STATIC_ACCESS = new Set([
   '[Net.ServicePointManager]::SecurityProtocol',  // (c) TLS1.2 bump before a download
   '[Net.SecurityProtocolType]::Tls12',            // (c) TLS1.2 bump before a download
   '[Environment]::SetEnvironmentVariable',        // (c) PATH broadcast on install
+  '[System.Net.NetworkCredential]::new',          // (c) deploy/ntc/install.ps1 key prompt (5.1 fallback), in try/catch; the catch Fails with a clear message
   '[datetime]::MinValue',                         // (b) core type; scripts/loongsuite-pilot.ps1
   '[TimeSpan]::Zero',                             // (b) core type; scripts/loongsuite-pilot.ps1
   // (c) UTF-8 bump for both console directions at script load, in try/catch. The catch

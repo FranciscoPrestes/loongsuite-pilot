@@ -67,6 +67,11 @@ export class LogRetentionService {
     this.config = config;
   }
 
+  private otlpFailedMaxTotalBytes(): number {
+    const mib = this.config.otlpFailedMaxTotalMiB;
+    return Number.isFinite(mib) && mib > 0 ? mib * MEBIBYTE : OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES;
+  }
+
   start(): void {
     if (!this.config.enabled) {
       logger.info('log retention disabled');
@@ -86,7 +91,7 @@ export class LogRetentionService {
       outputLargeFileDays: OUTPUT_RETENTION_LARGE_FILE_DAYS,
       outputPressureMinKeepDays: OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS,
       slsFailedMaxTotalBytes: SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
-      otlpFailedMaxTotalBytes: OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES,
+      otlpFailedMaxTotalBytes: this.otlpFailedMaxTotalBytes(),
       metricAlarmMaxTotalBytes: METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES,
       localObservabilityPressureMinKeepDays: LOCAL_OBSERVABILITY_PRESSURE_MIN_KEEP_DAYS,
     });
@@ -255,7 +260,7 @@ export class LogRetentionService {
   ): Promise<{ deleted: number; errors: number }> {
     let deleted = 0;
     let errors = 0;
-    let remaining = await this.collectLocalObservabilityFiles(dir, files, category);
+    let remaining = await this.collectAllLocalObservabilityFiles(dir, files, category);
 
     const retentionCutoff = dateCutoff(this.getRetentionDays(category));
     // Both age and pressure cleanup protect the two most recent local dates.
@@ -268,10 +273,10 @@ export class LogRetentionService {
     errors += expired.errors;
 
     // Re-read after deletion so a failed unlink still contributes to pressure.
-    remaining = await this.collectLocalObservabilityFiles(dir, await readdir(dir), category);
+    remaining = await this.collectAllLocalObservabilityFiles(dir, await readdir(dir), category);
     let totalBytes = remaining.reduce((sum, file) => sum + file.size, 0);
     const maxTotalBytes = category === 'otlp-failed'
-      ? OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES
+      ? this.otlpFailedMaxTotalBytes()
       : METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES;
     if (totalBytes <= maxTotalBytes) return { deleted, errors };
 
@@ -293,6 +298,37 @@ export class LogRetentionService {
     }
 
     return { deleted, errors };
+  }
+
+  /** For otlp-failed, the quarantine subdirectory rejected/ counts together with its parent. */
+  private async collectAllLocalObservabilityFiles(
+    dir: string,
+    files: string[],
+    category: 'otlp-failed' | 'metric_alarm',
+  ): Promise<DatedLogFile[]> {
+    const own = await this.collectLocalObservabilityFiles(dir, files, category);
+    if (category !== 'otlp-failed') return own;
+    return [...own, ...await this.collectRejectedFiles(path.join(dir, 'rejected'))];
+  }
+
+  /** Rejected spans age from when they were quarantined (mtime), not from the original failure date. */
+  private async collectRejectedFiles(rejectedDir: string): Promise<DatedLogFile[]> {
+    const names = await readdir(rejectedDir).catch(() => [] as string[]);
+    const result: DatedLogFile[] = [];
+    for (const file of names) {
+      if (file.startsWith('.') || !file.endsWith('.jsonl')) continue;
+      const fullPath = path.join(rejectedDir, file);
+      const stat = await safeLstat(fullPath);
+      if (!stat?.isFile()) continue;
+      result.push({
+        file: `rejected/${file}`,
+        fullPath,
+        dateStr: localDateString(new Date(stat.mtimeMs)),
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+      });
+    }
+    return result;
   }
 
   private async collectLocalObservabilityFiles(

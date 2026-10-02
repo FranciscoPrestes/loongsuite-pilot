@@ -1,39 +1,4 @@
-import { buildWebTrackingUrl, postWebTracking } from './webtracking-post.js';
-
-const ENDPOINT = 'https://cn-shanghai.log.aliyuncs.com';
-const PROJECT  = 'loongsuite-community-edition';
-const LOGSTORE = 'loongsuite-online';
-
-const STATUS_URL = buildWebTrackingUrl(ENDPOINT, PROJECT, LOGSTORE);
-
-// L1 is collected every 10 minutes; send once per 12 hours → 72 intervals.
-const SEND_INTERVAL_COUNT = 72;
-
-const SELECTED_FIELDS = new Set([
-  'cpu',
-  'mem',
-  'version',
-  'instance_id',
-  'ip',
-  'hostname',
-  'os_detail',
-  'metric_json',
-]);
-
-let callCount = 0;
-
-export function sendRunningStatus(data: Record<string, unknown>): void {
-  if (callCount++ % SEND_INTERVAL_COUNT !== 0) return;
-
-  const status: Record<string, unknown> = {};
-  for (const key of SELECTED_FIELDS) {
-    if (key in data) {
-      status[key] = data[key];
-    }
-  }
-
-  void postWebTracking(STATUS_URL, {
-    __topic__: 'pilot_running_status',
-    __logs__: [status],
-  }, 'running-status');
-}
+// NTConsult fork: the upstream open-source build reports host, ip, hostname and metrics to
+// an Alibaba SLS project every 12 h. That is third-party telemetry from corporate machines,
+// so the fork keeps the export but makes it a no-op. On a sync conflict, keep this version.
+export function sendRunningStatus(_data: Record<string, unknown>): void {}

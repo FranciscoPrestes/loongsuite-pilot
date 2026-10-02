@@ -373,7 +373,15 @@ describe('ConfigLoader', () => {
       expect(config.retention.outputDays).toBe(7);
       expect(config.retention.slsFailedDays).toBe(7);
       expect(config.retention.otlpFailedDays).toBe(7);
+      expect(config.retention.otlpFailedMaxTotalMiB).toBe(512);
       expect(config.retention.metricAlarmDays).toBe(7);
+    });
+
+    it('reads the installer-written otlpFailedMaxTotalMiB (2048) and days (30)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ retention: { otlpFailedDays: 30, otlpFailedMaxTotalMiB: 2048 } });
+      const config = await loadConfig();
+      expect(config.retention.otlpFailedMaxTotalMiB).toBe(2048);
+      expect(config.retention.otlpFailedDays).toBe(30);
     });
 
     it('uses config file values over defaults', async () => {

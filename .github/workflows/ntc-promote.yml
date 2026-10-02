@@ -1,0 +1,148 @@
+# NTConsult fork: promote the current canary to stable. Requires approval of the ntc-stable
+# environment. Aliases are updated server-side BEFORE latest.json, so the manifest never points
+# to an outdated alias.
+name: NTConsult promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to promote (must be the current canary), e.g. 1.2.0-ntc.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ntc-release
+  cancel-in-progress: false
+
+env:
+  NTC_BLOB_BASE_URL: ${{ vars.NTC_BLOB_BASE_URL || 'https://stntconsultpilot.blob.core.windows.net/pilot' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Validate the version and check it is the current canary
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ntc\.[0-9]+$ ]] \
+            || { echo "::error::version must look like 1.2.0-ntc.1"; exit 1; }
+          bash tools/ntc-release/fetch-manifest.sh "$NTC_BLOB_BASE_URL" "$RUNNER_TEMP/latest.json" require
+          node tools/ntc-release/promote-args.mjs --latest "$RUNNER_TEMP/latest.json" --version "$VERSION" \
+            | tee "$RUNNER_TEMP/promote.env"
+      - name: Download the release (anonymous) and check every sha256
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          base="${NTC_BLOB_BASE_URL%/}/releases/${VERSION}"
+          mkdir -p "$RUNNER_TEMP/rel" && cd "$RUNNER_TEMP/rel"
+          curl -fsSL --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
+          names="$(awk '{print $2}' SHA256SUMS | LC_ALL=C sort | tr '\n' ' ')"
+          want="apply-config.mjs installer.ps1 installer.sh loongsuite-pilot.tar.gz loongsuite-pilot.zip thin/install.ps1 thin/install.sh "
+          [ "$names" = "$want" ] || { echo "::error::SHA256SUMS lists unexpected files: $names"; exit 1; }
+          for f in $want; do mkdir -p "$(dirname "$f")"; curl -fsSL --retry 3 -o "$f" "$base/$f"; done
+          sha256sum -c SHA256SUMS
+          expected="$(sed -n 's/^sha256=//p' "$RUNNER_TEMP/promote.env")"
+          actual="$(sha256sum loongsuite-pilot.tar.gz | awk '{print $1}')"
+          [ "$expected" = "$actual" ] || { echo "::error::tar.gz sha256 differs from the canary entry in latest.json"; exit 1; }
+
+  promote:
+    needs: verify
+    runs-on: ubuntu-24.04
+    environment: ntc-stable
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NTC_STORAGE_ACCOUNT: ${{ vars.NTC_STORAGE_ACCOUNT }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      VERSION: ${{ inputs.version }}
+      CONTAINER: pilot
+      BLOB_VAR: ${{ vars.NTC_BLOB_BASE_URL }}
+    steps:
+      - name: Guard
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-ntc\.[0-9]+$ ]] \
+            || { echo "::error::version must look like 1.2.0-ntc.1"; exit 1; }
+          for v in NTC_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID BLOB_VAR; do
+            [ -n "${!v}" ] || { echo "::error::repository variable $v (NTC_BLOB_BASE_URL for BLOB_VAR) is not set"; exit 1; }
+          done
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build the promoted manifest from the current latest.json
+        id: prev
+        run: |
+          set -euo pipefail
+          bash tools/ntc-release/fetch-manifest.sh "$NTC_BLOB_BASE_URL" "$RUNNER_TEMP/latest.json" require
+          node tools/ntc-release/promote-args.mjs --latest "$RUNNER_TEMP/latest.json" --version "$VERSION" > "$RUNNER_TEMP/promote.env"
+          field() { sed -n "s/^$1=//p" "$RUNNER_TEMP/promote.env"; }
+          node tools/ntc-release/cli.mjs manifest --action promote --prev "$(cat "$RUNNER_TEMP/latest.json")" \
+            --version "$VERSION" --git-commit "$(field git_commit)" --package-url "$(field package_url)" \
+            --sha256 "$(field sha256)" --released-at "$(field released_at)" --out-dir "$RUNNER_TEMP/manifest"
+          node tools/ntc-release/assemble-stage.mjs place-manifest --manifest-dir "$RUNNER_TEMP/manifest" --out "$RUNNER_TEMP/promote-stage"
+          cat "$RUNNER_TEMP/promote-stage/manifest/latest.json"
+      - name: Update the aliases server-side and wait for each copy
+        run: |
+          set -euo pipefail
+          az_blob() { az storage blob "$@" --auth-mode login --account-name "$NTC_STORAGE_ACCOUNT" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors; }
+          alias_copy() {
+            local src="$1" dst="$2" ctype="$3" status="" i
+            az_blob copy start --destination-container "$CONTAINER" --destination-blob "$dst" \
+              --source-container "$CONTAINER" --source-blob "$src" --output none
+            for i in $(seq 1 60); do
+              status="$(az_blob show --container-name "$CONTAINER" --name "$dst" --query properties.copy.status --output tsv)"
+              [ "$status" = "success" ] && break
+              case "$status" in failed|aborted) echo "::error::copy to $dst ended as $status"; exit 1 ;; esac
+              sleep 5
+            done
+            [ "$status" = "success" ] || { echo "::error::copy to $dst did not finish in time (status: $status)"; exit 1; }
+            az_blob update --container-name "$CONTAINER" --name "$dst" \
+              --content-type "$ctype" --content-cache-control "no-cache" --output none
+          }
+          rel="releases/${VERSION}"
+          alias_copy "$rel/loongsuite-pilot.tar.gz" releases/latest/loongsuite-pilot.tar.gz application/gzip
+          alias_copy "$rel/loongsuite-pilot.zip" releases/latest/loongsuite-pilot.zip application/zip
+          alias_copy "$rel/installer.sh" installer.sh "text/plain; charset=utf-8"
+          alias_copy "$rel/installer.ps1" installer.ps1 "text/plain; charset=utf-8"
+          # The thin entry points every new install runs: only promotion moves them (copied from the promoted release).
+          alias_copy "$rel/thin/install.sh" install.sh "text/plain; charset=utf-8"
+          alias_copy "$rel/thin/install.ps1" install.ps1 "text/plain; charset=utf-8"
+      - name: Write latest.json (If-Match), stable.txt and canary.txt
+        id: manifest
+        env:
+          NTC_ETAG: ${{ steps.prev.outputs.etag }}
+        run: bash tools/ntc-release/publish-manifest.sh "$RUNNER_TEMP/promote-stage"
+      - name: Check the published channels agree with latest.json
+        id: channels
+        run: node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+      - name: Repair the channel files from latest.json (only after a failed manifest write or check)
+        if: ${{ failure() && (steps.manifest.conclusion == 'failure' || steps.channels.conclusion == 'failure') }}
+        run: |
+          set -euo pipefail
+          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL" --repair "$RUNNER_TEMP/repair"
+          NTC_TXT_ONLY=1 bash tools/ntc-release/publish-manifest.sh "$RUNNER_TEMP/repair"
+          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+          echo "::warning::channel files repaired from latest.json"
+

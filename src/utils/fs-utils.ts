@@ -63,7 +63,7 @@ export interface AtomicTextWriteOptions {
    * Only applies when the expected target already exists.
    */
   backupPath?: string;
-  /** Optional permissions for the newly-created temporary file. */
+  /** Permissions for the temporary file. Defaults to the existing target's mode. */
   mode?: number;
 }
 
@@ -111,9 +111,15 @@ export async function writeTextFileAtomic(
     }
   }
 
+  // The per-machine key lives in config.json (0600). Without carrying the
+  // existing mode over, a rewrite (e.g. the updater) would fall back to the
+  // umask default and make it readable by other users.
+  const mode = options.mode
+    ?? (await fsp.stat(path).then((s) => s.mode & 0o777, () => undefined));
+
   const tmp = atomicTmpPath(path);
   try {
-    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode: options.mode });
+    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode });
     // Re-check after preparing the temporary file. This narrows the remaining
     // race to the final compare-and-rename window.
     if (options.expected) {
@@ -129,7 +135,7 @@ export async function writeTextFileAtomic(
       await ensureDir(dir);
       const tmp2 = atomicTmpPath(path);
       try {
-        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode: options.mode });
+        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode });
         if (options.expected) {
           await assertExpectedFileState(path, options.expected);
         }
