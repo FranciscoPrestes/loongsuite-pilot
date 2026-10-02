@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Thin NTConsult installer: verifies the release, runs the full installer and applies
-# the NTConsult config. Usage:
-#   curl -fsSL <blob>/install.sh | NTC_PILOT_CHAVE="$k" NTC_PILOT_EMAIL="$e" bash
-# Env: NTC_PILOT_CHAVE (required), NTC_PILOT_EMAIL, NTC_PILOT_BLOB_URL,
+# the NTConsult config. Usage (interactive: asks for the key on the terminal, without echo):
+#   curl -fsSL <blob>/install.sh | bash
+# Automation only: set NTC_PILOT_CHAVE in the environment (a key typed on the command line
+# or exported in an interactive shell ends up in the shell history; never do that by hand).
+# Env: NTC_PILOT_CHAVE (automation; prompted when absent and a terminal exists), NTC_PILOT_EMAIL, NTC_PILOT_BLOB_URL,
 #      NTC_PILOT_CHANNEL (stable|canary), NTC_PILOT_INSTALLER (tests), NTC_PILOT_DRY_RUN=1,
-#      NTC_PILOT_SKIP_RESTART=1, NTC_PILOT_ALLOW_LOOPBACK_HTTP=1.
+#      NTC_PILOT_SKIP_RESTART=1, NTC_PILOT_ALLOW_LOOPBACK_HTTP=1, NTC_PILOT_TTY (tests: file read
+#      instead of /dev/tty for the key prompt).
 # The key is never echoed nor passed as an argument; only apply-config inherits it.
 #
 # Trust model: the SHA256SUMS and the manifest come from the same origin (the blob) as
@@ -56,7 +59,26 @@ read_key() { # reads a field from the manifest file: read_key <file> <name>
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+# The key prompt reads from the terminal, not from stdin (stdin is the script itself under `curl | bash`).
+KEY_TTY="${NTC_PILOT_TTY:-/dev/tty}"
+
+# True when NTC_PILOT_CHAVE is unset and the key can be asked for on a terminal. /dev/tty exists
+# even without a controlling terminal, so test that it can actually be opened.
+should_prompt_for_key() {
+  [ -z "${NTC_PILOT_CHAVE:-}" ] && ( : < "$KEY_TTY" ) 2>/dev/null
+}
+
+prompt_for_key() {
+  local k=""
+  printf 'Chave NTConsult (ntcp_...): ' >&2
+  IFS= read -rs k < "$KEY_TTY" || true
+  printf '\n' >&2
+  NTC_PILOT_CHAVE="$k"
+  export NTC_PILOT_CHAVE
+}
+
 check_key() {
+  if should_prompt_for_key; then prompt_for_key; fi
   [ -n "${NTC_PILOT_CHAVE:-}" ] || die "defina NTC_PILOT_CHAVE com a chave fornecida pela NTConsult"
   case "$NTC_PILOT_CHAVE" in
     ntcp_*) ;;

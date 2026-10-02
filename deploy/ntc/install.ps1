@@ -1,7 +1,9 @@
 # Thin NTConsult installer for Windows: verifies the release, runs the full installer and
-# applies the NTConsult config. Usage (PowerShell, ordinary user):
-#   $env:NTC_PILOT_CHAVE='ntcp_...'; irm <blob>/install.ps1 | iex
-# Env: NTC_PILOT_CHAVE (required), NTC_PILOT_EMAIL, NTC_PILOT_BLOB_URL,
+# applies the NTConsult config. Usage (PowerShell, ordinary user; asks for the key without echo):
+#   irm <blob>/install.ps1 | iex
+# Automation only: set NTC_PILOT_CHAVE in the environment (a key typed on the command line
+# ends up in the PowerShell history; never do that by hand).
+# Env: NTC_PILOT_CHAVE (automation; prompted when absent in an interactive session), NTC_PILOT_EMAIL, NTC_PILOT_BLOB_URL,
 #      NTC_PILOT_CHANNEL (stable|canary), NTC_PILOT_INSTALLER (tests), NTC_PILOT_DRY_RUN=1,
 #      NTC_PILOT_SKIP_RESTART=1, NTC_PILOT_ALLOW_LOOPBACK_HTTP=1.
 # The key is never echoed nor passed as an argument; only apply-config inherits it
@@ -73,8 +75,26 @@ function Test-AgainstSums([string]$Sums, [string]$Dir, [string]$Name) {
     }
 }
 
+# Ask for the key without echo when the session is interactive. CLM-safe: only property gets and
+# cmdlets, plus one guarded static call with a working fallback (see ps1-clm-safe.test.mjs).
+function Read-KeyInteractive {
+    $secure = $null
+    try {
+        if (-not ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)) { return '' }
+        $secure = Read-Host -Prompt 'Chave NTConsult (ntcp_...)' -AsSecureString
+    } catch { return '' }
+    if (-not $secure) { return '' }
+    try { return (ConvertFrom-SecureString -SecureString $secure -AsPlainText) } catch { }
+    try { return ([System.Net.NetworkCredential]::new('', $secure)).Password } catch { }
+    Fail 'nao foi possivel ler a chave de forma interativa neste modo restrito; defina NTC_PILOT_CHAVE'
+}
+
 function Test-Key {
     $k = $env:NTC_PILOT_CHAVE
+    if (-not $k) {
+        $k = Read-KeyInteractive
+        if ($k) { $env:NTC_PILOT_CHAVE = $k }
+    }
     if (-not $k) { Fail 'defina NTC_PILOT_CHAVE com a chave fornecida pela NTConsult' }
     if ($k -cnotmatch '^ntcp_[0-9A-Za-z]{32,}\z') { Fail 'NTC_PILOT_CHAVE em formato invalido (esperado ntcp_...)' }
 }

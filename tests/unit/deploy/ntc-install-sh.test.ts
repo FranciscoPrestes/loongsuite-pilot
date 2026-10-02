@@ -55,10 +55,13 @@ beforeEach(() => { buildBlob(); mark = mkdtempSync(join(tmpdir(), 'ntc-mark-'));
 function run(env: Record<string, string>) {
   const home = mkdtempSync(join(tmpdir(), 'ntc-home-'));
   return new Promise<{ code: number | null; out: string }>((resolveRun) => {
+    // detached: own session, so the child has no controlling terminal and /dev/tty cannot be opened.
     const child = spawn('bash', [SCRIPT], {
+      detached: true,
       env: {
         PATH: process.env.PATH ?? '', HOME: home, T_MARK: mark,
         NTC_PILOT_BLOB_URL: base, NTC_PILOT_SKIP_RESTART: '1', NTC_PILOT_ALLOW_LOOPBACK_HTTP: '1',
+        NTC_PILOT_TTY: join(tmpdir(), 'ntc-no-such-tty'),
         ...env,
       },
     });
@@ -97,6 +100,43 @@ describe('deploy/ntc/install.sh', () => {
     const r = await run({});
     expect(r.code).not.toBe(0);
     expect(r.out).toContain('NTC_PILOT_CHAVE');
+  });
+
+  it('without NTC_PILOT_CHAVE and without a terminal the prompt is skipped and the old error stays', async () => {
+    const r = await run({ NTC_PILOT_TTY: '' });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('defina NTC_PILOT_CHAVE');
+    expect(r.out).not.toContain('Chave NTConsult (ntcp_...)');
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
+  it('prompts for the key on the terminal when it is not in the environment', async () => {
+    const tty = join(mark, 'fake-tty');
+    writeFileSync(tty, `${KEY}\n`);
+    const r = await run({ NTC_PILOT_TTY: tty, NTC_PILOT_EMAIL: 'a@b' });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('Chave NTConsult (ntcp_...)');
+    expect(r.out).not.toContain(KEY);
+    expect(readFileSync(join(mark, 'installer-args'), 'utf8')).not.toContain('ntcp_');
+    expect(readFileSync(join(mark, 'installer-keycount'), 'utf8').trim()).toBe('0');
+    expect(JSON.parse(readFileSync(join(mark, 'apply-ran'), 'utf8')).hasKey).toBe(true);
+  });
+
+  it('a malformed key typed at the prompt is rejected without echoing it', async () => {
+    const tty = join(mark, 'fake-tty');
+    writeFileSync(tty, 'digitei-errado\n');
+    const r = await run({ NTC_PILOT_TTY: tty });
+    expect(r.code).not.toBe(0);
+    expect(r.out).not.toContain('digitei-errado');
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
+  it('the environment variable wins over the terminal (no prompt)', async () => {
+    const tty = join(mark, 'fake-tty');
+    writeFileSync(tty, 'ignored\n');
+    const r = await run({ ...ok, NTC_PILOT_TTY: tty });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain('Chave NTConsult (ntcp_...)');
   });
 
   it('invalid key aborts without echoing the value', async () => {
