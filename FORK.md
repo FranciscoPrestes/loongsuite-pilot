@@ -80,6 +80,12 @@ por OIDC (sem chave de storage). Variaveis do repositorio (nao segredos): `AZURE
 Fila: o grupo `ntc-release` tem profundidade 1. Com uma execucao rodando e uma pendente, uma terceira
 **substitui a pendente** (que e cancelada). Se um disparo sumiu, rode de novo.
 
+### Pre-requisito: branch padrao
+
+`workflow_dispatch` so funciona quando o arquivo do workflow existe no branch **padrao** do repositorio. Antes
+da primeira execucao, ajuste o branch padrao do fork para `NTConsult-main` (GitHub > Settings > Branches). O
+primeiro dry run, ja a partir do branch padrao, usa `source_ref=NTConsult-main`.
+
 ### Checklist de ambientes (configuracao do GitHub, feita pelo Francisco)
 
 - [ ] Ambientes `ntc-canary` e `ntc-stable` restritos ao branch de deploy `NTConsult-main` (Settings > Environments > Deployment branches).

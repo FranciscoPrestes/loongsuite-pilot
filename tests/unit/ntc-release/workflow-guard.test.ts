@@ -28,7 +28,7 @@ describe('ntc-release.yml publish guards', () => {
   it('computes dry-run so that a missing input never means publish', () => {
     const exprs = [...text.matchAll(/DRY_RUN: (\$\{\{.*\}\})/g)].map((m) => m[1]);
     expect(exprs.length).toBeGreaterThan(0);
-    for (const e of exprs) expect(e).toBe("${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}");
+    for (const e of exprs) expect(e).toBe('${{ inputs.dry_run != false }}');
   });
 
   it('no other job, nor the workflow level, has id-token: write or azure login', () => {
@@ -42,9 +42,12 @@ describe('ntc-release.yml publish guards', () => {
     expect(jobs.get('publish')).toMatch(/id-token: write/);
   });
 
-  it('marks the temporary push trigger and limits it to the feature branch', () => {
-    expect(head).toContain('# TEMPORARY: dry-run from the feature branch; remove before merging into NTConsult-main');
-    expect(head).toMatch(/push:\n    branches: \[feat\/ntc-fase1-distribuicao\]/);
+  it('is triggered by workflow_dispatch only (no push, pull_request or schedule)', () => {
+    const on = /^on:\n([\s\S]*?)(?=^\S)/m.exec(head)?.[1] ?? '';
+    const triggers = [...on.matchAll(/^  ([a-z_]+):/gm)].map((m) => m[1]);
+    expect(triggers).toEqual(['workflow_dispatch']);
+    expect(text).not.toMatch(/^\s+(push|pull_request|pull_request_target|schedule|workflow_run):/m);
+    expect(text).not.toContain('TEMPORARY');
   });
 
   it('release never overwrites the root thin installers; promotion owns them', () => {

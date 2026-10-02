@@ -1,16 +1,10 @@
 # NTConsult fork: build, test and (only when dry_run is false) publish a canary release to the blob.
 # dry_run defaults to true and ends in the `assemble` job: the `publish` job is unreachable then.
+# Only workflow_dispatch triggers it, and it must exist on the default branch (see FORK.md).
 # Rollback = republish a good commit through source_ref (the updater never downgrades), see FORK.md.
 name: NTConsult release
 
 on:
-  # TEMPORARY: dry-run from the feature branch; remove before merging into NTConsult-main (workflow_dispatch needs the file on the default branch)
-  push:
-    branches: [feat/ntc-fase1-distribuicao]
-    paths:
-      - '.github/workflows/ntc-release.yml'
-      - 'tools/ntc-release/**'
-      - 'deploy/**'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -50,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.source_ref || github.ref }}
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -60,8 +54,8 @@ jobs:
       - name: Compute the next version and refuse an existing tag
         id: v
         env:
-          ROLLOUT: ${{ inputs.rollout || '10' }}
-          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
+          ROLLOUT: ${{ inputs.rollout }}
+          DRY_RUN: ${{ inputs.dry_run != false }}
         run: |
           set -euo pipefail
           [[ "$ROLLOUT" =~ ^[0-9]+$ ]] && [ "$ROLLOUT" -ge 1 ] && [ "$ROLLOUT" -le 100 ] \
@@ -209,7 +203,7 @@ jobs:
       - name: Read the current latest.json (anonymous) and its ETag
         id: prev
         env:
-          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
+          DRY_RUN: ${{ inputs.dry_run != false }}
         run: |
           set -euo pipefail
           mode=allow-missing
@@ -220,7 +214,7 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           GIT_COMMIT: ${{ needs.package.outputs.git_commit }}
-          ROLLOUT: ${{ inputs.rollout || '10' }}
+          ROLLOUT: ${{ inputs.rollout }}
           PREV_STATUS: ${{ steps.prev.outputs.status }}
         run: |
           set -euo pipefail
@@ -245,7 +239,7 @@ jobs:
       - name: Summary
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
+          DRY_RUN: ${{ inputs.dry_run != false }}
         run: |
           echo "Version $VERSION assembled (dry_run=$DRY_RUN). Artifact: blob-stage." >> "$GITHUB_STEP_SUMMARY"
 
@@ -264,7 +258,7 @@ jobs:
       NTC_ETAG: ${{ needs.assemble.outputs.etag }}
       VERSION: ${{ needs.prepare.outputs.version }}
       SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
-      DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run }}
+      DRY_RUN: ${{ inputs.dry_run != false }}
       EVENT_NAME: ${{ github.event_name }}
       CONTAINER: pilot
       BLOB_VAR: ${{ vars.NTC_BLOB_BASE_URL }}
