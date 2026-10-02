@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,5 +33,12 @@ describe('package-opensource.sh resolve_output_path', () => {
 
   it('sourcing with NTC_SOURCE_ONLY=1 builds nothing', () => {
     expect(resolve('p.tar.gz').stdout).not.toMatch(/Building|Staging/);
+  });
+});
+
+describe('package-opensource.sh updater daemon', () => {
+  it('strips the updater daemon unless NTC_BLOB_BASE_URL is set (NTConsult build)', () => {
+    const src = readFileSync(SCRIPT, 'utf8');
+    expect(src).toContain('[ -n "${NTC_BLOB_BASE_URL:-}" ] || rm -f "$PKG_DIR/scripts/updater-daemon.js"');
   });
 });
