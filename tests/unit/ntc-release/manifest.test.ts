@@ -41,7 +41,7 @@ describe('buildManifest', () => {
 
   it('republishing the same canary version bumps hotfix_version', () => {
     const a = buildManifest(null, { kind: 'canary', release: rel('1.2.0-ntc.1'), rolloutPercentage: 10 });
-    const b = buildManifest(a, { kind: 'canary', release: rel('1.2.0-ntc.1', { git_commit: 'def' }), rolloutPercentage: 10 });
+    const b = buildManifest(a, { kind: 'canary', release: rel('1.2.0-ntc.1', { git_commit: 'def5678' }), rolloutPercentage: 10 });
     const c = buildManifest(b, { kind: 'canary', release: rel('1.2.0-ntc.1'), rolloutPercentage: 10 });
     expect(b.canary.hotfix_version).toBe(1);
     expect(c.canary.hotfix_version).toBe(2);
@@ -91,6 +91,43 @@ describe('buildManifest', () => {
     const snapshot = JSON.stringify(prev);
     buildManifest(prev, { kind: 'promote', release: rel('1.2.0-ntc.1') });
     expect(JSON.stringify(prev)).toBe(snapshot);
+  });
+});
+
+describe('injection and input hardening', () => {
+  const promote = (over: Record<string, string>) => () =>
+    buildManifest(null, { kind: 'promote', release: rel('1.2.0', over) });
+
+  it('rejects the git_commit newline injection payload', () => {
+    expect(promote({ git_commit: `abc1234\nsha256=${'f'.repeat(64)}` })).toThrow(/git_commit/);
+    expect(promote({ git_commit: 'xyz' })).toThrow(/git_commit/);
+  });
+  it('rejects package_url with trailing newline, spaces or control chars', () => {
+    expect(promote({ package_url: 'https://x.test/a.tgz\n' })).toThrow(/package_url/);
+    expect(promote({ package_url: 'https://x.test/a b.tgz' })).toThrow(/package_url/);
+    expect(promote({ package_url: 'https://x.test/a\tb' })).toThrow(/package_url/);
+  });
+  it('rejects a malformed released_at', () => {
+    expect(promote({ released_at: 'yesterday' })).toThrow(/released_at/);
+    expect(promote({ released_at: '2026-10-02T12:00:00Z\nx=1' })).toThrow(/released_at/);
+  });
+  it('renderChannelEnv refuses line breaks', () => {
+    expect(() => renderChannelEnv(rel('1.2.0', { git_commit: 'abc\nsha256=ff' }))).toThrow(/line break/);
+    expect(() => renderChannelEnv(rel('1.2.0', { package_url: 'https://x\r' }))).toThrow(/line break/);
+  });
+  it('validates prev and prev.canary with a clear error', () => {
+    expect(() => buildManifest({ version: '1.0.0' } as never, { kind: 'promote', release: rel('1.2.0') }))
+      .toThrow(/prev\./);
+    const good = buildManifest(null, { kind: 'canary', release: rel('1.2.0-ntc.1'), rolloutPercentage: 10 });
+    const bad = { ...good, canary: { ...good.canary, sha256: 'zz' } };
+    expect(() => buildManifest(bad, { kind: 'promote', release: rel('1.2.0-ntc.1') })).toThrow(/prev\.canary\.sha256/);
+  });
+  it('copies a kept canary instead of aliasing prev', () => {
+    const prev = buildManifest(buildManifest(null, { kind: 'canary', release: rel('1.2.0-ntc.1'), rolloutPercentage: 10 }),
+      { kind: 'canary', release: rel('1.2.0-ntc.3'), rolloutPercentage: 10 });
+    const m = buildManifest(prev, { kind: 'promote', release: rel('1.2.0-ntc.2') });
+    expect(m.canary).toEqual(prev.canary);
+    expect(m.canary).not.toBe(prev.canary);
   });
 });
 

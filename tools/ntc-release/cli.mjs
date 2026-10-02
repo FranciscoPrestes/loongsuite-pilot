@@ -6,6 +6,10 @@ import { nextNtcVersion } from './version.mjs';
 import { buildManifest, renderChannelEnv } from './manifest.mjs';
 
 const BOOLEAN_FLAGS = new Set(['allow-downgrade']);
+const VALUE_FLAGS = new Set([
+  'base', 'tags-file', 'action', 'prev', 'version', 'git-commit', 'package-url',
+  'sha256', 'released-at', 'rollout', 'out-dir',
+]);
 
 function parseArgs(argv) {
   const out = {};
@@ -13,6 +17,8 @@ function parseArgs(argv) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`unexpected argument: ${a}`);
     const key = a.slice(2);
+    if (!BOOLEAN_FLAGS.has(key) && !VALUE_FLAGS.has(key)) throw new Error(`unknown flag: --${key}`);
+    if (key in out) throw new Error(`duplicate flag: --${key}`);
     if (BOOLEAN_FLAGS.has(key)) { out[key] = true; continue; }
     const val = argv[++i];
     if (val === undefined) throw new Error(`missing value for --${key}`);

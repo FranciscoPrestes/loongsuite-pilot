@@ -68,6 +68,33 @@ describe('cli manifest', () => {
     expect(JSON.parse(readFileSync(join(dir, 'latest.json'), 'utf8')).version).toBe('1.2.0-ntc.4');
   });
 
+  const bad = (label: string, args: () => string[], re: RegExp) =>
+    it(label, () => {
+      const r = run(args());
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(re);
+    });
+
+  bad('rejects a non-https package url',
+    () => ['manifest', '--action', 'promote', '--prev', '-', '--version', '1.2.0', '--git-commit', 'abc1234',
+      '--package-url', 'http://x.test/a.tgz', '--sha256', SHA, '--released-at', '2026-10-02T12:00:00Z', '--out-dir', '/nonexistent-ntc'], /https/);
+  bad('rejects an invalid sha256',
+    () => manifestArgs('promote', '1.2.0', '-').map((a) => (a === SHA ? 'XYZ' : a)), /sha256/);
+  bad('rejects rollout abc',
+    () => manifestArgs('canary', '1.2.0', '-', ['--rollout', 'abc']), /rollout/);
+  bad('rejects rollout 0',
+    () => manifestArgs('canary', '1.2.0', '-', ['--rollout', '0']), /rollout/);
+  bad('rejects the git_commit injection payload',
+    () => manifestArgs('promote', '1.2.0', '-').map((a) => (a === 'abc1234' ? `abc1234\nsha256=${'f'.repeat(64)}` : a)), /git_commit/);
+  bad('rejects package_url with trailing newline',
+    () => manifestArgs('promote', '1.2.0', '-').map((a) => (a.startsWith('https://example.test') ? `${a}\n` : a)), /package_url/);
+  bad('rejects unknown flags',
+    () => manifestArgs('promote', '1.2.0', '-', ['--bogus', '1']), /unknown flag: --bogus/);
+  bad('rejects duplicate flags',
+    () => manifestArgs('promote', '1.2.0', '-', ['--version', '1.3.0']), /duplicate flag: --version/);
+  bad('rejects a malformed prev',
+    () => manifestArgs('promote', '1.2.0', '{"version":"1.0.0"}'), /prev\./);
+
   it('fails on a missing required flag', () => {
     const r = run(['manifest', '--action', 'promote']);
     expect(r.status).toBe(1);
