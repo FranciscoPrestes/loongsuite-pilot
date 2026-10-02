@@ -83,7 +83,7 @@ describe('publish-manifest.sh', () => {
 
   function setup(opts: { canary: boolean; azScript?: string }) {
     mkdirSync(join(dir, 'bin')); mkdirSync(join(dir, 'm', 'manifest'), { recursive: true });
-    writeFileSync(join(dir, 'm', 'latest.json'), '{}');
+    writeFileSync(join(dir, 'm', 'manifest', 'latest.json'), '{}');
     writeFileSync(join(dir, 'm', 'manifest', 'stable.txt'), 's');
     if (opts.canary) writeFileSync(join(dir, 'm', 'manifest', 'canary.txt'), 'c');
     writeFileSync(join(dir, 'bin', 'az'), opts.azScript ?? '#!/bin/sh\necho "$@" >> "$AZ_LOG"\n[ "$3" = exists ] && echo true\nexit 0\n');
@@ -99,7 +99,7 @@ describe('publish-manifest.sh', () => {
     expect(r.status).toBe(0);
     const l = log();
     expect(l).toHaveLength(3);
-    expect(l[0]).toContain('--name latest.json');
+    expect(l[0]).toContain('--name manifest/latest.json');
     expect(l[0]).toContain('--if-match "0x1"');
     expect(l[0]).toContain('--overwrite true');
     expect(l[0]).toContain('--content-cache-control no-cache');
@@ -130,11 +130,11 @@ describe('publish-manifest.sh', () => {
 
   it('NTC_TXT_ONLY writes only the channel files and does not need latest.json', () => {
     setup({ canary: true });
-    rmSync(join(dir, 'm', 'latest.json'));
+    rmSync(join(dir, 'm', 'manifest', 'latest.json'));
     expect(run({ NTC_TXT_ONLY: '1' }).status).toBe(0);
     const l = log();
     expect(l).toHaveLength(2);
-    expect(l.some((x) => x.includes('--name latest.json'))).toBe(false);
+    expect(l.some((x) => x.includes('--name manifest/latest.json'))).toBe(false);
   });
 
   it('requires the account and subscription variables', () => {

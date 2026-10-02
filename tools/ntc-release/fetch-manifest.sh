@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Download the current latest.json from the blob (anonymous) and capture its ETag.
+# Download the current manifest/latest.json from the blob (anonymous) and capture its ETag.
 #
 # Usage: fetch-manifest.sh <blob-base-url> <out-file> <require|allow-missing|lenient>
 #   require        200 is the only accepted answer (promotion).
@@ -32,13 +32,13 @@ emit() {
 
 code=""
 if ! code="$(curl -sS --retry "${NTC_CURL_RETRY:-3}" --connect-timeout 20 --max-time 60 \
-    -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' "$BLOB/latest.json")"; then
+    -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' "$BLOB/manifest/latest.json")"; then
   if [ "$MODE" = "lenient" ]; then
-    echo "fetch-manifest: WARNING could not reach $BLOB/latest.json; assuming first release (dry run)" >&2
+    echo "fetch-manifest: WARNING could not reach $BLOB/manifest/latest.json; assuming first release (dry run)" >&2
     emit first ""
     exit 0
   fi
-  echo "fetch-manifest: request to $BLOB/latest.json failed" >&2
+  echo "fetch-manifest: request to $BLOB/manifest/latest.json failed" >&2
   exit 1
 fi
 
@@ -60,11 +60,11 @@ case "$code" in
     ;;
   *)
     if [ "$MODE" = "lenient" ]; then
-      echo "fetch-manifest: WARNING HTTP $code from $BLOB/latest.json; assuming first release (dry run)" >&2
+      echo "fetch-manifest: WARNING HTTP $code from $BLOB/manifest/latest.json; assuming first release (dry run)" >&2
       emit first ""
       exit 0
     fi
-    echo "fetch-manifest: unexpected HTTP $code from $BLOB/latest.json" >&2
+    echo "fetch-manifest: unexpected HTTP $code from $BLOB/manifest/latest.json" >&2
     exit 1
     ;;
 esac

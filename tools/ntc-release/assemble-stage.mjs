@@ -7,7 +7,7 @@
 // Plain ESM, no dependencies. Layout (relative to the container root):
 //   releases/<v>/{loongsuite-pilot.tar.gz,loongsuite-pilot.zip,installer.sh,installer.ps1,apply-config.mjs,SHA256SUMS,thin/install.{sh,ps1}} (SHA256SUMS lists all but itself)
 //   deps/node-modules/<v>/{node-modules-<os>-<arch>.tar.gz,SHASUMS256.txt}
-//   install.sh, install.ps1, latest.json, manifest/{stable,canary}.txt
+//   install.sh, install.ps1, manifest/{latest.json,stable.txt,canary.txt}
 import {
   copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -75,12 +75,12 @@ export function assembleStage({ version, pkgDir, thinDir, nodeModulesDir, out, p
   return { sha256: sha256File(join(rel, 'loongsuite-pilot.tar.gz')) };
 }
 
-/** Copy the manifest CLI output into the stage: latest.json at the root, channel files under manifest/. */
+/** Copy the manifest CLI output into the stage: latest.json and the channel files all under manifest/. */
 export function placeManifest({ manifestDir, out }) {
   requireFile(join(manifestDir, 'latest.json'), 'latest.json');
   requireFile(join(manifestDir, 'stable.txt'), 'stable.txt');
   mkdirSync(join(out, 'manifest'), { recursive: true });
-  copyFileSync(join(manifestDir, 'latest.json'), join(out, 'latest.json'));
+  copyFileSync(join(manifestDir, 'latest.json'), join(out, 'manifest', 'latest.json'));
   copyFileSync(join(manifestDir, 'stable.txt'), join(out, 'manifest', 'stable.txt'));
   const canary = join(manifestDir, 'canary.txt');
   if (existsSync(canary)) copyFileSync(canary, join(out, 'manifest', 'canary.txt'));

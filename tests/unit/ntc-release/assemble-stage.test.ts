@@ -95,13 +95,13 @@ describe('assemble-stage stage', () => {
 describe('assemble-stage place-manifest', () => {
   const manifestDir = () => join(root, 'm');
 
-  it('puts latest.json at the root and the channel files under manifest/', () => {
+  it('puts latest.json and the channel files under manifest/', () => {
     mkdirSync(manifestDir());
     writeFileSync(join(manifestDir(), 'latest.json'), '{}');
     writeFileSync(join(manifestDir(), 'stable.txt'), 's');
     writeFileSync(join(manifestDir(), 'canary.txt'), 'c');
     expect(run(['place-manifest', '--manifest-dir', manifestDir(), '--out', out]).status).toBe(0);
-    expect(readFileSync(join(out, 'latest.json'), 'utf8')).toBe('{}');
+    expect(readFileSync(join(out, 'manifest', 'latest.json'), 'utf8')).toBe('{}');
     expect(readFileSync(join(out, 'manifest', 'stable.txt'), 'utf8')).toBe('s');
     expect(readFileSync(join(out, 'manifest', 'canary.txt'), 'utf8')).toBe('c');
   });

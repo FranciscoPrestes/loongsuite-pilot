@@ -144,6 +144,6 @@ maior na base corrente. Para um canary ruim, basta nao promove-lo e publicar a c
 
 ### O que e mutavel
 
-Tudo em `releases/<v>/` e `deps/` e imutavel (publicado com `--overwrite false`). So mudam: `latest.json`,
+Tudo em `releases/<v>/` e `deps/` e imutavel (publicado com `--overwrite false`). So mudam: `manifest/latest.json`,
 `manifest/stable.txt`, `manifest/canary.txt` (a cada release e promocao), e, so na promocao, `install.sh`,
 `install.ps1`, `installer.sh`, `installer.ps1` e `releases/latest/*` (aliases, `no-cache`).

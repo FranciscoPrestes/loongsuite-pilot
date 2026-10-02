@@ -101,7 +101,7 @@ jobs:
             --version "$VERSION" --git-commit "$(field git_commit)" --package-url "$(field package_url)" \
             --sha256 "$(field sha256)" --released-at "$(field released_at)" --out-dir "$RUNNER_TEMP/manifest"
           node tools/ntc-release/assemble-stage.mjs place-manifest --manifest-dir "$RUNNER_TEMP/manifest" --out "$RUNNER_TEMP/promote-stage"
-          cat "$RUNNER_TEMP/promote-stage/latest.json"
+          cat "$RUNNER_TEMP/promote-stage/manifest/latest.json"
       - name: Update the aliases server-side and wait for each copy
         run: |
           set -euo pipefail

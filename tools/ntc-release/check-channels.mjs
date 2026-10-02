@@ -62,7 +62,7 @@ async function main(argv) {
   if ((argv.length !== 2 && argv.length !== 4) || argv[0] !== '--blob' || (argv.length === 4 && argv[2] !== '--repair')) throw new Error(usage);
   const base = argv[1].replace(/\/+$/, '');
   const repairDir = argv[3];
-  const latestText = await get(`${base}/latest.json`);
+  const latestText = await get(`${base}/manifest/latest.json`);
   if (latestText === null) throw new Error('latest.json is missing');
   const latest = JSON.parse(latestText);
   if (repairDir) {

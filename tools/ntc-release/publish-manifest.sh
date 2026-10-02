@@ -2,7 +2,7 @@
 # Write the mutable manifest blobs, in this order: latest.json (guarded by If-Match, the lock),
 # then manifest/stable.txt and manifest/canary.txt (deleted when the manifest has no canary).
 #
-# Usage: publish-manifest.sh <dir>     dir has latest.json, manifest/stable.txt, [manifest/canary.txt]
+# Usage: publish-manifest.sh <dir>     dir has manifest/latest.json, manifest/stable.txt, [manifest/canary.txt]
 # Env (required): NTC_STORAGE_ACCOUNT, AZURE_SUBSCRIPTION_ID.
 #      NTC_ETAG: the ETag read with fetch-manifest.sh; empty means first release, then the
 #      write uses If-None-Match: * so a concurrent first release cannot be overwritten.
@@ -17,8 +17,8 @@ DIR="$1"
 ETAG="${NTC_ETAG:-}"
 CONTAINER="pilot"
 TXT_ONLY="${NTC_TXT_ONLY:-}"
-[ -f "$DIR/manifest/stable.txt" ] && { [ -n "$TXT_ONLY" ] || [ -f "$DIR/latest.json" ]; } || {
-  echo "publish-manifest: $DIR needs manifest/stable.txt (and latest.json unless NTC_TXT_ONLY=1)" >&2; exit 1; }
+[ -f "$DIR/manifest/stable.txt" ] && { [ -n "$TXT_ONLY" ] || [ -f "$DIR/manifest/latest.json" ]; } || {
+  echo "publish-manifest: $DIR needs manifest/stable.txt (and manifest/latest.json unless NTC_TXT_ONLY=1)" >&2; exit 1; }
 
 az_blob() {
   az storage blob "$@" --auth-mode login --account-name "$NTC_STORAGE_ACCOUNT" \
@@ -35,7 +35,7 @@ upload_mutable() {
 if [ -z "$TXT_ONLY" ]; then
   guard=(--if-none-match '*')
   [ -z "$ETAG" ] || guard=(--if-match "$ETAG")
-  if ! out="$(upload_mutable "$DIR/latest.json" latest.json "application/json" "${guard[@]}" 2>&1)"; then
+  if ! out="$(upload_mutable "$DIR/manifest/latest.json" manifest/latest.json "application/json" "${guard[@]}" 2>&1)"; then
     echo "$out" >&2
     if printf '%s' "$out" | grep -Eqi 'ConditionNotMet|412|BlobAlreadyExists'; then
       echo "::error::latest.json changed since it was read (If-Match failed). latest.json and the channel files were NOT changed, but this run's release files may already be uploaded. Run tools/ntc-release/purge-unreleased.sh <version> to clear them, then dispatch the workflow again (a new dispatch; Re-run failed jobs would reuse the stale ETag)."

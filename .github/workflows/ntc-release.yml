@@ -235,7 +235,7 @@ jobs:
             --sha256 "$sha" --released-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --rollout "$ROLLOUT" --out-dir "$RUNNER_TEMP/manifest"
           node tools/ntc-release/assemble-stage.mjs place-manifest --manifest-dir "$RUNNER_TEMP/manifest" --out stage
-          cat stage/latest.json
+          cat stage/manifest/latest.json
           (cd stage && find . -type f | sort)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

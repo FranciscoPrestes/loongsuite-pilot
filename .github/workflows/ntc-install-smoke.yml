@@ -61,7 +61,7 @@ jobs:
           sed -i "s#^package_url=.*#package_url=$local_url#" "$RUNNER_TEMP/manifest/stable.txt"
           sed -i "s#https://placeholder.invalid/pilot#http://127.0.0.1:8080/pilot#" "$RUNNER_TEMP/manifest/latest.json"
           cp "$RUNNER_TEMP/manifest/stable.txt" "$blob/manifest/stable.txt"
-          cp "$RUNNER_TEMP/manifest/latest.json" "$blob/latest.json"
+          cp "$RUNNER_TEMP/manifest/latest.json" "$blob/manifest/latest.json"
           cat "$blob/manifest/stable.txt"
           (cd "$RUNNER_TEMP/blob" && find . -type f | sort)
       - uses: actions/upload-artifact@v4

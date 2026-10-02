@@ -96,7 +96,7 @@ describe('check-channels.mjs and assert-etag.sh against a loopback blob', () => 
 
   it('check-channels: ok when consistent, loud failure on drift', async () => {
     const s = rel('1.2.0-ntc.1');
-    files['/latest.json'] = { body: JSON.stringify(s) };
+    files['/manifest/latest.json'] = { body: JSON.stringify(s) };
     files['/manifest/stable.txt'] = { body: env(s) };
     expect((await runAsync('node', [join(TOOLS, 'check-channels.mjs'), '--blob', base])).code).toBe(0);
     files['/manifest/canary.txt'] = { body: env(rel('1.2.0-ntc.2')) };
@@ -106,14 +106,14 @@ describe('check-channels.mjs and assert-etag.sh against a loopback blob', () => 
   });
 
   it('assert-etag: passes when unchanged, fails when changed or when a first release appears', async () => {
-    files['/latest.json'] = { body: '{}', etag: '"e1"' };
+    files['/manifest/latest.json'] = { body: '{}', etag: '"e1"' };
     const run = (e: string) => runAsync('bash', [join(TOOLS, 'assert-etag.sh'), base, e]);
     expect((await run('"e1"')).code).toBe(0);
     const bad = await run('"e0"');
     expect(bad.code).toBe(1);
     expect(bad.stdout).toMatch(/purge-unreleased/);
     expect((await run('')).code).toBe(1);
-    delete files['/latest.json'];
+    delete files['/manifest/latest.json'];
     expect((await run('')).code).toBe(0);
   });
 });
