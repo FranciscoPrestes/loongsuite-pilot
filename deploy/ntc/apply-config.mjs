@@ -6,7 +6,7 @@
 //      NTC_PILOT_ALLOW_LOOPBACK_HTTP=1
 // The key is never printed, logged or placed in an error message.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,12 +34,16 @@ export function applyNtcConfig(existing, opts) {
   const blob = opts.blobUrl.replace(/\/+$/, '');
 
   const prev = existing.otlpTrace ?? {};
+  // Drop every case variant of the authorization header so a stale one cannot coexist.
+  const prevHeaders = Object.fromEntries(
+    Object.entries(prev.headers ?? {}).filter(([k]) => k.toLowerCase() !== 'authorization'),
+  );
   let authorization;
   if (key !== undefined && key !== '') {
     if (!KEY_RE.test(key)) throw new Error('NTC_PILOT_CHAVE has an invalid format');
     authorization = `Bearer ${key}`;
   } else {
-    authorization = prev.headers?.Authorization;
+    authorization = Object.entries(prev.headers ?? {}).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
     if (!authorization) throw new Error('NTC_PILOT_CHAVE is required on first install');
   }
 
@@ -49,7 +53,7 @@ export function applyNtcConfig(existing, opts) {
     otlpTrace: {
       ...prev,
       endpoint,
-      headers: { ...prev.headers, Authorization: authorization },
+      headers: { ...prevHeaders, Authorization: authorization },
       captureMessageContent: true,
       spanAttributePassthroughPrefixes: ['agent.copilot.'],
       maxExportBatchBytes: 8388608,
@@ -68,7 +72,7 @@ export function applyNtcConfig(existing, opts) {
   if (canary) config.canary = { ...existing.canary, policy: 'latest' };
 
   const previousEndpoint = prev.endpoint;
-  return { config, previousEndpoint, endpointChanged: previousEndpoint !== undefined && previousEndpoint !== endpoint };
+  return { config, previousEndpoint, endpointChanged: previousEndpoint !== endpoint };
 }
 
 function readExisting(file) {
@@ -82,14 +86,34 @@ function readExisting(file) {
   throw new Error(`existing config.json is not a valid JSON object: ${file}`);
 }
 
-function writeConfig0600(file, config) {
+function winPrincipal(env) {
+  if (!env.USERNAME) throw new Error('USERNAME is not set; cannot restrict file permissions on Windows');
+  return env.USERDOMAIN ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME;
+}
+
+// Windows only: the Pilot rewrites config.json via tmp+rename and the new file inherits the
+// directory ACL, so the data dir itself gets an inheritable owner/SYSTEM-only grant.
+function restrictWindowsDir(dir, env) {
+  execFileSync(
+    'icacls',
+    [dir, '/inheritance:r', '/grant:r', `${winPrincipal(env)}:(OI)(CI)F`, '/grant:r', 'SYSTEM:(OI)(CI)F'],
+    { stdio: 'ignore' },
+  );
+}
+
+function writeConfig0600(file, config, env) {
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  if (process.platform !== 'win32') chmodSync(tmp, 0o600);
-  renameSync(tmp, file);
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  try {
+    if (process.platform !== 'win32') chmodSync(tmp, 0o600);
+    renameSync(tmp, file);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
   if (process.platform === 'win32') {
-    // Drop inherited ACLs; keep only the current user.
-    execFileSync('icacls', [file, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:F`], { stdio: 'ignore' });
+    execFileSync('icacls', [file, '/inheritance:r', '/grant:r', `${winPrincipal(env)}:F`], { stdio: 'ignore' });
   }
 }
 
@@ -118,9 +142,15 @@ function main(argv, env) {
     canary: env.NTC_PILOT_CANARY === '1',
     allowLoopbackHttp,
   });
-  mkdirSync(resolve(dataDir), { recursive: true });
-  writeConfig0600(file, config);
-  const moved = endpointChanged ? supersedeFailed(resolve(dataDir)) : 0;
+  if ([env.NTC_PILOT_ENDPOINT, env.NTC_PILOT_BLOB_URL].some((u) => u?.startsWith('http:'))) {
+    console.error('warning: loopback http is allowed for this run (testing only)');
+  }
+  const root = resolve(dataDir);
+  mkdirSync(root, { recursive: true });
+  if (process.platform === 'win32') restrictWindowsDir(root, env);
+  // Supersede old batches first: a crash in between must not leave the new endpoint with old batches.
+  const moved = endpointChanged ? supersedeFailed(root) : 0;
+  writeConfig0600(file, config, env);
   console.log(`NTConsult config applied: ${file}${moved ? ` (${moved} failed batches moved to otlp-superseded)` : ''}`);
 }
 

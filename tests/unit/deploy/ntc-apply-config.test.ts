@@ -38,6 +38,14 @@ describe('applyNtcConfig', () => {
     expect(() => applyNtcConfig({}, { endpoint: EP, blobUrl: BLOB })).toThrow('NTC_PILOT_CHAVE is required on first install');
   });
 
+  it('M2: a new key replaces a different Authorization and removes lowercase variants', () => {
+    const existing = { otlpTrace: { headers: { Authorization: 'Bearer old', authorization: 'Bearer old2', AUTHORIZATION: 'x', 'X-A': 'b' } } };
+    const { config } = applyNtcConfig(existing, base) as any;
+    expect(config.otlpTrace.headers).toEqual({ 'X-A': 'b', Authorization: `Bearer ${KEY}` });
+    const kept = applyNtcConfig({ otlpTrace: { headers: { authorization: 'Bearer keep' } } }, { endpoint: EP, blobUrl: BLOB }).config as any;
+    expect(kept.otlpTrace.headers).toEqual({ Authorization: 'Bearer keep' });
+  });
+
   it('3: invalid key throws without echoing it', () => {
     for (const bad of ['ntcp_short', 'xxxx_' + 'a'.repeat(40), `ntcp_${'a'.repeat(32)}!`]) {
       try {
@@ -82,6 +90,12 @@ describe('applyNtcConfig', () => {
     expect(() => applyNtcConfig({}, { ...base, endpoint: 'http://127.0.0.1:9/x' })).toThrow();
     expect(() => applyNtcConfig({}, { ...base, endpoint: 'http://127.0.0.1:9/x', blobUrl: 'http://localhost:9/p', allowLoopbackHttp: true })).not.toThrow();
     expect(() => applyNtcConfig({}, { ...base, endpoint: 'http://evil.example/x', allowLoopbackHttp: true })).toThrow();
+  });
+
+  it('I1: previousEndpoint undefined counts as changed', () => {
+    const r = applyNtcConfig({}, base);
+    expect(r.previousEndpoint).toBeUndefined();
+    expect(r.endpointChanged).toBe(true);
   });
 
   it('7: idempotent, preserves installId/userId/agents/dataDir, does not mutate input', () => {
@@ -144,6 +158,27 @@ describe('apply-config CLI', () => {
     expect(readdirSync(failed)).toEqual([]);
     const [ts] = readdirSync(join(dir, 'logs', 'otlp-superseded'));
     expect(existsSync(join(dir, 'logs', 'otlp-superseded', ts, 'x__ntc-2026-10-02.jsonl'))).toBe(true);
+  });
+
+  it('I1: config without endpoint plus leftover otlp-failed files moves them; clean dir moves nothing', () => {
+    const failed = join(dir, 'logs', 'otlp-failed');
+    mkdirSync(failed, { recursive: true });
+    writeFileSync(join(failed, 'a__user-otlp-2026-10-01.jsonl'), '{}\n');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ userId: 'u', otlpTrace: { headers: { Authorization: 'Bearer k' } } }));
+    expect(run({}).status).toBe(0);
+    expect(readdirSync(failed)).toEqual([]);
+    const clean = mkdtempSync(join(tmpdir(), 'ntc-apply-clean-'));
+    const r = spawnSync('node', [SCRIPT, '--data-dir', clean], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', NTC_PILOT_CHAVE: KEY } });
+    expect(r.status).toBe(0);
+    expect(existsSync(join(clean, 'logs'))).toBe(false);
+  });
+
+  it('M3: loopback http prints a warning without key or URL', () => {
+    const r = run({ NTC_PILOT_CHAVE: KEY, NTC_PILOT_ENDPOINT: 'http://127.0.0.1:7/zz' }, ['--allow-loopback-http']);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('loopback http');
+    expect(r.stderr).not.toContain('127.0.0.1');
+    expect(r.stderr).not.toContain(KEY);
   });
 
   it('(d) same endpoint moves nothing; env var enables loopback http', () => {
