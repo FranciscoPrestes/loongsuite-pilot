@@ -15,14 +15,17 @@
 # Expand-Archive, while the manifest sha256 covers the .tar.gz only. So the .zip that sits
 # next to the .tar.gz (same releases/<version>/ directory) is verified against SHA256SUMS.
 
+# Everything runs in a child scope so `irm | iex` leaks no preferences, variables or functions.
+& {
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest progress is very slow on 5.1
 
 $DefaultBlob = 'https://stntconsultpilot.blob.core.windows.net/pilot'
 $Blob = if ($env:NTC_PILOT_BLOB_URL) { $env:NTC_PILOT_BLOB_URL } else { $DefaultBlob }
 $Blob = $Blob.TrimEnd('/')
 $Channel = if ($env:NTC_PILOT_CHANNEL) { $env:NTC_PILOT_CHANNEL } else { 'stable' }
 $DataDir = Join-Path $env:USERPROFILE '.loongsuite-pilot'
-$LoopbackRe = '^http://(127\.0\.0\.1|localhost)(:[0-9]+)?(/|$)'
+$LoopbackRe = '^http://(127\.0\.0\.1|localhost)(:[0-9]+)?(/|\z)'
 
 function Fail([string]$Message) { throw $Message }
 
@@ -70,7 +73,7 @@ function Test-AgainstSums([string]$Sums, [string]$Dir, [string]$Name) {
 function Test-Key {
     $k = $env:NTC_PILOT_CHAVE
     if (-not $k) { Fail 'defina NTC_PILOT_CHAVE com a chave fornecida pela NTConsult' }
-    if ($k -cnotmatch '^ntcp_[0-9A-Za-z]{32,}$') { Fail 'NTC_PILOT_CHAVE em formato invalido (esperado ntcp_...)' }
+    if ($k -cnotmatch '^ntcp_[0-9A-Za-z]{32,}\z') { Fail 'NTC_PILOT_CHAVE em formato invalido (esperado ntcp_...)' }
 }
 
 function Get-ManifestValue([hashtable]$Table, [string]$Name) {
@@ -134,7 +137,7 @@ function Invoke-NtcInstall {
         }
         if ($packageUrl -match '\s') { Fail 'package_url invalido no manifesto' }
         Assert-Https 'package_url' $packageUrl
-        if ($version -cnotmatch '^[0-9A-Za-z.+-]+$') { Fail 'versao invalida no manifesto' }
+        if ($version -cnotmatch '^[0-9A-Za-z.+-]+\z' -or $version -eq '.' -or $version -eq '..') { Fail 'versao invalida no manifesto' }
         if ($packageSha -cnotmatch '^[0-9a-f]{64}$') { Fail 'sha256 invalido no manifesto' }
         if ($packageUrl -notmatch '\.tar\.gz$') { Fail 'package_url deve terminar em .tar.gz' }
         $zipUrl = $packageUrl -replace '\.tar\.gz$', '.zip'
@@ -188,7 +191,10 @@ function Invoke-NtcInstall {
         if ($Channel -eq 'canary') { $env:NTC_PILOT_CANARY = '1' }
         $env:NTC_PILOT_BLOB_URL = $Blob
         & $node @applyArgs
-        if ($LASTEXITCODE -ne 0) { Fail "apply-config terminou com erro (codigo $LASTEXITCODE)" }
+        $applyRc = $LASTEXITCODE
+        # The restarted daemon must not inherit the key.
+        Remove-Item Env:NTC_PILOT_CHAVE -ErrorAction SilentlyContinue
+        if ($applyRc -ne 0) { Fail "apply-config terminou com erro (codigo $applyRc)" }
 
         if ($env:NTC_PILOT_SKIP_RESTART -ne '1') {
             $cli = Join-Path $env:USERPROFILE '.local\bin\loongsuite-pilot.cmd'
@@ -198,6 +204,9 @@ function Invoke-NtcInstall {
         }
         Write-Host 'Concluído.'
     } finally {
+        # The key and the env we exported must not outlive this run in the caller session.
+        Remove-Item Env:NTC_PILOT_CHAVE -ErrorAction SilentlyContinue
+        Remove-Item Env:NTC_PILOT_CANARY -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -210,4 +219,5 @@ try {
     # would close the user's terminal.
     if ($PSCommandPath) { exit 1 }
     $global:LASTEXITCODE = 1
+}
 }

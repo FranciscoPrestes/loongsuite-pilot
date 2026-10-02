@@ -12,8 +12,15 @@ on:
       - 'deploy/**'
       - 'tools/ntc-release/**'
 
+permissions:
+  contents: read
+
 env:
   FAKE_VERSION: 9.9.9-ntc.1
+  # Test key only (ntcp_ + 32 'A'); not a real credential.
+  TEST_KEY: ntcp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  TEST_EMAIL: ci@ntconsult.com.br
+  EXPECTED_ENDPOINT: https://beat.ntconsult.ai/api/ingest/otlp
 
 jobs:
   blob:
@@ -89,14 +96,41 @@ jobs:
             catch { Start-Sleep -Seconds 1 }
           }
           Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8080/pilot/manifest/stable.txt' | Out-Null
+      - name: Negative run, tampered installer on a second blob (must abort, nothing may run)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $good = Join-Path $env:RUNNER_TEMP 'blob'
+          $bad = Join-Path $env:RUNNER_TEMP 'blob-bad'
+          Copy-Item -Recurse $good $bad
+          $inst = Join-Path $bad "pilot\releases\$env:FAKE_VERSION\installer.ps1"
+          Add-Content -LiteralPath $inst -Value '# tampered'
+          Start-Process -FilePath python -ArgumentList '-m','http.server','8081','--bind','127.0.0.1' `
+            -WorkingDirectory $bad -WindowStyle Hidden
+          for ($i = 0; $i -lt 20; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8081/pilot/manifest/stable.txt' | Out-Null; break }
+            catch { Start-Sleep -Seconds 1 }
+          }
+          $dataDir = Join-Path $env:USERPROFILE '.loongsuite-pilot'
+          if (Test-Path $dataDir) { throw "data dir exists before the negative run: $dataDir" }
+          $env:NTC_PILOT_BLOB_URL = 'http://127.0.0.1:8081/pilot'
+          $env:NTC_PILOT_ALLOW_LOOPBACK_HTTP = '1'
+          $env:NTC_PILOT_CHAVE = $env:TEST_KEY
+          $log = Join-Path $env:RUNNER_TEMP 'negative.log'
+          cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File deploy\ntc\install.ps1 > ""$log"" 2>&1"
+          $rc = $LASTEXITCODE
+          Get-Content -LiteralPath $log
+          if ($rc -eq 0) { throw 'install.ps1 succeeded with a tampered installer' }
+          if (Test-Path $dataDir) { throw "installer ran despite the hash mismatch: $dataDir exists" }
+          if ((Get-Content -LiteralPath $log -Raw) -notmatch 'nao confere') { throw 'abort reason is not the hash mismatch' }
+          Write-Host 'Negative run aborted as expected.'
       - name: Run install.ps1 as an ordinary user (output goes to a log)
         shell: cmd
         env:
           NTC_PILOT_BLOB_URL: http://127.0.0.1:8080/pilot
           NTC_PILOT_ALLOW_LOOPBACK_HTTP: '1'
-          NTC_PILOT_EMAIL: ci@ntconsult.com.br
-          # Test key only (ntcp_ + 32 'A'); not a real credential.
-          NTC_PILOT_CHAVE: ntcp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          NTC_PILOT_EMAIL: ${{ env.TEST_EMAIL }}
+          NTC_PILOT_CHAVE: ${{ env.TEST_KEY }}
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File deploy\ntc\install.ps1 > "%RUNNER_TEMP%\install.log" 2>&1
           set rc=%ERRORLEVEL%
@@ -111,8 +145,12 @@ jobs:
           $cfgPath = Join-Path $dataDir 'config.json'
           $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
 
-          if (-not $cfg.otlpTrace.endpoint) { $failures += 'otlpTrace.endpoint missing' }
-          if (-not $cfg.autoUpdate.packageUrl) { $failures += 'autoUpdate.packageUrl missing' }
+          if ($cfg.otlpTrace.endpoint -cne $env:EXPECTED_ENDPOINT) { $failures += "otlpTrace.endpoint is '$($cfg.otlpTrace.endpoint)', expected '$env:EXPECTED_ENDPOINT'" }
+          $expectedPkg = 'http://127.0.0.1:8080/pilot/releases/latest/loongsuite-pilot.tar.gz'
+          if ($cfg.autoUpdate.packageUrl -cne $expectedPkg) { $failures += "autoUpdate.packageUrl is '$($cfg.autoUpdate.packageUrl)', expected '$expectedPkg'" }
+          # Proves the env path: key and email reached config.json (values are not printed).
+          if ($cfg.otlpTrace.headers.Authorization -cne "Bearer $env:TEST_KEY") { $failures += 'otlpTrace.headers.Authorization does not match the test key' }
+          if ($cfg.userId -cne $env:TEST_EMAIL) { $failures += "userId is '$($cfg.userId)', expected '$env:TEST_EMAIL'" }
           if ($cfg.retention.otlpFailedDays -ne 30) { $failures += "retention.otlpFailedDays is $($cfg.retention.otlpFailedDays), expected 30" }
 
           $me = "$env:USERDOMAIN\$env:USERNAME"
@@ -140,6 +178,16 @@ jobs:
 
           $log = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'install.log') -Raw
           if ($log -match 'ntcp_') { $failures += 'installer log contains ntcp_' }
+
+          # The key may live only in config.json; scan every other file in the data dir.
+          Get-ChildItem -LiteralPath $dataDir -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -ne $cfgPath -and $_.Length -lt 64MB } | ForEach-Object {
+              try {
+                $bytes = [IO.File]::ReadAllBytes($_.FullName)
+                $text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+                if ($text.Contains('ntcp_')) { $failures += "ntcp_ found in $($_.FullName)" }
+              } catch { Write-Host "skipped unreadable $($_.FullName)" }
+            }
 
           if ($failures.Count -gt 0) {
             $failures | ForEach-Object { Write-Host "FAIL: $_" }

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -142,6 +142,27 @@ describe('deploy/ntc/install.sh', () => {
     const r = await run({ ...ok, NTC_PILOT_BLOB_URL: 'http://localhost:80@evil.test/pilot' });
     expect(r.code).not.toBe(0);
     expect(r.out).toContain('https');
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
+  it('restart runs without the key in its environment', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ntc-home-'));
+    mkdirSync(join(home, '.local', 'bin'), { recursive: true });
+    const stub = join(home, '.local', 'bin', 'loongsuite-pilot');
+    writeFileSync(stub, '#!/usr/bin/env bash\necho "$1" >> "$T_MARK/cli-calls"\nenv | grep -c ntcp_ >> "$T_MARK/cli-keycount" || true\n');
+    chmodSync(stub, 0o755);
+    const r = await run({ ...ok, HOME: home, NTC_PILOT_SKIP_RESTART: '' });
+    expect(r.code, r.out).toBe(0);
+    expect(readFileSync(join(mark, 'cli-calls'), 'utf8')).toContain('restart');
+    const counts = readFileSync(join(mark, 'cli-keycount'), 'utf8').trim().split('\n');
+    expect(counts.every((c) => c === '0')).toBe(true);
+  });
+
+  it.each(['.', '..'])('rejects the dot-segment version %j before fetching the release', async (v) => {
+    files['/manifest/stable.txt'] = `version=${v}\npackage_url=${base}/pkg/stable.tgz\nsha256=${sha(PKG)}\n`;
+    const r = await run(ok);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('versao invalida');
     expect(existsSync(join(mark, 'installer-args'))).toBe(false);
   });
 

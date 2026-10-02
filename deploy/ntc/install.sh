@@ -99,6 +99,7 @@ main() {
   printf '%s' "$package_url" | grep -Eq '^[^[:space:]]+$' || die "package_url invalido no manifesto"
   require_https package_url "$package_url"
   printf '%s' "$version" | grep -Eq '^[0-9A-Za-z.+-]+$' || die "versao invalida no manifesto"
+  case "$version" in .|..) die "versao invalida no manifesto" ;; esac
 
   if [ "${NTC_PILOT_DRY_RUN:-}" = "1" ]; then
     echo "[dry-run] canal=$CHANNEL versao=$version"
@@ -136,6 +137,8 @@ main() {
   if [ "$CHANNEL" = "canary" ]; then export NTC_PILOT_CANARY=1; fi
   NTC_PILOT_BLOB_URL="$BLOB" "$node" "$WORK/apply-config.mjs" "${apply_args[@]}"
 
+  # The restarted daemon must not inherit the key.
+  unset NTC_PILOT_CHAVE
   if [ "${NTC_PILOT_SKIP_RESTART:-}" != "1" ]; then
     "$HOME/.local/bin/loongsuite-pilot" restart
     "$HOME/.local/bin/loongsuite-pilot" status || true
