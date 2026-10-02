@@ -100,6 +100,11 @@ function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentA
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
+// Cap on turns whose unpaired calls are held across an early flush. Held
+// records of a truly abandoned turn live until this cap evicts them (oldest
+// first) or the final/shutdown flush drops them. No age-based expiry: a long
+// tool (e.g. `sleep 600`) legitimately outlives the idle timeout.
+const MAX_HELD_ORPHAN_TURNS = MAX_TURN_BUFFERS;
 // Bound diagnostics even if input supplies arbitrary agent names.
 const MAX_RUNTIME_AGENTS = 64;
 const SKILL_ATTRIBUTE_KEYS = [
@@ -536,6 +541,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly cfg: OtlpTraceFlusherConfig;
   private readonly spanEnrichers: SpanEnricherRunner;
   private readonly turnBuffers = new Map<string, TurnBuffer>();
+  /**
+   * Unpaired tool.call / llm.request records an early flush neither converted
+   * nor discarded, keyed by turn key. They rejoin the turn when it reopens
+   * (so a late tool.result still finds its arguments) and are dropped at the
+   * final flush. Never converted while held, so never exported twice.
+   */
+  private readonly heldOrphans = new Map<string, AgentActivityEntry[]>();
+  /** Measured logical size per buffered record, to move exact bytes with held records. */
+  private readonly recordLogicalBytes = new WeakMap<AgentActivityEntry, number>();
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
   private readonly agentExportStates = new Map<string, AgentExportState>();
   private readonly instanceId = randomUUID();
@@ -782,6 +796,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         openedAtMs: performance.now(),
         runtimeCounters: this.getRuntimeCounters(agentType),
       };
+      this.restoreHeldOrphans(buf);
       this.turnBuffers.set(key, buf);
     } else if (!buf.sessionId && incomingSessionId) {
       buf.sessionId = incomingSessionId;
@@ -790,6 +805,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.lastActivityMs = Date.now();
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
+      this.recordLogicalBytes.set(entry, logicalBytes);
     } else {
       buf.unmeasuredRecords++;
     }
@@ -829,6 +845,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       buf.completed = true;
     }
     await this.flushCompleted();
+    // Final flush: whatever is still held never got its mate (interrupted
+    // turn). Discard it, as dropOrphanPairs does for the final conversion.
+    this.heldOrphans.clear();
     while (this.inFlightExports.size > 0 || this.pendingFailedWrites.size > 0) {
       const batch = [...this.inFlightExports, ...this.pendingFailedWrites];
       await Promise.allSettled(batch);
@@ -1024,9 +1043,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return { source: 'ephemeral', value: ephemeralId, key: `ephemeral:${ephemeralId}` };
   }
 
+  /**
+   * `markFlushed=false` is an early flush (idle, same-session successor,
+   * buffer cap): the turn may reopen. Unpaired calls are then held instead of
+   * being dropped by dropOrphanPairs, so a later result still pairs with them.
+   * Partitioning happens here, synchronously, before any later record can
+   * reopen the turn. Final flushes (`markFlushed=true`, flushCompleted) hold
+   * nothing.
+   */
   private triggerFlush(buf: TurnBuffer, markFlushed = true): void {
     if (markFlushed) {
       this.flushedTurnKeys.add(buf.key);
+    } else {
+      this.holdUnpairedRecords(buf);
     }
     this.turnBuffers.delete(buf.key);
     this.recordBufferRemoval(buf);
@@ -1036,6 +1065,46 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.inFlightExports.delete(p);
     });
     this.inFlightExports.add(p);
+  }
+
+  /** Moves the buffer's unpaired calls (with their exact sizes) into heldOrphans. */
+  private holdUnpairedRecords(buf: TurnBuffer): void {
+    const { paired, orphans } = partitionOrphanPairs(buf.records);
+    if (orphans.length === 0) return;
+    const { bytes, unmeasured } = this.sizeOf(orphans);
+    buf.records = paired;
+    buf.logicalBytes = Math.max(0, buf.logicalBytes - bytes);
+    buf.unmeasuredRecords = Math.max(0, buf.unmeasuredRecords - unmeasured);
+    // Re-insert so Map order stays oldest-first for cap eviction.
+    this.heldOrphans.delete(buf.key);
+    this.heldOrphans.set(buf.key, orphans);
+    while (this.heldOrphans.size > MAX_HELD_ORPHAN_TURNS) {
+      const oldest = this.heldOrphans.keys().next().value as string;
+      logger.debug(`Dropping held unpaired records of turn ${oldest} (cap)`);
+      this.heldOrphans.delete(oldest);
+    }
+  }
+
+  /** Prepends held records to a freshly (re)opened buffer of the same turn. */
+  private restoreHeldOrphans(buf: TurnBuffer): void {
+    const held = this.heldOrphans.get(buf.key);
+    if (!held) return;
+    this.heldOrphans.delete(buf.key);
+    const { bytes, unmeasured } = this.sizeOf(held);
+    buf.records = [...held];
+    buf.logicalBytes += bytes;
+    buf.unmeasuredRecords += unmeasured;
+  }
+
+  private sizeOf(records: readonly AgentActivityEntry[]): { bytes: number; unmeasured: number } {
+    let bytes = 0;
+    let unmeasured = 0;
+    for (const r of records) {
+      const size = this.recordLogicalBytes.get(r);
+      if (size === undefined) unmeasured++;
+      else bytes += size;
+    }
+    return { bytes, unmeasured };
   }
 
   private async flushCompleted(): Promise<void> {
@@ -2149,6 +2218,18 @@ function isMetadataOnlyOtherEvent(entry: AgentActivityEntry): boolean {
 }
 
 function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  return partitionOrphanPairs(records).paired;
+}
+
+/**
+ * Single pairing predicate for both flush kinds: the final flush discards
+ * `orphans` (dropOrphanPairs); an early flush holds them for a reopened turn.
+ * Order is preserved within each side.
+ */
+function partitionOrphanPairs(records: readonly AgentActivityEntry[]): {
+  paired: AgentActivityEntry[];
+  orphans: AgentActivityEntry[];
+} {
   const stepsWithResponse = new Set<string>();
   const completedToolCallIds = new Set<string>();
   for (const r of records) {
@@ -2161,7 +2242,7 @@ function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
       if (callId) completedToolCallIds.add(callId);
     }
   }
-  return records.filter((r) => {
+  const isPaired = (r: AgentActivityEntry): boolean => {
     const name = r['event.name'];
     if (name === 'llm.request') {
       const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
@@ -2173,5 +2254,9 @@ function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
       return !callId || completedToolCallIds.has(callId);
     }
     return true;
-  });
+  };
+  const paired: AgentActivityEntry[] = [];
+  const orphans: AgentActivityEntry[] = [];
+  for (const r of records) (isPaired(r) ? paired : orphans).push(r);
+  return { paired, orphans };
 }
