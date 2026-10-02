@@ -1,0 +1,142 @@
+# NTConsult fork: smoke test of the thin installer (deploy/ntc/install.ps1) against a fake blob
+# served from loopback. The Linux job builds the package and assembles the blob; the Windows
+# job installs from it as an ordinary user and checks config, ACLs, service and log hygiene.
+name: NTConsult install smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/ntc-fase1-distribuicao]
+    paths:
+      - '.github/workflows/ntc-install-smoke.yml'
+      - 'deploy/**'
+      - 'tools/ntc-release/**'
+
+env:
+  FAKE_VERSION: 9.9.9-ntc.1
+
+jobs:
+  blob:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Package with origins rewritten to the loopback blob
+        env:
+          NTC_BLOB_BASE_URL: http://127.0.0.1:8080/pilot
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/installers" "$RUNNER_TEMP/pkg"
+          NTC_INSTALLERS_OUT="$RUNNER_TEMP/installers" \
+            bash deploy/package-opensource.sh -o "$RUNNER_TEMP/pkg/loongsuite-pilot.tar.gz"
+      - name: Assemble the fake blob (releases/<version>/, manifest/, latest.json)
+        run: |
+          set -euo pipefail
+          blob="$RUNNER_TEMP/blob/pilot"
+          rel="$blob/releases/$FAKE_VERSION"
+          mkdir -p "$rel" "$blob/manifest" "$RUNNER_TEMP/manifest"
+          cp "$RUNNER_TEMP/pkg/loongsuite-pilot.tar.gz" "$RUNNER_TEMP/pkg/loongsuite-pilot.zip" "$rel/"
+          cp "$RUNNER_TEMP/installers/installer.sh" "$RUNNER_TEMP/installers/installer.ps1" "$rel/"
+          cp deploy/ntc/apply-config.mjs "$rel/"
+          (cd "$rel" && sha256sum loongsuite-pilot.tar.gz loongsuite-pilot.zip installer.sh installer.ps1 apply-config.mjs > SHA256SUMS)
+          tar_sha="$(sha256sum "$rel/loongsuite-pilot.tar.gz" | cut -d' ' -f1)"
+          # The manifest CLI insists on https; the placeholder is rewritten to loopback below.
+          node tools/ntc-release/cli.mjs manifest --action promote --version "$FAKE_VERSION" \
+            --git-commit "$(git rev-parse HEAD)" \
+            --package-url "https://placeholder.invalid/pilot/releases/$FAKE_VERSION/loongsuite-pilot.tar.gz" \
+            --sha256 "$tar_sha" --released-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --out-dir "$RUNNER_TEMP/manifest"
+          local_url="http://127.0.0.1:8080/pilot/releases/$FAKE_VERSION/loongsuite-pilot.tar.gz"
+          sed -i "s#^package_url=.*#package_url=$local_url#" "$RUNNER_TEMP/manifest/stable.txt"
+          sed -i "s#https://placeholder.invalid/pilot#http://127.0.0.1:8080/pilot#" "$RUNNER_TEMP/manifest/latest.json"
+          cp "$RUNNER_TEMP/manifest/stable.txt" "$blob/manifest/stable.txt"
+          cp "$RUNNER_TEMP/manifest/latest.json" "$blob/latest.json"
+          cat "$blob/manifest/stable.txt"
+          (cd "$RUNNER_TEMP/blob" && find . -type f | sort)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fake-blob
+          path: ${{ runner.temp }}/blob
+
+  windows:
+    needs: blob
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      # The fake blob has no managed Node.js nor prebuilt node_modules: the installer falls
+      # back to the system Node and `npm install` (needs the runner's network to npm).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: fake-blob
+          path: ${{ runner.temp }}\blob
+      - name: Serve the fake blob on loopback
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'blob'
+          Start-Process -FilePath python -ArgumentList '-m','http.server','8080','--bind','127.0.0.1' `
+            -WorkingDirectory $root -WindowStyle Hidden
+          for ($i = 0; $i -lt 20; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8080/pilot/manifest/stable.txt' | Out-Null; break }
+            catch { Start-Sleep -Seconds 1 }
+          }
+          Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:8080/pilot/manifest/stable.txt' | Out-Null
+      - name: Run install.ps1 as an ordinary user (output goes to a log)
+        shell: cmd
+        env:
+          NTC_PILOT_BLOB_URL: http://127.0.0.1:8080/pilot
+          NTC_PILOT_ALLOW_LOOPBACK_HTTP: '1'
+          NTC_PILOT_EMAIL: ci@ntconsult.com.br
+          # Test key only (ntcp_ + 32 'A'); not a real credential.
+          NTC_PILOT_CHAVE: ntcp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File deploy\ntc\install.ps1 > "%RUNNER_TEMP%\install.log" 2>&1
+          set rc=%ERRORLEVEL%
+          type "%RUNNER_TEMP%\install.log"
+          exit /b %rc%
+      - name: Assert config, ACLs, service and log hygiene
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $failures = @()
+          $dataDir = Join-Path $env:USERPROFILE '.loongsuite-pilot'
+          $cfgPath = Join-Path $dataDir 'config.json'
+          $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
+
+          if (-not $cfg.otlpTrace.endpoint) { $failures += 'otlpTrace.endpoint missing' }
+          if (-not $cfg.autoUpdate.packageUrl) { $failures += 'autoUpdate.packageUrl missing' }
+          if ($cfg.retention.otlpFailedDays -ne 30) { $failures += "retention.otlpFailedDays is $($cfg.retention.otlpFailedDays), expected 30" }
+
+          $me = "$env:USERDOMAIN\$env:USERNAME"
+          foreach ($p in @($cfgPath, $dataDir)) {
+            Write-Host "icacls $p"
+            icacls $p
+            $acl = Get-Acl -LiteralPath $p
+            foreach ($ace in $acl.Access) {
+              $who = $ace.IdentityReference.Value
+              if ($who -ne $me -and $who -ne 'NT AUTHORITY\SYSTEM') { $failures += "unexpected ACE on ${p}: $who" }
+            }
+            if (-not ($acl.Access | Where-Object { $_.IdentityReference.Value -eq $me })) { $failures += "current user has no ACE on $p" }
+          }
+
+          $env:Path = (Join-Path $env:USERPROFILE '.local\bin') + ';' + $env:Path
+          $status = (& loongsuite-pilot.cmd status 2>&1 | Out-String)
+          Write-Host $status
+          if ($status -notmatch 'is running' -or $status -match 'not running') { $failures += 'loongsuite-pilot status is not active' }
+
+          $log = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'install.log') -Raw
+          if ($log -match 'ntcp_') { $failures += 'installer log contains ntcp_' }
+
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Host "FAIL: $_" }
+            exit 1
+          }
+          Write-Host 'All install smoke assertions passed.'
