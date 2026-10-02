@@ -16,7 +16,8 @@ describe('rewriteOrigins on the real distribution files', () => {
   it.each(files)('%s has no forbidden origin left and points at the blob', (f) => {
     const out = rewriteOrigins(readFileSync(f, 'utf8'), BLOB);
     expect(findForbiddenOrigins(out)).toEqual([]);
-    expect(out).toContain(BLOB);
+    // SKILL.md only had unpublished helper-script URLs, so it carries no blob URL.
+    if (!f.endsWith('SKILL.md')) expect(out).toContain(BLOB);
   });
 
   it('installer.sh builds release-scoped and latest URLs under releases/', () => {
@@ -45,5 +46,13 @@ describe('rewriteOrigins on the real distribution files', () => {
 
   it('flags the community-edition telemetry project', () => {
     expect(findForbiddenOrigins("const PROJECT = 'loongsuite-community-edition';")).not.toEqual([]);
+  });
+
+  it('replaces Alibaba helper-script URLs in SKILL.md with a literal note', () => {
+    const out = rewriteOrigins(readFileSync('assets/skills/loongsuite-pilot-ops/SKILL.md', 'utf8'), BLOB);
+    expect(out).not.toContain('loongsuite-pilot-installer-inner.sh');
+    expect(out).not.toContain('patchelf_node_for_7u.sh');
+    expect(out).toContain('(not available in the NTConsult build)');
+    expect(out).not.toContain('aliyuncs.com/loongsuite/');
   });
 });

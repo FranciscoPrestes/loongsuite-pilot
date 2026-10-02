@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // NTConsult packaging overlay.
 // Usage: node deploy/ntc/overlay.mjs --stage <PKG_DIR> --blob <URL> --installers-out <DIR>
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findForbiddenOrigins, rewriteOrigins } from './rewrite-origins.mjs';
@@ -51,10 +51,17 @@ function main() {
     for (const hit of new Set(findForbiddenOrigins(text))) problems.push(`${path}: ${hit}`);
   };
 
+  // Dev-only E2E harness (downloads Alibaba helper scripts at runtime); nothing shipped references it.
+  rmSync(join(stage, 'scripts', 'e2e'), { recursive: true, force: true });
+
   for (const file of walk(stage)) {
     const buf = readFileSync(file);
     if (isBinary(file, buf)) continue;
     const before = buf.toString('utf8');
+    if (!Buffer.from(before, 'utf8').equals(buf)) {
+      problems.push(`${file}: not valid UTF-8 text, refusing to rewrite`);
+      continue;
+    }
     const after = rewriteOrigins(before, blob);
     if (after !== before) {
       writeFileSync(file, after);

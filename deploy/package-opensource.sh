@@ -120,8 +120,12 @@ echo "    ✅ Stripped internal-only files"
 
 # NTConsult: rewrite download origins to our blob and refuse to ship Alibaba origins.
 if [ -n "${NTC_BLOB_BASE_URL:-}" ]; then
+    if [ -z "${NTC_INSTALLERS_OUT:-}" ]; then
+        echo "❌ NTC_BLOB_BASE_URL is set but NTC_INSTALLERS_OUT is not; the rewritten installers would be lost. Set NTC_INSTALLERS_OUT to a persistent directory." >&2
+        exit 1
+    fi
     node "$PROJECT_ROOT/deploy/ntc/overlay.mjs" --stage "$PKG_DIR" \
-        --blob "$NTC_BLOB_BASE_URL" --installers-out "${NTC_INSTALLERS_OUT:-$STAGE_DIR/installers}"
+        --blob "$NTC_BLOB_BASE_URL" --installers-out "$NTC_INSTALLERS_OUT"
 fi
 
 echo "    ✅ Staged into $PKG_DIR"

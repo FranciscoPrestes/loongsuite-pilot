@@ -17,11 +17,12 @@
 //   scripts/loongsuite-pilot.ps1  $OPEN_SOURCE_INSTALLER_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1"
 //   src/updater/updater.ts (baked into dist) 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node[-modules]'
 //   assets/skills/loongsuite-pilot-ops/SKILL.md  https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/<internal script>
-//   scripts/e2e/lib/e2e-scenarios.mjs  same host under /loongsuite-dev/loongsuite-pilot/ and /loongsuite/loongsuite-pilot/
-//     (internal-only helper scripts the fork does not publish; the host is rewritten so no Alibaba origin ships)
+//     (internal-only helper scripts the fork does not publish; replaced by a literal note)
 
 const ALIYUN_RELEASE = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com';
 const COMMUNITY = 'https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com';
+
+const UNAVAILABLE = '(not available in the NTConsult build)';
 
 const FORBIDDEN = /loongcollector-community-edition|aliyun-observability-release|loongsuite-community-edition/g;
 
@@ -42,8 +43,8 @@ function rulesFor(blob) {
     [/\$\{_OSS_BASE_URL\}\/latest\//g, '${_OSS_BASE_URL}/releases/latest/'],
     [/\$_OSS_BASE_URL\/latest\//g, '$$_OSS_BASE_URL/releases/latest/'],
     [new RegExp(`${COMMUNITY}/loongsuite-pilot`, 'g'), b],
-    // Docs that point at internal helper scripts: drop the Alibaba host (not published by the fork).
-    [new RegExp(`${ALIYUN_RELEASE}/loongsuite(?:-dev)?/loongsuite-pilot`, 'g'), b],
+    // Internal helper scripts the NTConsult build does not publish (SKILL.md): no dead links.
+    [new RegExp(`${ALIYUN_RELEASE}/loongsuite/loongsuite-pilot/[A-Za-z0-9_.-]+`, 'g'), UNAVAILABLE],
   ];
 }
 
