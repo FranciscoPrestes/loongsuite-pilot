@@ -96,13 +96,10 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run typecheck
-      # The two excluded files are PowerShell tests of the upstream repository that are already red on the
-      # NTConsult-main baseline (not caused by the fork). Everything else runs.
+      # vitest.ntc-release.config.ts excludes two pre-existing upstream PowerShell tests that are already
+      # red on the NTConsult-main baseline (not caused by the fork). Everything else runs.
       - name: Unit tests (throwaway HOME, as the suite writes to ~/.claude)
-        run: |
-          env -u LOONGSUITE_PILOT_DATA_DIR HOME="$(mktemp -d)" npx vitest run \
-            --exclude tests/unit/deploy/installer-multimodal-config.test.mjs \
-            --exclude tests/unit/scripts/dashboard-lifecycle.test.mjs
+        run: env -u LOONGSUITE_PILOT_DATA_DIR HOME="$(mktemp -d)" npx vitest run --config vitest.ntc-release.config.ts
 
   package:
     needs: [prepare, test]

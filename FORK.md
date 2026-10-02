@@ -96,7 +96,7 @@ maior que o stable e o canary publicados** (o `prepare` recusa, ate no dry run).
 - Com `dry_run=true` (padrao) o fluxo termina no `assemble`: nada e publicado, e o artefato `blob-stage`
   mostra exatamente o que subiria. Antes do blob existir, a leitura do `latest.json` atual e tolerante a falha.
 - O `test` exclui dois testes PowerShell do upstream que ja estao vermelhos no `NTConsult-main`
-  (`installer-multimodal-config.test.mjs` e `dashboard-lifecycle.test.mjs`); o resto roda.
+  (`installer-multimodal-config.test.mjs` e `dashboard-lifecycle.test.mjs`) via `vitest.ntc-release.config.ts`; o resto roda.
 - `dry_run=false` **so depois do OK do Francisco e com o blob existindo**. O job `publish` roda no ambiente
   `ntc-canary` e faz, nesta ordem: confere que o ETag do `latest.json` nao mudou; envia `releases/<v>/` e
   `deps/node-modules/<v>/` (retomavel: um blob que ja existe so e aceito se o conteudo for identico, senao
