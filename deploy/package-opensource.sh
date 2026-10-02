@@ -17,6 +17,13 @@ PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
 
+# NTConsult: the .zip is built from inside the stage dir, so the output path must be absolute.
+resolve_output_path() {
+    mkdir -p "$(dirname "$1")"
+    echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+}
+if [ "${NTC_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -o|--output)
@@ -31,6 +38,7 @@ done
 if [ -z "$OUTPUT_PATH" ]; then
     OUTPUT_PATH="$PROJECT_ROOT/$PACKAGE_NAME.tar.gz"
 fi
+OUTPUT_PATH="$(resolve_output_path "$OUTPUT_PATH")"
 ZIP_OUTPUT_PATH="${OUTPUT_PATH%.tar.gz}.zip"
 
 cd "$PROJECT_ROOT"
