@@ -47,7 +47,9 @@ describe('assemble-stage stage', () => {
       ['SHA256SUMS', 'apply-config.mjs', 'installer.ps1', 'installer.sh', 'loongsuite-pilot.tar.gz', 'loongsuite-pilot.zip', 'thin'],
     );
     const sums = readFileSync(join(rel, 'SHA256SUMS'), 'utf8').trim().split('\n');
-    expect(sums).toHaveLength(5);
+    expect(sums).toHaveLength(7);
+    expect(sums).toContain(`${sha('thin sh')}  thin/install.sh`);
+    expect(sums).toContain(`${sha('thin ps1')}  thin/install.ps1`);
     expect(sums).toContain(`${sha('content of loongsuite-pilot.zip')}  loongsuite-pilot.zip`);
     expect(sums.join('\n')).not.toMatch(/SHA256SUMS/);
     expect(readFileSync(join(out, 'install.sh'), 'utf8')).toBe('thin sh');

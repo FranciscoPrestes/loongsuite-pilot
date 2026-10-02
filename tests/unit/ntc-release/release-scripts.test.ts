@@ -124,8 +124,17 @@ describe('publish-manifest.sh', () => {
     setup({ canary: true, azScript: '#!/bin/sh\necho "$@" >> "$AZ_LOG"\necho "ConditionNotMet 412" >&2\nexit 1\n' });
     const r = run({ NTC_ETAG: '"0x1"' });
     expect(r.status).toBe(1);
-    expect(r.stdout).toMatch(/Run the workflow again/);
+    expect(r.stdout).toMatch(/purge-unreleased/);
     expect(log()).toHaveLength(1);
+  });
+
+  it('NTC_TXT_ONLY writes only the channel files and does not need latest.json', () => {
+    setup({ canary: true });
+    rmSync(join(dir, 'm', 'latest.json'));
+    expect(run({ NTC_TXT_ONLY: '1' }).status).toBe(0);
+    const l = log();
+    expect(l).toHaveLength(2);
+    expect(l.some((x) => x.includes('--name latest.json'))).toBe(false);
   });
 
   it('requires the account and subscription variables', () => {

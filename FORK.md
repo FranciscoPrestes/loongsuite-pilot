@@ -99,23 +99,34 @@ maior que o stable e o canary publicados** (o `prepare` recusa, ate no dry run).
   (`installer-multimodal-config.test.mjs` e `dashboard-lifecycle.test.mjs`) via `vitest.ntc-release.config.ts`; o resto roda.
 - `dry_run=false` **so depois do OK do Francisco e com o blob existindo**. O job `publish` roda no ambiente
   `ntc-canary` e faz, nesta ordem: confere que o ETag do `latest.json` nao mudou; envia `releases/<v>/` e
-  `deps/node-modules/<v>/` (retomavel: um blob que ja existe so e aceito se o conteudo for identico, senao
+  `deps/node-modules/<v>/` (retomavel na mesma execucao: um blob que ja existe so e aceito se o conteudo for identico, senao
   falha); espelha `deps/node/22.22.2/` so se ausente; envia `install.sh`/`install.ps1` da raiz **so se nao
   existirem** (primeira release; depois disso quem move esses arquivos e a promocao); confere o ETag de novo;
   grava `latest.json` com `If-Match`, `manifest/stable.txt` e `manifest/canary.txt`; confere que os `.txt`
   concordam com o `latest.json` (`check-channels.mjs`); e por ultimo cria a tag `ntc-v<versao>`.
-- Se o `If-Match` falhar, `latest.json` e os `.txt` **nao** foram alterados (os arquivos de release ja podem
-  ter subido, e isso e retomavel): rode de novo.
-- Se a publicacao parar no meio **antes** do `latest.json`, rode de novo: a versao e a mesma e o envio retoma.
-- Se parar **depois** do `latest.json` (por exemplo a tag nao subiu), o manifest ja aponta para a versao e uma
-  nova execucao seria recusada (a versao nao e maior que o canary). Cria-se a tag na mao, com o comando que o
-  log imprime: `git tag ntc-v<versao> <sha> && git push origin ntc-v<versao>`. Como a tag e o ultimo passo,
-  uma tag existente sempre significa release completa.
+- **Retomar uma publicacao interrompida:** use "Re-run failed jobs" na **mesma execucao** (ela reaproveita o
+  artefato `blob-stage`, entao os bytes sao os mesmos e o envio retoma: blobs ja enviados e identicos sao
+  pulados). Um **novo disparo nao retoma**: o `deploy/package-opensource.sh` grava `build_time` no pacote, entao
+  os bytes saem diferentes e o envio imutavel recusa a mesma versao. Para refazer com um disparo novo, limpe antes
+  os blobs da versao que nunca ficou valida com a ferramenta manual (nenhum workflow a usa):
+  `bash tools/ntc-release/purge-unreleased.sh <versao>` (lista) e `... <versao> --yes` (apaga). Ela se recusa a
+  agir se o `latest.json` referencia a versao (stable ou canary) ou se a tag `ntc-v<versao>` existe no origin.
+  Requer `az login`, `NTC_STORAGE_ACCOUNT` e `AZURE_SUBSCRIPTION_ID`.
+- Se o `If-Match` falhar (ou o ETag mudou entre o `assemble` e o `publish`), `latest.json` e os `.txt` **nao**
+  foram alterados. "Re-run failed jobs" nao ajuda (o ETag guardado ficou velho): rode `purge-unreleased.sh
+  <versao> --yes` e dispare uma execucao nova.
+- Se a falha acontecer **depois** do `latest.json` (um `.txt` nao subiu, a checagem de canais reprovou, ou a tag
+  nao subiu), o manifest ja aponta para a versao e uma nova execucao seria recusada (a versao nao e maior que o
+  canary). O job tenta sozinho reparar os `.txt` a partir do `latest.json`; na mao:
+  `node tools/ntc-release/check-channels.mjs --blob <url> --repair out` e
+  `NTC_TXT_ONLY=1 bash tools/ntc-release/publish-manifest.sh out`. Depois crie a tag na mao, com o comando que o
+  log imprime: `git tag ntc-v<versao> <sha> && git push origin ntc-v<versao>`. Como a tag e o ultimo passo, uma
+  tag existente sempre significa release completa.
 
 ### Promover para stable
 
 `ntc-promote.yml` com `version` (ex.: `1.2.0-ntc.1`, tem de ser o canary atual). O job `verify` baixa
-`releases/<v>/` do blob, sem credencial, e confere o sha256 de todos os arquivos. O job `promote` roda no
+`releases/<v>/` do blob, sem credencial, e confere o sha256 de todos os arquivos listados no `SHA256SUMS`, inclusive `thin/install.sh` e `thin/install.ps1`. O job `promote` roda no
 ambiente `ntc-stable` (revisor obrigatorio): atualiza os aliases no servidor (`installer.sh`, `installer.ps1`,
 `install.sh`, `install.ps1` na raiz, e `releases/latest/loongsuite-pilot.{tar.gz,zip}`; os `install.*` vem de
 `releases/<v>/thin/`), espera cada copia terminar e so entao grava `latest.json` (`If-Match`), `stable.txt` e

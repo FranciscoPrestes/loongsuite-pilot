@@ -332,9 +332,19 @@ jobs:
       - name: Re-check latest.json is unchanged (after the long uploads, before the manifest)
         run: bash tools/ntc-release/assert-etag.sh "$NTC_BLOB_BASE_URL" "$NTC_ETAG"
       - name: Write latest.json (If-Match), stable.txt and canary.txt
+        id: manifest
         run: bash tools/ntc-release/publish-manifest.sh stage
       - name: Check the published channels agree with latest.json
+        id: channels
         run: node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+      - name: Repair the channel files from latest.json (only after a failed manifest write or check)
+        if: ${{ failure() && (steps.manifest.conclusion == 'failure' || steps.channels.conclusion == 'failure') }}
+        run: |
+          set -euo pipefail
+          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL" --repair "$RUNNER_TEMP/repair"
+          NTC_TXT_ONLY=1 bash tools/ntc-release/publish-manifest.sh "$RUNNER_TEMP/repair"
+          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+          echo "::warning::channel files repaired from latest.json; the ntc-v tag was NOT pushed, push it by hand (see FORK.md)"
       - name: Tag the release (last; if this fails, create the tag by hand, see FORK.md)
         run: |
           set -euo pipefail

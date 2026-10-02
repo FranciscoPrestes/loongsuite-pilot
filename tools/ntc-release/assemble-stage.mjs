@@ -5,7 +5,7 @@
 //                   Prints the tar.gz sha256 on stdout.
 //   place-manifest: assemble-stage.mjs place-manifest --manifest-dir M --out STAGE
 // Plain ESM, no dependencies. Layout (relative to the container root):
-//   releases/<v>/{loongsuite-pilot.tar.gz,loongsuite-pilot.zip,installer.sh,installer.ps1,apply-config.mjs,SHA256SUMS,thin/install.{sh,ps1}}
+//   releases/<v>/{loongsuite-pilot.tar.gz,loongsuite-pilot.zip,installer.sh,installer.ps1,apply-config.mjs,SHA256SUMS,thin/install.{sh,ps1}} (SHA256SUMS lists all but itself)
 //   deps/node-modules/<v>/{node-modules-<os>-<arch>.tar.gz,SHASUMS256.txt}
 //   install.sh, install.ps1, latest.json, manifest/{stable,canary}.txt
 import {
@@ -20,6 +20,9 @@ export const PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm6
 export const RELEASE_FILES = [
   'loongsuite-pilot.tar.gz', 'loongsuite-pilot.zip', 'installer.sh', 'installer.ps1', 'apply-config.mjs',
 ];
+
+/** Files listed in releases/<v>/SHA256SUMS (names relative to the release directory). */
+export const SUMMED_FILES = [...RELEASE_FILES, 'thin/install.sh', 'thin/install.ps1'];
 
 export function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -60,7 +63,6 @@ export function assembleStage({ version, pkgDir, thinDir, nodeModulesDir, out, p
   const rel = join(out, 'releases', version);
   mkdirSync(rel, { recursive: true });
   for (const f of RELEASE_FILES) copyFileSync(join(pkgDir, f), join(rel, f));
-  writeFileSync(join(rel, 'SHA256SUMS'), renderSha256Sums(rel, RELEASE_FILES));
   // The thin entry points. Root copies are only for a first release (publish uploads them if absent);
   // releases/<v>/thin/ is what promotion copies to the root, so the entry point matches the promoted release.
   mkdirSync(join(rel, 'thin'), { recursive: true });
@@ -68,6 +70,7 @@ export function assembleStage({ version, pkgDir, thinDir, nodeModulesDir, out, p
     copyFileSync(join(thinDir, f), join(out, f));
     copyFileSync(join(thinDir, f), join(rel, 'thin', f));
   }
+  writeFileSync(join(rel, 'SHA256SUMS'), renderSha256Sums(rel, SUMMED_FILES));
   if (nodeModulesDir) assembleNodeModules(nodeModulesDir, join(out, 'deps', 'node-modules', version), platforms);
   return { sha256: sha256File(join(rel, 'loongsuite-pilot.tar.gz')) };
 }

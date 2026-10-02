@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 // Consistency check of the published manifest: manifest/stable.txt and manifest/canary.txt must
 // agree with latest.json (version, package_url, sha256, git_commit). Reads the blob anonymously.
-// Usage: check-channels.mjs --blob <base-url>
+// Usage: check-channels.mjs --blob <base-url> [--repair <dir>]
+//   --repair writes <dir>/manifest/stable.txt (and canary.txt when latest.json has a canary) FROM latest.json;
+//   upload them with: NTC_TXT_ONLY=1 bash tools/ntc-release/publish-manifest.sh <dir>
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { renderChannelEnv } from './manifest.mjs';
 
 const KEYS = ['version', 'package_url', 'sha256', 'git_commit'];
 
@@ -44,20 +49,37 @@ async function get(url) {
   throw new Error(`could not fetch ${url}: ${last}`);
 }
 
+/** Write the channel files for `latest` under dir/manifest/ (canary.txt removed when there is no canary). */
+export function writeChannelFiles(latest, dir) {
+  mkdirSync(join(dir, 'manifest'), { recursive: true });
+  writeFileSync(join(dir, 'manifest', 'stable.txt'), renderChannelEnv(latest));
+  if (latest.canary) writeFileSync(join(dir, 'manifest', 'canary.txt'), renderChannelEnv(latest.canary));
+  else rmSync(join(dir, 'manifest', 'canary.txt'), { force: true });
+}
+
 async function main(argv) {
-  if (argv.length !== 2 || argv[0] !== '--blob') throw new Error('usage: check-channels.mjs --blob <base-url>');
+  const usage = 'usage: check-channels.mjs --blob <base-url> [--repair <dir>]';
+  if ((argv.length !== 2 && argv.length !== 4) || argv[0] !== '--blob' || (argv.length === 4 && argv[2] !== '--repair')) throw new Error(usage);
   const base = argv[1].replace(/\/+$/, '');
+  const repairDir = argv[3];
   const latestText = await get(`${base}/latest.json`);
   if (latestText === null) throw new Error('latest.json is missing');
+  const latest = JSON.parse(latestText);
+  if (repairDir) {
+    writeChannelFiles(latest, repairDir);
+    process.stdout.write(`channel files for ${latest.version} written under ${repairDir}/manifest\n`);
+    return;
+  }
   const problems = checkChannels({
-    latest: JSON.parse(latestText),
+    latest,
     stable: await get(`${base}/manifest/stable.txt`),
     canary: await get(`${base}/manifest/canary.txt`),
   });
   if (problems.length > 0) {
     process.stderr.write(`::error::published channel files disagree with latest.json:\n- ${problems.join('\n- ')}\n`);
-    process.stderr.write('Recovery: latest.json is the source of truth. Rerun the same workflow (release uploads are resumable) ' +
-      'or rewrite the txt files from latest.json with tools/ntc-release/cli.mjs manifest; do not leave channels split.\n');
+    process.stderr.write('Recovery: latest.json is the source of truth. If it already points at this release, repair the txt files from it ' +
+      '(check-channels.mjs --blob <url> --repair <dir>, then NTC_TXT_ONLY=1 publish-manifest.sh <dir>; the workflow tries this automatically) ' +
+      'and push the ntc-v<version> tag by hand. Do not leave the channels split.\n');
     process.exit(1);
   }
   process.stdout.write('channels consistent with latest.json\n');

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 const TOOLS = join(__dirname, '../../../tools/ntc-release');
-const { checkChannels } = await import(join(TOOLS, 'check-channels.mjs'));
+const { checkChannels, writeChannelFiles } = await import(join(TOOLS, 'check-channels.mjs'));
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ntc-cu-')); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
@@ -44,6 +44,27 @@ describe('checkChannels', () => {
   });
   it('reports a missing stable.txt', () => {
     expect(checkChannels({ latest: stable, stable: null, canary: null }).join('\n')).toMatch(/stable\.txt is missing/);
+  });
+});
+
+describe('writeChannelFiles / --repair', () => {
+  const stable = rel('1.2.0-ntc.1');
+  const canary = rel('1.2.0-ntc.2');
+
+  it('renders stable.txt and canary.txt from latest.json, and removes a stale canary.txt', () => {
+    const latest = { ...stable, canary: { ...canary, rollout_percentage: 10, hotfix_version: 0 } };
+    writeChannelFiles(latest, dir);
+    expect(readFileSync(join(dir, 'manifest', 'stable.txt'), 'utf8')).toBe(env(stable));
+    expect(readFileSync(join(dir, 'manifest', 'canary.txt'), 'utf8')).toBe(env(canary));
+    writeChannelFiles(stable, dir);
+    expect(existsSync(join(dir, 'manifest', 'canary.txt'))).toBe(false);
+  });
+
+  it('written files pass checkChannels', () => {
+    const latest = { ...stable, canary: { ...canary, rollout_percentage: 10, hotfix_version: 0 } };
+    writeChannelFiles(latest, dir);
+    const read = (n: string) => readFileSync(join(dir, 'manifest', n), 'utf8');
+    expect(checkChannels({ latest, stable: read('stable.txt'), canary: read('canary.txt') })).toEqual([]);
   });
 });
 
@@ -90,7 +111,7 @@ describe('check-channels.mjs and assert-etag.sh against a loopback blob', () => 
     expect((await run('"e1"')).code).toBe(0);
     const bad = await run('"e0"');
     expect(bad.code).toBe(1);
-    expect(bad.stdout).toMatch(/Run the workflow again/);
+    expect(bad.stdout).toMatch(/purge-unreleased/);
     expect((await run('')).code).toBe(1);
     delete files['/latest.json'];
     expect((await run('')).code).toBe(0);
@@ -170,5 +191,83 @@ esac
     mkdirSync(join(remote, REL), { recursive: true });
     writeFileSync(join(remote, REL, 'a.tar.gz'), 'different');
     expect(run({ NO_MD5: '1' }).status).toBe(1);
+  });
+});
+
+describe('purge-unreleased.sh with fake az and git', () => {
+  const V = '1.2.0-ntc.3';
+  let server: Server;
+  let base: string;
+  let latest: unknown;
+
+  beforeEach(async () => {
+    latest = undefined;
+    server = createServer((_req, res) => {
+      if (latest === undefined) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { ETag: '"e"' }); res.end(JSON.stringify(latest));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    base = `http://127.0.0.1:${(server.address() as { port: number }).port}/pilot`;
+    mkdirSync(join(dir, 'bin'));
+    writeFileSync(join(dir, 'bin', 'az'), `#!/bin/bash
+echo "$@" >> "$AZ_LOG"
+case "$3" in
+  list) for a in "$@"; do case "$a" in releases/*|deps/*) prefix="$a";; esac; done
+        grep "^$prefix" "$BLOBS" || true;;
+esac
+`);
+    writeFileSync(join(dir, 'bin', 'git'), '#!/bin/bash\n[ -n "$TAGGED" ] && echo "abc\trefs/tags/ntc-v1.2.0-ntc.3"\nexit 0\n');
+    for (const f of ['az', 'git']) chmodSync(join(dir, 'bin', f), 0o755);
+    writeFileSync(join(dir, 'blobs.txt'), `releases/${V}/a.tar.gz\nreleases/${V}/SHA256SUMS\ndeps/node-modules/${V}/x.tar.gz\nreleases/9.9.9-ntc.1/keep\n`);
+  });
+  afterEach(() => { server.close(); });
+
+  const purge = (args: string[], extra: Record<string, string> = {}) =>
+    runAsync('bash', [join(TOOLS, 'purge-unreleased.sh'), ...args], {
+      PATH: `${join(dir, 'bin')}:${process.env.PATH}`, NTC_STORAGE_ACCOUNT: 'a', AZURE_SUBSCRIPTION_ID: 's',
+      NTC_BLOB_BASE_URL: base, AZ_LOG: join(dir, 'az.log'), BLOBS: join(dir, 'blobs.txt'), ...extra,
+    });
+  const azLog = () => (existsSync(join(dir, 'az.log')) ? readFileSync(join(dir, 'az.log'), 'utf8') : '');
+
+  it('refuses a bad version', async () => {
+    expect((await purge(['1.2.0'])).code).toBe(2);
+  });
+
+  it('refuses when latest.json references the version as canary or stable', async () => {
+    latest = { version: '1.2.0-ntc.1', canary: { version: V } };
+    const r = await purge([V, '--yes']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/latest\.json references/);
+    latest = { version: V };
+    expect((await purge([V, '--yes'])).code).toBe(1);
+    expect(azLog()).not.toMatch(/delete/);
+  });
+
+  it('refuses when the tag exists on origin', async () => {
+    latest = { version: '1.2.0-ntc.1' };
+    const r = await purge([V, '--yes'], { TAGGED: '1' });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/tag ntc-v1\.2\.0-ntc\.3 exists/);
+    expect(azLog()).not.toMatch(/delete/);
+  });
+
+  it('lists without deleting when --yes is absent (first release: no latest.json)', async () => {
+    const r = await purge([V]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain(`releases/${V}/a.tar.gz`);
+    expect(r.stdout).toContain(`deps/node-modules/${V}/x.tar.gz`);
+    expect(r.stdout).not.toContain('keep');
+    expect(r.stdout).toMatch(/dry listing/);
+    expect(azLog()).not.toMatch(/delete/);
+  });
+
+  it('deletes exactly the listed blobs with --yes', async () => {
+    latest = { version: '1.2.0-ntc.1' };
+    const r = await purge([V, '--yes']);
+    expect(r.code).toBe(0);
+    const dels = azLog().split('\n').filter((l) => l.includes('storage blob delete'));
+    expect(dels).toHaveLength(3);
+    expect(dels.every((l) => l.includes('--auth-mode login'))).toBe(true);
+    expect(azLog()).not.toContain('keep');
   });
 });

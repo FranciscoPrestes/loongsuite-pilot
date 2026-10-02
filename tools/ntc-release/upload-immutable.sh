@@ -24,18 +24,19 @@ md5_b64() { openssl md5 -binary "$1" | base64; }
 
 same_content() {
   local file="$1" name="$2" remote
-  remote="$(az_blob show --container-name "$CONTAINER" --name "$name" --query properties.contentSettings.contentMd5 --output tsv || true)"
+  remote="$(az_blob show --container-name "$CONTAINER" --name "$name" --query properties.contentSettings.contentMd5 --output tsv </dev/null || true)"
   if [ -n "$remote" ] && [ "$remote" != "None" ]; then
     [ "$remote" = "$(md5_b64 "$file")" ]
     return
   fi
-  az_blob download --container-name "$CONTAINER" --name "$name" --file "$TMP/dl" --overwrite true --output none
+  rm -f "$TMP/dl"
+  az_blob download --container-name "$CONTAINER" --name "$name" --file "$TMP/dl" --overwrite true --output none </dev/null
   cmp -s "$TMP/dl" "$file"
 }
 
 put() {
   local file="$1" name="$2" exists
-  exists="$(az_blob exists --container-name "$CONTAINER" --name "$name" --query exists --output tsv)"
+  exists="$(az_blob exists --container-name "$CONTAINER" --name "$name" --query exists --output tsv </dev/null)"
   if [ "$exists" = "true" ]; then
     if same_content "$file" "$name"; then
       echo "upload-immutable: $name already present, identical"
@@ -44,7 +45,7 @@ put() {
     echo "::error::$name exists with different content; releases are immutable"
     exit 1
   fi
-  az_blob upload --container-name "$CONTAINER" --file "$file" --name "$name" --overwrite false --output none
+  az_blob upload --container-name "$CONTAINER" --file "$file" --name "$name" --overwrite false --output none </dev/null
   echo "upload-immutable: uploaded $name"
 }
 

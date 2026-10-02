@@ -49,13 +49,11 @@ jobs:
           base="${NTC_BLOB_BASE_URL%/}/releases/${VERSION}"
           mkdir -p "$RUNNER_TEMP/rel" && cd "$RUNNER_TEMP/rel"
           curl -fsSL --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
-          names="$(awk '{print $2}' SHA256SUMS | sort | tr '\n' ' ')"
-          want="apply-config.mjs installer.ps1 installer.sh loongsuite-pilot.tar.gz loongsuite-pilot.zip "
+          names="$(awk '{print $2}' SHA256SUMS | LC_ALL=C sort | tr '\n' ' ')"
+          want="apply-config.mjs installer.ps1 installer.sh loongsuite-pilot.tar.gz loongsuite-pilot.zip thin/install.ps1 thin/install.sh "
           [ "$names" = "$want" ] || { echo "::error::SHA256SUMS lists unexpected files: $names"; exit 1; }
-          for f in $want; do curl -fsSL --retry 3 -o "$f" "$base/$f"; done
+          for f in $want; do mkdir -p "$(dirname "$f")"; curl -fsSL --retry 3 -o "$f" "$base/$f"; done
           sha256sum -c SHA256SUMS
-          # The thin entry points promotion will copy to the container root must exist in the release.
-          for f in install.sh install.ps1; do curl -fsSL --retry 3 -o /dev/null "$base/thin/$f"; done
           expected="$(sed -n 's/^sha256=//p' "$RUNNER_TEMP/promote.env")"
           actual="$(sha256sum loongsuite-pilot.tar.gz | awk '{print $1}')"
           [ "$expected" = "$actual" ] || { echo "::error::tar.gz sha256 differs from the canary entry in latest.json"; exit 1; }
@@ -132,8 +130,19 @@ jobs:
           alias_copy "$rel/thin/install.sh" install.sh "text/plain; charset=utf-8"
           alias_copy "$rel/thin/install.ps1" install.ps1 "text/plain; charset=utf-8"
       - name: Write latest.json (If-Match), stable.txt and canary.txt
+        id: manifest
         env:
           NTC_ETAG: ${{ steps.prev.outputs.etag }}
         run: bash tools/ntc-release/publish-manifest.sh "$RUNNER_TEMP/promote-stage"
       - name: Check the published channels agree with latest.json
+        id: channels
         run: node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+      - name: Repair the channel files from latest.json (only after a failed manifest write or check)
+        if: ${{ failure() && (steps.manifest.conclusion == 'failure' || steps.channels.conclusion == 'failure') }}
+        run: |
+          set -euo pipefail
+          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL" --repair "$RUNNER_TEMP/repair"
+          NTC_TXT_ONLY=1 bash tools/ntc-release/publish-manifest.sh "$RUNNER_TEMP/repair"
+          node tools/ntc-release/check-channels.mjs --blob "$NTC_BLOB_BASE_URL"
+          echo "::warning::channel files repaired from latest.json"
+
