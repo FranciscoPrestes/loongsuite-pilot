@@ -6,6 +6,10 @@
 #      NTC_PILOT_CHANNEL (stable|canary), NTC_PILOT_INSTALLER (tests), NTC_PILOT_DRY_RUN=1,
 #      NTC_PILOT_SKIP_RESTART=1, NTC_PILOT_ALLOW_LOOPBACK_HTTP=1.
 # The key is never echoed nor passed as an argument; only apply-config inherits it.
+#
+# Trust model: the SHA256SUMS and the manifest come from the same origin (the blob) as
+# the files they describe, so the hashes catch corruption and partial uploads, not a
+# compromised blob. Transport is HTTPS-only (loopback http only for tests).
 set -euo pipefail
 
 DEFAULT_BLOB="https://stntconsultpilot.blob.core.windows.net/pilot"
@@ -20,8 +24,25 @@ die() { echo "Erro: $*" >&2; exit 1; }
 cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; return 0; }
 trap cleanup EXIT
 
+is_loopback_http() {
+  [ "${NTC_PILOT_ALLOW_LOOPBACK_HTTP:-}" = "1" ] || return 1
+  printf '%s' "$1" | grep -Eq '^http://(127\.0\.0\.1|localhost)([:/]|$)'
+}
+
+# require_https <name> <url>: https only, except the loopback test exception.
+require_https() {
+  case "$2" in https://*) return 0 ;; esac
+  is_loopback_http "$2" && return 0
+  die "$1 deve usar https://"
+}
+
 fetch() { # fetch <url> <dest>
-  curl -fsSL --retry 2 -o "$2" "$1" || die "falha ao baixar $1"
+  if is_loopback_http "$1"; then
+    curl -fsSL --retry 2 -o "$2" "$1" || die "falha ao baixar $1"
+  else
+    curl -fsSL --retry 2 --proto '=https' --proto-redir '=https' -o "$2" "$1" \
+      || die "falha ao baixar $1"
+  fi
 }
 
 sha256_of() {
@@ -31,7 +52,8 @@ sha256_of() {
 }
 
 read_key() { # reads a field from the manifest file: read_key <file> <name>
-  grep "^$2=" "$1" | head -n1 | cut -d= -f2- | tr -d '\r'
+  { grep "^$2=" "$1" || true; } | head -n1 | cut -d= -f2- | tr -d '\r' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
 check_key() {
@@ -46,7 +68,7 @@ check_key() {
 
 verify_against_sums() { # verify_against_sums <sums> <dir> <name>
   local want got
-  want="$(grep -E "^[0-9a-fA-F]{64}[ *]+$3\$" "$1" | head -n1 | cut -d' ' -f1)"
+  want="$({ grep -E "^[0-9a-fA-F]{64}[ *]+$3\$" "$1" || true; } | head -n1 | cut -d' ' -f1)"
   [ -n "$want" ] || die "$3 ausente em SHA256SUMS"
   got="$(sha256_of "$2/$3")"
   [ "$got" = "$want" ] || die "sha256 de $3 nao confere; instalacao abortada"
@@ -63,14 +85,19 @@ resolve_node() {
 main() {
   echo "Configurando o SDLC NTConsult e o coletor de métricas."
   check_key
+  require_https NTC_PILOT_BLOB_URL "$BLOB"
   case "$CHANNEL" in stable|canary) ;; *) die "NTC_PILOT_CHANNEL deve ser stable ou canary" ;; esac
 
   WORK="$(mktemp -d)"
   fetch "$BLOB/manifest/$CHANNEL.txt" "$WORK/channel.txt"
-  local version package_url
+  local version package_url package_sha
   version="$(read_key "$WORK/channel.txt" version)"
   package_url="$(read_key "$WORK/channel.txt" package_url)"
-  [ -n "$version" ] && [ -n "$package_url" ] || die "manifesto do canal $CHANNEL incompleto"
+  package_sha="$(read_key "$WORK/channel.txt" sha256)"
+  [ -n "$version" ] && [ -n "$package_url" ] && [ -n "$package_sha" ] \
+    || die "manifesto do canal $CHANNEL incompleto (version, package_url e sha256 sao obrigatorios)"
+  printf '%s' "$package_url" | grep -Eq '^[^[:space:]]+$' || die "package_url invalido no manifesto"
+  require_https package_url "$package_url"
   printf '%s' "$version" | grep -Eq '^[0-9A-Za-z.+-]+$' || die "versao invalida no manifesto"
 
   if [ "${NTC_PILOT_DRY_RUN:-}" = "1" ]; then
@@ -84,17 +111,24 @@ main() {
   fetch "$rel/SHA256SUMS" "$WORK/SHA256SUMS"
   fetch "$rel/apply-config.mjs" "$WORK/apply-config.mjs"
   verify_against_sums "$WORK/SHA256SUMS" "$WORK" apply-config.mjs
+  local pkg="$WORK/loongsuite-pilot.tar.gz"
+  fetch "$package_url" "$pkg"
+  [ "$(sha256_of "$pkg")" = "$package_sha" ] || die "sha256 do pacote nao confere com o manifesto; instalacao abortada"
+
   local installer="${NTC_PILOT_INSTALLER:-}"
-  if [ -z "$installer" ]; then
+  if [ -n "$installer" ]; then
+    echo "Aviso: NTC_PILOT_INSTALLER definido; verificacao sha256 do instalador ignorada." >&2
+  else
     fetch "$rel/installer.sh" "$WORK/installer.sh"
     verify_against_sums "$WORK/SHA256SUMS" "$WORK" installer.sh
     installer="$WORK/installer.sh"
   fi
 
   # The installer never sees the key.
-  env -u NTC_PILOT_CHAVE bash "$installer" install --version "$version" \
-    --package-url "$package_url" --all-agents --userId "${NTC_PILOT_EMAIL:-}" \
-    --collect-log false --interceptor-mode all
+  local inst_args=(install --version "$version" --package-url "file://$pkg" --all-agents)
+  [ -n "${NTC_PILOT_EMAIL:-}" ] && inst_args+=(--userId "$NTC_PILOT_EMAIL")
+  inst_args+=(--collect-log false --interceptor-mode all)
+  env -u NTC_PILOT_CHAVE bash "$installer" "${inst_args[@]}" </dev/null
 
   local node apply_args=(--data-dir "$DATA_DIR")
   node="$(resolve_node)"

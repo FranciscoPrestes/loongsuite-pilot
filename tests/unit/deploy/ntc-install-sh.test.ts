@@ -15,6 +15,7 @@ const INSTALLER = `#!/usr/bin/env bash
 echo "$@" > "$T_MARK/installer-args"
 env | grep -c ntcp_ > "$T_MARK/installer-keycount" || true
 `;
+const PKG = 'fake-package-bytes';
 const APPLY = `import { writeFileSync } from 'node:fs';
 writeFileSync(process.env.T_MARK + '/apply-ran', JSON.stringify({ args: process.argv.slice(2), hasKey: !!process.env.NTC_PILOT_CHAVE, canary: process.env.NTC_PILOT_CANARY ?? '' }));
 `;
@@ -27,8 +28,10 @@ let mark: string;
 function buildBlob(tamper = false) {
   const sums = `${sha(INSTALLER)}  installer.sh\n${sha(APPLY)}  apply-config.mjs\n`;
   files = {
-    '/manifest/stable.txt': 'version=1.2.0-ntc.1\npackage_url=http://pkg/stable.tgz\nsha256=x\ngit_commit=abc\n',
-    '/manifest/canary.txt': 'version=1.3.0-ntc.1\npackage_url=http://pkg/canary.tgz\nsha256=y\ngit_commit=def\n',
+    '/manifest/stable.txt': `version=1.2.0-ntc.1\npackage_url=${base}/pkg/stable.tgz\nsha256=${sha(PKG)}\ngit_commit=abc\n`,
+    '/manifest/canary.txt': `version=1.3.0-ntc.1\npackage_url=${base}/pkg/canary.tgz\nsha256=${sha(PKG)}\ngit_commit=def\n`,
+    '/pkg/stable.tgz': PKG,
+    '/pkg/canary.tgz': PKG,
   };
   for (const v of ['1.2.0-ntc.1', '1.3.0-ntc.1']) {
     files[`/releases/${v}/installer.sh`] = tamper ? `${INSTALLER}# evil\n` : INSTALLER;
@@ -73,7 +76,7 @@ describe('deploy/ntc/install.sh', () => {
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain('Configurando o SDLC NTConsult e o coletor de métricas.');
     const args = readFileSync(join(mark, 'installer-args'), 'utf8').trim();
-    expect(args).toBe('install --version 1.2.0-ntc.1 --package-url http://pkg/stable.tgz --all-agents --userId a@b --collect-log false --interceptor-mode all');
+    expect(args).toMatch(/^install --version 1\.2\.0-ntc\.1 --package-url file:\/\/\S+\/loongsuite-pilot\.tar\.gz --all-agents --userId a@b --collect-log false --interceptor-mode all$/);
     expect(args).not.toContain('ntcp_');
     expect(readFileSync(join(mark, 'installer-keycount'), 'utf8').trim()).toBe('0');
     const apply = JSON.parse(readFileSync(join(mark, 'apply-ran'), 'utf8'));
@@ -116,5 +119,61 @@ describe('deploy/ntc/install.sh', () => {
     expect(r.out).toContain('1.2.0-ntc.1');
     expect(existsSync(join(mark, 'installer-args'))).toBe(false);
     expect(existsSync(join(mark, 'apply-ran'))).toBe(false);
+  });
+
+  it('omits --userId when no email is given', async () => {
+    const r = await run({ NTC_PILOT_CHAVE: KEY });
+    expect(r.code, r.out).toBe(0);
+    expect(readFileSync(join(mark, 'installer-args'), 'utf8')).not.toContain('--userId');
+  });
+
+  it('refuses a non-https blob without the loopback flag, before any fetch', async () => {
+    const r = await run({ ...ok, NTC_PILOT_BLOB_URL: 'http://example.test/pilot' });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('https');
+    const r2 = await run({ ...ok, NTC_PILOT_ALLOW_LOOPBACK_HTTP: '', NTC_PILOT_BLOB_URL: base });
+    expect(r2.code).not.toBe(0);
+    const r3 = await run({ ...ok, NTC_PILOT_BLOB_URL: 'http://example.test/pilot' });
+    expect(r3.code).not.toBe(0);
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
+  it('refuses a non-https package_url from the manifest', async () => {
+    files['/manifest/stable.txt'] = `version=1.2.0-ntc.1\npackage_url=http://example.test/p.tgz\nsha256=${sha(PKG)}\n`;
+    const r = await run(ok);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('package_url');
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
+  it('aborts when the package sha256 does not match the manifest', async () => {
+    files['/pkg/stable.tgz'] = 'other-bytes';
+    const r = await run(ok);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('pacote');
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
+  it('aborts with a clear message when SHA256SUMS lacks an entry', async () => {
+    files['/releases/1.2.0-ntc.1/SHA256SUMS'] = `${sha(INSTALLER)}  installer.sh\n`;
+    const r = await run(ok);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('ausente em SHA256SUMS');
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+  });
+
+  it('tampered apply-config.mjs aborts before executing anything', async () => {
+    files['/releases/1.2.0-ntc.1/apply-config.mjs'] = `${APPLY}// evil\n`;
+    const r = await run(ok);
+    expect(r.code).not.toBe(0);
+    expect(existsSync(join(mark, 'installer-args'))).toBe(false);
+    expect(existsSync(join(mark, 'apply-ran'))).toBe(false);
+  });
+
+  it('manifest missing a field gives a clear message', async () => {
+    files['/manifest/stable.txt'] = 'version=1.2.0-ntc.1\n';
+    const r = await run(ok);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('incompleto');
   });
 });
