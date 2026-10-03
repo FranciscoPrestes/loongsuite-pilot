@@ -11,7 +11,7 @@ set -euo pipefail
 BLOB="${1:-https://stntconsultpilot.blob.core.windows.net/pilot}"
 NAME="ntc-e2e-blob-$$"
 IMAGE="${NTC_E2E_IMAGE:-debian:bookworm-slim}"
-KEY="ntcp_E2EBLOB$(printf 'A%.0s' $(seq 1 24))" # ntcp_ + 32 chars, not a credential
+KEY="ntcp_E2EBLOB$(printf 'A%.0s' $(seq 1 25))" # ntcp_ + 32 chars, not a credential
 EMAIL="e2e@ntconsult.com.br"
 ALIBABA="loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com cn-shanghai.log.aliyuncs.com"
 PASS=0; FAIL=0

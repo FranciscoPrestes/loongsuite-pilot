@@ -17,7 +17,7 @@ SIZE="${VM_SIZE:-Standard_B2s}"
 RG="rg-ntc-win-smoke-$RANDOM"
 VM="ntcwin"
 USERNAME="José Teste"
-TEST_KEY="ntcp_WINSMOKEAAAAAAAAAAAAAAAAAAAAAAA"
+TEST_KEY="ntcp_WINSMOKE$(printf 'A%.0s' $(seq 1 25))" # ntcp_ + 33 chars, synthetic
 PASS=0; FAIL=0
 
 cleanup() {
