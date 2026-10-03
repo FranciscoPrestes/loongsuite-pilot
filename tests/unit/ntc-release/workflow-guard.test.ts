@@ -59,6 +59,12 @@ describe('ntc-release.yml publish guards', () => {
     expect(promote).toMatch(/alias_copy "\$rel\/thin\/install\.ps1" install\.ps1/);
   });
 
+  it('promotion copies from the public URL (a container-scoped identity cannot mint a user-delegation SAS)', () => {
+    const promote = readFileSync(join(__dirname, '../../../.github/workflows/ntc-promote.yml'), 'utf8');
+    expect(promote).toMatch(/copy start[\s\S]*--source-uri/);
+    expect(promote).not.toMatch(/^\s*--source-container/m);
+  });
+
   it('checks the ETag before and after the uploads and the channels afterwards', () => {
     const publish = jobs.get('publish')!;
     expect(publish.match(/assert-etag\.sh/g)).toHaveLength(2);

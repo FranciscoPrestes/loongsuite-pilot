@@ -100,7 +100,7 @@ check "check-channels: consistent after repair" node "$REL/check-channels.mjs" -
 # 6. promotion: alias copies (same code as ntc-promote.yml), wait for each copy
 alias_copy() {
   local src="$1" dst="$2" ctype="$3" status="" i
-  az_blob copy start --destination-container "$CONTAINER" --destination-blob "$dst" --source-container "$CONTAINER" --source-blob "$src" --output none
+  az_blob copy start --destination-container "$CONTAINER" --destination-blob "$dst" --source-uri "$BLOB/$src" --output none
   for i in $(seq 1 60); do
     status="$(az_blob show --container-name "$CONTAINER" --name "$dst" --query properties.copy.status --output tsv)"
     [ "$status" = "success" ] && break
