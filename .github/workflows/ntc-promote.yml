@@ -79,6 +79,10 @@ jobs:
           for v in NTC_STORAGE_ACCOUNT AZURE_SUBSCRIPTION_ID BLOB_VAR; do
             [ -n "${!v}" ] || { echo "::error::repository variable $v (NTC_BLOB_BASE_URL for BLOB_VAR) is not set"; exit 1; }
           done
+          # The copy source is read through the public URL, the destination is written through the account:
+          # both must be the same container, or a mistaken variable would feed foreign bytes into the aliases.
+          [ "${BLOB_VAR%/}" = "https://${NTC_STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER}" ] \
+            || { echo "::error::NTC_BLOB_BASE_URL (${BLOB_VAR}) is not the container the aliases are written to (${NTC_STORAGE_ACCOUNT}/${CONTAINER})"; exit 1; }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -131,6 +135,25 @@ jobs:
           # The thin entry points every new install runs: only promotion moves them (copied from the promoted release).
           alias_copy "$rel/thin/install.sh" install.sh "text/plain; charset=utf-8"
           alias_copy "$rel/thin/install.ps1" install.ps1 "text/plain; charset=utf-8"
+      - name: Check the aliases hold the bytes of the verified release (before latest.json changes)
+        run: |
+          set -euo pipefail
+          base="${NTC_BLOB_BASE_URL%/}"
+          curl -fsS --retry 3 "$base/releases/${VERSION}/SHA256SUMS" -o "$RUNNER_TEMP/SHA256SUMS"
+          want() { awk -v n="$1" '{ h = $1; $1 = ""; sub(/^[ *]+/, ""); if ($0 == n) { print h; exit } }' "$RUNNER_TEMP/SHA256SUMS"; }
+          chk() {
+            local url="$1" name="$2" w got
+            w="$(want "$name")"
+            [ -n "$w" ] || { echo "::error::$name is not in SHA256SUMS"; exit 1; }
+            got="$(curl -fsS --retry 3 "$url" | sha256sum | cut -d' ' -f1)"
+            [ "$got" = "$w" ] || { echo "::error::alias $url does not hold the bytes of releases/${VERSION}/$name; latest.json was NOT changed"; exit 1; }
+          }
+          chk "$base/releases/latest/loongsuite-pilot.tar.gz" loongsuite-pilot.tar.gz
+          chk "$base/releases/latest/loongsuite-pilot.zip" loongsuite-pilot.zip
+          chk "$base/installer.sh" installer.sh
+          chk "$base/installer.ps1" installer.ps1
+          chk "$base/install.sh" thin/install.sh
+          chk "$base/install.ps1" thin/install.ps1
       - name: Write latest.json (If-Match), stable.txt and canary.txt
         id: manifest
         env:

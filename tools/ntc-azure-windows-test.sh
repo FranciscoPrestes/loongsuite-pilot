@@ -20,12 +20,15 @@ USERNAME="Jose Teste (accent added in PowerShell)" # real name is "Jos"+[char]0x
 TEST_KEY="ntcp_WINSMOKE$(printf 'A%.0s' $(seq 1 25))" # ntcp_ + 33 chars, synthetic
 PASS=0; FAIL=0
 
+CREATED=0
 cleanup() {
   local rc=$?
+  # only ever delete a group THIS run created (never a pre-existing one that NTC_WIN_RG happened to name)
+  [ "$CREATED" = 1 ] || exit "$rc"
   if [ "${NTC_WIN_KEEP:-}" = 1 ]; then echo "KEPT $RG (NTC_WIN_KEEP=1): delete it with az group delete -n $RG --subscription '$SUB' --yes"; exit "$rc"; fi
   echo "==> deleting $RG"
   az group delete -n "$RG" --subscription "$SUB" --yes >/dev/null 2>&1 || true
-  if [ "$(az group exists -n "$RG" --subscription "$SUB")" = "false" ]; then echo "group $RG gone (az group exists = false)"; else echo "WARNING: $RG still exists"; fi
+  if [ "$(az group exists -n "$RG" --subscription "$SUB")" = "false" ]; then echo "group $RG gone (az group exists = false)"; else echo "ERROR: $RG still exists, delete it by hand"; rc=1; fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -42,8 +45,10 @@ ADMINPW="Aa1-$(openssl rand -hex 12)"
 USERPW="Bb2-$(openssl rand -hex 12)"
 
 echo "==> creating $RG ($SIZE, $LOC)"
+[ "$(az group exists -n "$RG" --subscription "$SUB")" = "false" ] || { echo "refusing: resource group $RG already exists (this script only creates and deletes its own groups)" >&2; exit 2; }
 az group create -n "$RG" -l "$LOC" --subscription "$SUB" \
   --tags purpose=ntc-windows-smoke owner=francisco.prestes expires="$(date -u -v+1d +%F 2>/dev/null || date -u -d '+1 day' +%F)" -o none
+CREATED=1
 az vm create -g "$RG" -n "$VM" --subscription "$SUB" --image Win2022Datacenter --size "$SIZE" \
   --admin-username ntcadmin --admin-password "$ADMINPW" --public-ip-address "" --nsg-rule NONE \
   --tags purpose=ntc-windows-smoke -o none

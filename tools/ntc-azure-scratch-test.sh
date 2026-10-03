@@ -10,7 +10,9 @@
 set -euo pipefail
 
 : "${NTC_STORAGE_ACCOUNT:?}"; : "${AZURE_SUBSCRIPTION_ID:?}"
-[ "$NTC_STORAGE_ACCOUNT" != "stntconsultpilot" ] || { echo "refusing to run against the production account" >&2; exit 2; }
+NTC_STORAGE_ACCOUNT="$(printf '%s' "$NTC_STORAGE_ACCOUNT" | tr '[:upper:]' '[:lower:]')"
+case "$NTC_STORAGE_ACCOUNT" in stntconsultpilot*|*prod*) echo "refusing to run against what looks like the production account" >&2; exit 2 ;; esac
+case "$NTC_STORAGE_ACCOUNT" in *scratch*) ;; *) echo "refusing: the scratch account name must contain 'scratch'" >&2; exit 2 ;; esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REL="$HERE/ntc-release"
 export CONTAINER="pilot"
@@ -24,9 +26,13 @@ check() { local name="$1"; shift; if "$@" >"$W/out" 2>&1; then ok "$name"; else 
 expect_fail() { local name="$1" pat="$2"; shift 2; if "$@" >"$W/out" 2>&1; then bad "$name (should have failed)"; else grep -Eqi "$pat" "$W/out" && ok "$name" || { bad "$name (wrong error)"; tail -5 "$W/out"; }; fi; }
 az_blob() { az storage blob "$@" --auth-mode login --account-name "$NTC_STORAGE_ACCOUNT" --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors; }
 
-cleanup() { az storage container delete -n "$CONTAINER" --account-name "$NTC_STORAGE_ACCOUNT" --auth-mode login --subscription "$AZURE_SUBSCRIPTION_ID" -o none 2>/dev/null || true; rm -rf "$W"; }
+cleanup() { [ "$CREATED" = 1 ] && az storage container delete -n "$CONTAINER" --account-name "$NTC_STORAGE_ACCOUNT" --auth-mode login --subscription "$AZURE_SUBSCRIPTION_ID" -o none 2>/dev/null || true; rm -rf "$W"; }
+CREATED=0
 trap cleanup EXIT
 
+[ "$(az storage container exists -n "$CONTAINER" --account-name "$NTC_STORAGE_ACCOUNT" --auth-mode login --subscription "$AZURE_SUBSCRIPTION_ID" --query exists -o tsv)" = false ] \
+  || { echo "refusing: container $CONTAINER already exists on $NTC_STORAGE_ACCOUNT" >&2; exit 2; }
+CREATED=1
 # a container deleted by a previous run stays "being deleted" for a while: retry until it exists
 for _ in $(seq 1 40); do
   az storage container create -n "$CONTAINER" --public-access blob --account-name "$NTC_STORAGE_ACCOUNT" --auth-mode login --subscription "$AZURE_SUBSCRIPTION_ID" --only-show-errors -o none 2>/dev/null \
@@ -74,11 +80,11 @@ NTC_ETAG="" expect_fail "publish-manifest: concurrent first write loses" "If-Mat
 # 4. ETag with quotes, assert-etag, stale ETag
 out="$(bash "$REL/fetch-manifest.sh" "$BLOB" "$W/l1.json" require)"
 ETAG1="$(printf '%s\n' "$out" | sed -n 's/^etag=//p')"
-[ -n "$ETAG1" ] && ok "fetch: ETag captured as served by Azure ($ETAG1)" || bad "no ETag captured"
+[ -n "$ETAG1" ] && ok "fetch: ETag captured as Azure serves it (unquoted, e.g. $ETAG1)" || bad "no ETag captured"
 raw="${ETAG1#\"}"; raw="${raw%\"}"
 check "assert-etag: unchanged ETag passes" bash "$REL/assert-etag.sh" "$BLOB" "$ETAG1"
 manifest canary $V2 "$W/l1.json" "$W/m2"
-NTC_ETAG="$ETAG1" check "publish-manifest: If-Match with the quoted ETag" bash "$REL/publish-manifest.sh" "$W/m2"
+NTC_ETAG="$ETAG1" check "publish-manifest: If-Match with the ETag as fetched" bash "$REL/publish-manifest.sh" "$W/m2"
 expect_fail "assert-etag: stale ETag fails" "changed since" bash "$REL/assert-etag.sh" "$BLOB" "$ETAG1"
 NTC_ETAG="$ETAG1" expect_fail "publish-manifest: stale ETag loses (412)" "If-Match failed|ConditionNotMet|412" bash "$REL/publish-manifest.sh" "$W/m2"
 out="$(bash "$REL/fetch-manifest.sh" "$BLOB" "$W/l2.json" require)"; ETAG2="$(printf '%s\n' "$out" | sed -n 's/^etag=//p')"

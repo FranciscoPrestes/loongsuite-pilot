@@ -65,6 +65,14 @@ describe('ntc-release.yml publish guards', () => {
     expect(promote).not.toMatch(/^\s*--source-container/m);
   });
 
+  it('promotion ties the copy source to the destination container and re-checks the alias bytes before latest.json', () => {
+    const promote = readFileSync(join(__dirname, '../../../.github/workflows/ntc-promote.yml'), 'utf8');
+    expect(promote).toMatch(/blob\.core\.windows\.net\/\$\{CONTAINER\}/);
+    const check = promote.indexOf('Check the aliases hold the bytes');
+    expect(check).toBeGreaterThan(promote.indexOf('alias_copy "$rel/thin/install.ps1"'));
+    expect(check).toBeLessThan(promote.indexOf('publish-manifest.sh'));
+  });
+
   it('checks the ETag before and after the uploads and the channels afterwards', () => {
     const publish = jobs.get('publish')!;
     expect(publish.match(/assert-etag\.sh/g)).toHaveLength(2);
