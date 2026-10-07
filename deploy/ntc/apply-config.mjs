@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const DEFAULT_ENDPOINT = 'https://beat.ntconsult.ai/api/ingest/otlp';
+const DEFAULT_ENDPOINT = 'https://analytics.ntconsultlabs.com/api/ingest/otlp';
 const DEFAULT_BLOB = 'https://stntconsultpilot.blob.core.windows.net/pilot';
 const KEY_RE = /^ntcp_[0-9A-Za-z]{32,}$/;
 

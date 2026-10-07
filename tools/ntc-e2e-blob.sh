@@ -46,7 +46,7 @@ mode="$(asuser "$NAME" stat -c '%a' "$PD/config.json" 2>/dev/null || echo none)"
 [ "$mode" = 600 ] && ok "config.json mode 0600" || bad "config.json mode is $mode"
 cfg="$(asuser "$NAME" cat "$PD/config.json" 2>/dev/null || true)"
 chk() { printf '%s' "$cfg" | grep -q "$2" && ok "$1" || bad "$1 (missing: $2)"; }
-chk "config: ingest endpoint" 'beat.ntconsult.ai/api/ingest/otlp'
+chk "config: ingest endpoint" 'analytics.ntconsultlabs.com/api/ingest/otlp'
 chk "config: updater manifest from the blob" "$BLOB/manifest/latest.json"
 chk "config: serviceName" '"serviceName": *"loongsuite-pilot"'
 chk "config: turnIdleTimeoutMs" 'turnIdleTimeoutMs'
