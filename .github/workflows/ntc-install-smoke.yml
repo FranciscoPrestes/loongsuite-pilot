@@ -14,7 +14,7 @@ env:
   # Test key only (ntcp_ + 32 'A'); not a real credential.
   TEST_KEY: ntcp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
   TEST_EMAIL: ci@ntconsult.com.br
-  EXPECTED_ENDPOINT: https://analytics.ntconsultlabs.com/api/ingest/otlp
+  EXPECTED_ENDPOINT: https://tes.ntconsultlabs.com/api/ingest/otlp
 
 jobs:
   blob:

@@ -130,6 +130,11 @@ describe('apply-config CLI', () => {
     expect(cfg().otlpTrace.headers.Authorization).toBe(`Bearer ${KEY}`);
   });
 
+  it('(a2) defaults the ingest endpoint to the TES', () => {
+    expect(run({ NTC_PILOT_CHAVE: KEY }).status).toBe(0);
+    expect(cfg().otlpTrace.endpoint).toBe('https://tes.ntconsultlabs.com/api/ingest/otlp');
+  });
+
   it('(b) never prints the key, even on failure', () => {
     const ok = run({ NTC_PILOT_CHAVE: SENTINEL });
     const bad = run({ NTC_PILOT_CHAVE: SENTINEL, NTC_PILOT_ENDPOINT: 'http://insecure.example/x' });
