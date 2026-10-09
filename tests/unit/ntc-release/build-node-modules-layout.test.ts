@@ -53,10 +53,11 @@ describe('build-node-modules.sh', () => {
     expect(build).toMatch(/darwin\|linux\|win/);
     expect(build).toMatch(/x64\|arm64/);
   });
-  it('installs prod deps without optional and checks native modules', () => {
+  it('installs prod deps without optional and checks the sqlite shim and builtin', () => {
     expect(build).toContain('npm ci --omit=dev --omit=optional');
     expect(build).toContain("require('sqlite3')");
-    expect(build).toContain("import('zstd-napi')");
+    expect(build).toContain("require('node:sqlite')");
+    expect(build).not.toContain('zstd-napi');
   });
   it('is strict bash and portable (no GNU-only flags)', () => {
     expect(build).toMatch(/set -euo pipefail/);

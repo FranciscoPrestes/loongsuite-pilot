@@ -59,8 +59,8 @@ cd "$PKG_DIR"
 rm -rf node_modules
 npm ci --omit=dev --omit=optional --ignore-scripts=false
 
-# Fail the build if the native modules do not load on this platform.
-node -e "require('sqlite3'); import('zstd-napi').then(function () {}, function (e) { console.error(e); process.exit(1); })"
+# Fail the build if the SQLite compat shim or the Node builtin it relies on do not load.
+node -e "require('sqlite3'); require('node:sqlite')"
 
 COPYFILE_DISABLE=1 tar -czf "$DEST_ABS/$ARCHIVE" node_modules
 
