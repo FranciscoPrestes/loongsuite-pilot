@@ -1094,12 +1094,30 @@ function handleV2SessionCreated(data) {
   }
 }
 
-function handleV2Inbox(data, userId) {
+// The session.prompt hook is the authoritative prompt source on OpenCode v2
+// (it carries the user text). session.inbox.enqueued is kept as a fallback and
+// is ignored for a session once the hook has fired, and the hook skips a turn
+// the inbox event opened moments earlier.
+const V2_PROMPT_DEDUPE_MS = 2000;
+
+function handleV2Prompt(ev, userId) {
+  const sessionID = ev?.sessionID;
+  const text = extractV2Text(ev?.prompt?.text ?? ev?.prompt);
+  if (!sessionID || !text) return;
+  const session = getSession(sessionID);
+  session.promptViaHook = true;
+  if (Date.now() - (session.lastInboxMs || 0) < V2_PROMPT_DEDUPE_MS) return;
+  handleV2Inbox({ sessionID, item: { type: "text", payload: { text } } }, userId, true);
+}
+
+function handleV2Inbox(data, userId, fromPromptHook = false) {
   const item = data?.item;
   if (!item || item.type !== "text") return;
   const sessionID = data?.sessionID;
   if (!sessionID) return;
   const session = getSession(sessionID);
+  if (!fromPromptHook && session.promptViaHook) return;
+  if (!fromPromptHook) session.lastInboxMs = Date.now();
   session.turnSeq += 1;
   if (session.turnSeq === 1) recordUpstreamEnvOnce(sessionID);
   const traceId = generateTraceId();
@@ -1284,6 +1302,11 @@ async function initPluginV2(ctx) {
     }
   };
   if (ctx?.session?.hook) {
+    await attempt("v2prompt", () =>
+      ctx.session.hook("prompt", async (ev) => {
+        handleV2Prompt(ev, userId);
+      })
+    );
     await attempt("v2context", () =>
       ctx.session.hook("context", async (ev) => {
         const sessionID = ev?.sessionID;
