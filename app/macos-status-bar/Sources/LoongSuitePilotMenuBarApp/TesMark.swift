@@ -33,7 +33,8 @@ enum TesMark {
     /// Ícone colorido para a menu bar: o corpo acompanha o claro/escuro do
     /// sistema (labelColor) e o olho fica sempre azul.
     static func menuBarIcon(side: CGFloat = 16) -> NSImage {
-        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+        // flipped: true — a geometria da marca vem do favicon (y para baixo).
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { rect in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.addPath(bodyPath(in: rect).cgPath)
             context.setFillColor(NSColor.labelColor.cgColor)
