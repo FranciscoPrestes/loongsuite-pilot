@@ -4,19 +4,20 @@ import Charts
 // MARK: - Design Tokens
 
 private enum DT {
-    static let bg       = Color(red: 0.059, green: 0.067, blue: 0.090)
-    static let card     = Color(red: 0.102, green: 0.114, blue: 0.153)
-    static let border   = Color.white.opacity(0.06)
+    // @NTC:BRAND — paleta oficial NTConsult (skill nt-brand-guidelines).
+    static let bg         = Color(red: 0.039, green: 0.039, blue: 0.200)   // navy #0A0A33
+    static let card       = Color(red: 0.063, green: 0.063, blue: 0.263)   // navy panel #101043
+    static let border     = Color.white.opacity(0.10)
 
-    static let text     = Color(red: 0.91, green: 0.93, blue: 0.96)
-    static let muted    = Color(red: 0.42, green: 0.45, blue: 0.50)
-    static let dim      = Color(red: 0.28, green: 0.31, blue: 0.36)
+    static let text       = Color.white
+    static let muted      = Color.white.opacity(0.62)
+    static let dim        = Color.white.opacity(0.38)
 
-    static let accent   = Color(red: 0.39, green: 0.40, blue: 0.95)   // indigo
-    static let green    = Color(red: 0.13, green: 0.77, blue: 0.37)
-    static let amber    = Color(red: 0.96, green: 0.62, blue: 0.04)
-    static let red      = Color(red: 0.94, green: 0.27, blue: 0.27)
-    static let cyan     = Color(red: 0.13, green: 0.83, blue: 0.93)
+    static let accent     = Color(red: 0.200, green: 0.329, blue: 1.000)   // azul #3354FF
+    static let accentSoft = Color(red: 0.427, green: 0.518, blue: 1.000)   // azul claro #6D84FF
+    static let green      = Color(red: 0.200, green: 0.839, blue: 0.271)   // verde #33D645
+    static let amber      = Color(red: 0.984, green: 0.749, blue: 0.141)   // #FBBF24
+    static let red        = Color(red: 0.94, green: 0.27, blue: 0.27)
 }
 
 // MARK: - PanelContentView
@@ -60,11 +61,14 @@ struct PanelContentView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
+            TesMarkView()
+                .frame(width: 18, height: 18)
+
             Circle()
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
 
-            Text("LoongSuite Pilot")
+            Text("NT TES")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(DT.text)
 
@@ -105,7 +109,7 @@ struct PanelContentView: View {
     private var statsGrid: some View {
         HStack(spacing: 8) {
             statCell(value: metricsStore.snapshot.formattedTotalTokens, label: "TOKENS", accent: DT.accent)
-            statCell(value: "\(metricsStore.snapshot.totalSessions)", label: "SESSIONS", accent: DT.cyan)
+            statCell(value: "\(metricsStore.snapshot.totalSessions)", label: "SESSIONS", accent: DT.accentSoft)
             statCell(value: "\(metricsStore.snapshot.totalRequests)", label: "REQUESTS", accent: DT.muted)
             statCell(value: "\(metricsStore.snapshot.totalToolCalls)", label: "TOOLS", accent: DT.muted)
         }
@@ -379,7 +383,7 @@ struct PanelContentView: View {
             HStack(spacing: 0) {
                 breakdownCell(label: "INPUT", value: metricsStore.snapshot.formattedInputTokens, accent: DT.accent)
                 Divider().frame(height: 36).background(DT.border)
-                breakdownCell(label: "OUTPUT", value: metricsStore.snapshot.formattedOutputTokens, accent: DT.cyan)
+                breakdownCell(label: "OUTPUT", value: metricsStore.snapshot.formattedOutputTokens, accent: DT.accentSoft)
                 Divider().frame(height: 36).background(DT.border)
                 breakdownCell(label: "CACHE HIT", value: metricsStore.snapshot.formattedCacheReadShare, accent: DT.green)
             }

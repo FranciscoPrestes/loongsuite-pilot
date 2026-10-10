@@ -38,8 +38,7 @@ final class StatusBarController {
             return
         }
 
-        let image = NSImage(systemSymbolName: "chart.bar.xaxis", accessibilityDescription: "LoongSuite Pilot")
-        image?.isTemplate = true
+        let image = TesMark.menuBarIcon()
         button.image = image
         button.imagePosition = .imageLeading
         button.title = metricsStore.snapshot.menuBarTitle
@@ -124,11 +123,11 @@ final class StatusBarController {
 
     private func showContextMenu() {
         let menu = NSMenu()
-        let openItem = NSMenuItem(title: "打开面板", action: #selector(openPanelFromMenu), keyEquivalent: "")
+        let openItem = NSMenuItem(title: "Open Panel", action: #selector(openPanelFromMenu), keyEquivalent: "")
         openItem.target = self
         menu.addItem(openItem)
         menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
         statusItem.menu = menu
