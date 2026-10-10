@@ -126,6 +126,28 @@ verify() {
   (cd "$wt" && bash -c "$VERIFY_CMD") || die "verification failed; nothing was pushed (fix, then rerun)"
 }
 
+UI_WATCH_PATHS=(
+  "assets/dashboard/index.html"
+  "src/dashboard/dashboard-server.ts"
+  "app/macos-status-bar/"
+)
+
+# Warns when incoming upstream commits touch files the NT TES UI layer mirrors.
+# Their changes never break ours (the layers live in separate files), but they
+# are exactly the diffs worth reviewing and porting after a sync.
+warn_ui_touches() {
+  local target="$1" changed count
+  changed="$(git diff --name-only "$OURS".."$target" -- ${UI_WATCH_PATHS[@]+"${UI_WATCH_PATHS[@]}"} 2>/dev/null || true)"
+  [ -n "$changed" ] || return 0
+  count="$(printf '%s\n' "$changed" | wc -l | tr -d ' ')"
+  warn "upstream touched $count file(s) mirrored by the NT TES UI layer:"
+  printf '%s\n' "$changed" | sed 's/^/[sync]     /'
+  info "review the diff and port what matters into our own layer:"
+  info "  git diff $OURS..$target -- <file>   # what changed upstream"
+  info "  assets/dashboard/ntc/index.html     # our web panel (port here)"
+  info "  app/macos-status-bar/Sources/       # our menu bar app (port here)"
+}
+
 info "fetching $UPSTREAM and $ORIGIN"
 git fetch --quiet "$UPSTREAM"
 git fetch --quiet "$ORIGIN"
@@ -160,6 +182,7 @@ if git merge-base --is-ancestor "$TARGET" "$OURS"; then
   info "$OURS already contains $TARGET"
 else
   info "$OURS is missing $(behind_count "$OURS" "$TARGET") commit(s) from $TARGET"
+  warn_ui_touches "$TARGET"
   if [ "$DRY_RUN" -eq 0 ]; then
     new_worktree "$OURS"; WT="$WT_DIR"
     if ! (cd "$WT" && git merge --no-edit --quiet "$TARGET" >/dev/null 2>&1); then

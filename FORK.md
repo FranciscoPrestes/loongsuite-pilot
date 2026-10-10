@@ -53,6 +53,33 @@ git merge main            # resolva os arquivos, git add, git commit
 bash tools/sync-upstream.sh   # roda de novo; sucesso limpa o aviso de falha
 ```
 
+### Camada visual NT TES (não deixe o merge engolir)
+
+O fork tem identidade visual própria por cima do motor do original, em arquivos separados:
+
+| Superfície | Arquivos | Papel |
+|---|---|---|
+| Painel NT TES | `assets/dashboard/ntc/index.html` | Nosso painel web (marca, ícone TES de olho azul, pt-BR/en, modo demo) |
+| Painel original | `assets/dashboard/index.html` | Espelho do upstream — **nunca editar**; é a fonte para portar melhorias |
+| Menu bar nativa | `app/macos-status-bar/` (`TesMark.swift` é só nosso) | Marca TES + paleta NT |
+| Roteamento | `src/dashboard/dashboard-server.ts` | Flag `dashboard.panel` (`ntc`/`original`) + `?panel=` por request |
+
+A flag vive no `config.json` (`"dashboard": { "panel": "original" }` volta ao painel upstream;
+`LOONGSUITE_PILOT_DASHBOARD_PANEL` faz override pela env) e o painel original continua acessível
+em `http://127.0.0.1:8765/?panel=original` para comparação.
+
+Quando o upstream tocar nos arquivos espelhados, o `tools/sync-upstream.sh` avisa (guardrail testado
+em `tools/tests/sync-tools-test.sh`). O aviso não bloqueia nada — as camadas vivem em arquivos
+separados — mas é exatamente o diff que vale revisar e portar:
+
+```bash
+git diff NTConsult-main@{1}..NTConsult-main -- assets/dashboard/index.html   # o que mudou upstream
+# porte o que fizer sentido para assets/dashboard/ntc/index.html (ou app/macos-status-bar/Sources/)
+```
+
+O `git rerere` está habilitado neste clone: conflitos que se repetem (por exemplo, o roteamento no
+`dashboard-server.ts`) se resolvem sozinhos depois da primeira vez.
+
 ## Cuidado ao rodar a suite de testes
 
 Alguns testes de deploy do upstream (`tests/unit/deployment/inject-command.test.ts` e vizinhos) gravam no

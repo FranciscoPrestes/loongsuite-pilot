@@ -119,5 +119,13 @@ G config --local ntconsult.lastSyncEpoch "not-a-number"
 ( cd "$(mktemp -d)" && [ -z "$("$REMIND" 2>&1)" ] ); ok $? "outside a git repo: silent"
 [ "$(G rev-parse main)" = "$(G rev-parse upstream/main)" ]; ok $? "reminder changed no branch"
 
+echo "10. UI watch flags upstream changes to NT TES-mirrored files"; setup
+( cd "$T/upw" && mkdir -p assets/dashboard && echo upstream-panel > assets/dashboard/index.html && G add . && G commit -qm "upstream ui change" && G push -q origin main )
+out=$("$SYNC" --dry-run 2>&1); echo "$out" | grep -q "NT TES UI layer"; ok $? "dry-run warns about the UI layer"
+echo "$out" | grep -q "assets/dashboard/index.html"; ok $? "names the touched file"
+out=$("$SYNC" 2>&1); echo "$out" | grep -q "NT TES UI layer"; ok $? "real run warns too"
+advance x a.txt "plain change"
+out=$("$SYNC" 2>&1); ! echo "$out" | grep -q "NT TES UI layer"; ok $? "silent when only non-UI files change"
+
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
