@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Panel window: invoke app commands and listen to panel events",
+  "windows": ["panel"],
+  "permissions": ["core:default"]
+}

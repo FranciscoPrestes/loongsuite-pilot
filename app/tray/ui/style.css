@@ -1,0 +1,36 @@
+:root {
+  --bg: #0e1521; --card: #16202f; --line: #243247; --text: #e8eef7; --muted: #8a9bb3;
+  --accent: #29b6f6; --ok: #43d17c; --bad: #ef5350;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f5f7fb; --card: #fff; --line: #dde3ee; --text: #14202e; --muted: #5d6f87; color-scheme: light; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.4 -apple-system, "Segoe UI", Ubuntu, Inter, sans-serif; user-select: none; }
+header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+.dot.on { background: var(--ok); }
+.muted { color: var(--muted); }
+.right { margin-left: auto; }
+.error { margin: 10px 14px 0; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bad) 18%, transparent); }
+nav { display: flex; gap: 6px; padding: 10px 14px; }
+nav button { flex: 1; border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  padding: 5px 0; border-radius: 8px; cursor: pointer; }
+nav button.on { color: var(--text); border-color: var(--accent); }
+main { padding: 0 14px 14px; max-height: calc(100vh - 100px); overflow-y: auto; }
+section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+h2 { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.hero-n { font-size: 30px; font-weight: 700; color: var(--accent); }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.grid div { display: flex; flex-direction: column; }
+.grid b { font-size: 15px; }
+.grid span { font-size: 11px; color: var(--muted); }
+ul { list-style: none; margin: 0; padding: 0; }
+li { display: flex; gap: 8px; padding: 3px 0; }
+li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+li .val { color: var(--muted); font-variant-numeric: tabular-nums; }
+li.empty { color: var(--muted); }
+.trend { display: flex; align-items: flex-end; gap: 3px; height: 60px; }
+.trend i { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; opacity: .85; }
