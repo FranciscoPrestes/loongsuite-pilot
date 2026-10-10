@@ -425,6 +425,8 @@ export class Orchestrator extends EventEmitter {
     this.dashboardServer = new DashboardServer({
       dataDir: this.dataDir,
       assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
+      ntcAssetPath: path.join(pilotDir, 'assets', 'dashboard', 'ntc', 'index.html'),
+      panel: this.config.dashboard.panel,
       port: this.config.dashboard.port,
     });
     await this.dashboardServer.start().catch(err => {

@@ -85,6 +85,25 @@ describe('ConfigLoader', () => {
       expect(config.dashboard.port).toBe(expected);
     });
 
+    it.each([
+      [undefined, 'ntc'],
+      ['ntc', 'ntc'],
+      ['original', 'original'],
+      ['garbage', 'ntc'],
+      ['', 'ntc'],
+    ])('validates dashboard.panel=%s as %s', async (panel, expected) => {
+      mockReadJsonFile.mockResolvedValueOnce(panel === undefined ? {} : { dashboard: { panel } });
+      const config = await loadConfig();
+      expect(config.dashboard.panel).toBe(expected);
+    });
+
+    it('lets LOONGSUITE_PILOT_DASHBOARD_PANEL override the file flag', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ dashboard: { panel: 'ntc' } });
+      vi.stubEnv('LOONGSUITE_PILOT_DASHBOARD_PANEL', 'original');
+      const config = await loadConfig();
+      expect(config.dashboard.panel).toBe('original');
+    });
+
     it('env vars override config file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         dataDir: '/from/file',

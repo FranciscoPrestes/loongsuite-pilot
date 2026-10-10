@@ -427,8 +427,12 @@ export interface StatusBarConfig {
   runtimeRefreshIntervalMs: number;
 }
 
+/** Which local dashboard panel serves `/`. `ntc` = fork branding, `original` = upstream panel. */
+export type DashboardPanel = 'ntc' | 'original';
+
 export interface DashboardConfig {
   port: number;
+  panel: DashboardPanel;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

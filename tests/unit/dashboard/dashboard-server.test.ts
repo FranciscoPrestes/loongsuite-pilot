@@ -9,6 +9,7 @@ import {
   DASHBOARD_ID_VALUE,
   DEFAULT_DASHBOARD_PORT,
   isAllowedDashboardHost,
+  resolveRequestedPanel,
 } from '../../../src/dashboard/dashboard-server.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -144,6 +145,93 @@ describe('DashboardServer', () => {
 
     await expect(server.stop()).resolves.toBeUndefined();
     expect(server.running).toBe(false);
+  });
+
+  describe('panel selection', () => {
+    async function panelFixture(options: { withNtc?: boolean } = {}) {
+      const dataDir = await mkdtemp(path.join(tmpdir(), 'pilot-dashboard-panel-'));
+      tempDirs.push(dataDir);
+      const assetPath = path.join(dataDir, 'index.html');
+      await writeFile(assetPath, '<!doctype html><title>original panel</title>');
+      const ntcAssetPath = path.join(dataDir, 'ntc', 'index.html');
+      if (options.withNtc !== false) {
+        await mkdir(path.dirname(ntcAssetPath), { recursive: true });
+        await writeFile(ntcAssetPath, '<!doctype html><title>ntc panel</title>');
+      }
+      return { dataDir, assetPath, ntcAssetPath };
+    }
+
+    it('serves the ntc panel when the flag selects it', async () => {
+      const { dataDir, assetPath, ntcAssetPath } = await panelFixture();
+      const server = new DashboardServer({ dataDir, assetPath, ntcAssetPath, panel: 'ntc', port: 0 });
+      servers.push(server);
+      await server.start();
+
+      const response = await fetch(server.address!);
+      expect(await response.text()).toContain('ntc panel');
+    });
+
+    it('serves the original panel when the flag selects it', async () => {
+      const { dataDir, assetPath, ntcAssetPath } = await panelFixture();
+      const server = new DashboardServer({ dataDir, assetPath, ntcAssetPath, panel: 'original', port: 0 });
+      servers.push(server);
+      await server.start();
+
+      const response = await fetch(server.address!);
+      expect(await response.text()).toContain('original panel');
+    });
+
+    it('lets ?panel= override the configured flag in both directions', async () => {
+      const { dataDir, assetPath, ntcAssetPath } = await panelFixture();
+      const server = new DashboardServer({ dataDir, assetPath, ntcAssetPath, panel: 'ntc', port: 0 });
+      servers.push(server);
+      await server.start();
+
+      const original = await fetch(`${server.address}?panel=original`);
+      expect(await original.text()).toContain('original panel');
+
+      const ntcAgain = await fetch(`${server.address}?panel=ntc`);
+      expect(await ntcAgain.text()).toContain('ntc panel');
+    });
+
+    it('ignores unknown ?panel= values and keeps the configured flag', async () => {
+      const { dataDir, assetPath, ntcAssetPath } = await panelFixture();
+      const server = new DashboardServer({ dataDir, assetPath, ntcAssetPath, panel: 'original', port: 0 });
+      servers.push(server);
+      await server.start();
+
+      const response = await fetch(`${server.address}?panel=whatever`);
+      expect(await response.text()).toContain('original panel');
+    });
+
+    it('falls back to the original panel when the ntc asset is missing', async () => {
+      const { dataDir, assetPath, ntcAssetPath } = await panelFixture({ withNtc: false });
+      const server = new DashboardServer({ dataDir, assetPath, ntcAssetPath, panel: 'ntc', port: 0 });
+      servers.push(server);
+      await server.start();
+
+      const response = await fetch(server.address!);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('original panel');
+    });
+
+    it('defaults to the original panel when no flag is configured', async () => {
+      const { dataDir, assetPath, ntcAssetPath } = await panelFixture();
+      const server = new DashboardServer({ dataDir, assetPath, ntcAssetPath, port: 0 });
+      servers.push(server);
+      await server.start();
+
+      const response = await fetch(server.address!);
+      expect(await response.text()).toContain('original panel');
+    });
+
+    it('resolves request-level panel values', () => {
+      expect(resolveRequestedPanel('ntc', 'original')).toBe('ntc');
+      expect(resolveRequestedPanel('original', 'ntc')).toBe('original');
+      expect(resolveRequestedPanel(null, 'ntc')).toBe('ntc');
+      expect(resolveRequestedPanel('garbage', 'original')).toBe('original');
+      expect(resolveRequestedPanel('', 'ntc')).toBe('ntc');
+    });
   });
 
 });

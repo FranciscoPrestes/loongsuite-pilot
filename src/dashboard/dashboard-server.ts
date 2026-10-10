@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
+import type { DashboardPanel } from '../types/index.js';
 
 const logger = createLogger('DashboardServer');
 
@@ -14,7 +15,12 @@ export const DASHBOARD_INSTANCE_HEADER = 'x-loongsuite-pilot-instance';
 
 export interface DashboardServerOptions {
   dataDir: string;
+  /** Upstream panel, always served as the fallback. */
   assetPath: string;
+  /** NTConsult panel (`assets/dashboard/ntc/index.html`). Optional so upstream keeps working without it. */
+  ntcAssetPath?: string;
+  /** Panel served at `/` when the request has no `?panel=` override. Defaults to `original`. */
+  panel?: DashboardPanel;
   host?: string;
   port?: number;
 }
@@ -30,6 +36,8 @@ export class DashboardServer {
   private readonly host: string;
   private readonly port: number;
   private readonly assetPath: string;
+  private readonly ntcAssetPath: string | null;
+  private readonly panel: DashboardPanel;
   private readonly summaryPath: string;
   private readonly instanceId: string;
   private server: Server | null = null;
@@ -39,6 +47,8 @@ export class DashboardServer {
     this.host = options.host ?? DEFAULT_DASHBOARD_HOST;
     this.port = options.port ?? DEFAULT_DASHBOARD_PORT;
     this.assetPath = options.assetPath;
+    this.ntcAssetPath = options.ntcAssetPath ?? null;
+    this.panel = options.panel ?? 'original';
     this.summaryPath = path.join(options.dataDir, 'logs', 'metrics-summary.json');
     this.instanceId = createHash('sha256').update(path.resolve(options.dataDir)).digest('hex');
   }
@@ -143,9 +153,13 @@ export class DashboardServer {
         return;
       }
 
-      const pathname = new URL(requestUrl, 'http://127.0.0.1').pathname;
+      const url = new URL(requestUrl, 'http://127.0.0.1');
+      const pathname = url.pathname;
       if (pathname === '/' || pathname === '/index.html') {
-        const html = await fs.readFile(this.assetPath);
+        // ?panel=ntc|original overrides the configured panel per request, so
+        // both panels stay reachable even when the flag picks the other one.
+        const panel = resolveRequestedPanel(url.searchParams.get('panel'), this.panel);
+        const html = await this.readPanel(panel);
         this.send(response, 200, html, 'text/html; charset=utf-8', method === 'HEAD');
         return;
       }
@@ -174,6 +188,21 @@ export class DashboardServer {
       logger.warn('dashboard request failed', { error: String(error) });
       this.sendJson(response, 500, { error: 'dashboard request failed' }, method === 'HEAD');
     }
+  }
+
+  /**
+   * Reads the requested panel, falling back to the upstream panel when the
+   * NTConsult asset is missing (older installs, partial packages).
+   */
+  private async readPanel(panel: DashboardPanel): Promise<Buffer> {
+    if (panel === 'ntc' && this.ntcAssetPath) {
+      try {
+        return await fs.readFile(this.ntcAssetPath);
+      } catch (error) {
+        logger.warn('ntc dashboard panel unavailable, serving original', { error: String(error) });
+      }
+    }
+    return fs.readFile(this.assetPath);
   }
 
   private isAllowedHost(hostHeader: string | undefined): boolean {
@@ -215,6 +244,17 @@ export class DashboardServer {
     });
     response.end(headOnly ? undefined : body);
   }
+}
+
+/**
+ * Resolves the panel for one request. An explicit `?panel=ntc|original` always
+ * wins; any other value falls back to the configured default.
+ */
+export function resolveRequestedPanel(
+  requested: string | null,
+  configured: DashboardPanel,
+): DashboardPanel {
+  return requested === 'ntc' || requested === 'original' ? requested : configured;
 }
 
 export function isAllowedDashboardHost(hostHeader: string, host: string, port: number): boolean {

@@ -6,6 +6,7 @@ import type {
   AutoUpdateConfig,
   CmsConfig,
   DashboardConfig,
+  DashboardPanel,
   FileCollectionToggle,
   PipelineToggle,
   FlusherConfig,
@@ -232,6 +233,7 @@ export interface ConfigFile {
 
   dashboard?: {
     port?: number;
+    panel?: string;
   };
 
   /** User-defined attributes injected into trace spans (merged with OTEL_SPAN_ATTRIBUTES env). */
@@ -1010,7 +1012,18 @@ function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
     port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
       ? port
       : DEFAULT_DASHBOARD_PORT,
+    panel: resolveDashboardPanel(file?.dashboard?.panel),
   };
+}
+
+/**
+ * Panel shown at `/` on the local dashboard. `ntc` (default) is the NTConsult
+ * panel; `original` is the upstream panel. The HTTP query `?panel=` can always
+ * override this per request, so a bad value here can only pick the default.
+ */
+function resolveDashboardPanel(value: string | undefined): DashboardPanel {
+  const raw = process.env.LOONGSUITE_PILOT_DASHBOARD_PANEL || value;
+  return raw === 'original' ? 'original' : 'ntc';
 }
 
 function buildFlushersConfig(
