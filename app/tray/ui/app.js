@@ -22,7 +22,7 @@ function fillList(id, items, row) {
   if (!items.length) {
     const li = document.createElement('li');
     li.className = 'empty';
-    li.textContent = 'Sem dados';
+    li.textContent = 'No data';
     ul.append(li);
     return;
   }
@@ -60,7 +60,7 @@ function render(snap, runtime) {
   fillList('agents', snap.agents, (a) => [a.agentType, `${a.events} ev · ${formatTokens(a.tokens)}`]);
   fillList('providers', snap.providers, (p) => [p.provider, `${pct(p.share)} · ${formatTokens(p.tokens)}`]);
   fillList('models', snap.models, (m) => [m.model, `${pct(m.share)} · ${formatTokens(m.tokens)}`]);
-  fillList('repos', snap.repos, (r) => [r.repo, `${r.sessions} sess · ${r.events} ev`]);
+  fillList('repos', snap.repos, (r) => [r.repo, `${r.sessions} sess · ${r.events} evt`]);
   const max = Math.max(1, ...snap.dailyTokens.map((d) => d.value));
   $('trend').replaceChildren(...snap.dailyTokens.map((d) => {
     const bar = document.createElement('i');

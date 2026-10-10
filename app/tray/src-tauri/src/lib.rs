@@ -136,8 +136,8 @@ pub fn run() {
                 Err(e) => eprintln!("{e}"),
             }
 
-            let open = MenuItem::with_id(app, "open", "Abrir painel", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open panel", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
             let theme = app
                 .get_webview_window(PANEL)

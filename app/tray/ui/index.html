@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -15,28 +15,28 @@
   </header>
   <div id="error" class="error" hidden></div>
   <nav id="ranges">
-    <button data-range="today" class="on">Hoje</button>
-    <button data-range="sevenDays">7 dias</button>
-    <button data-range="thirtyDays">30 dias</button>
+    <button data-range="today" class="on">Today</button>
+    <button data-range="sevenDays">7D</button>
+    <button data-range="thirtyDays">30D</button>
   </nav>
   <main>
     <section class="hero">
       <div class="hero-n" id="total">0</div>
       <div class="muted">tokens</div>
       <div class="grid">
-        <div><b id="input">0</b><span>entrada</span></div>
-        <div><b id="output">0</b><span>saida</span></div>
+        <div><b id="input">0</b><span>input</span></div>
+        <div><b id="output">0</b><span>output</span></div>
         <div><b id="cache">0</b><span>cache</span></div>
-        <div><b id="sessions">0</b><span>sessoes</span></div>
-        <div><b id="requests">0</b><span>requisicoes</span></div>
-        <div><b id="tools">0</b><span>ferramentas</span></div>
+        <div><b id="sessions">0</b><span>sessions</span></div>
+        <div><b id="requests">0</b><span>requests</span></div>
+        <div><b id="tools">0</b><span>tool calls</span></div>
       </div>
     </section>
-    <section><h2>Agentes</h2><ul id="agents"></ul></section>
-    <section><h2>Provedores</h2><ul id="providers"></ul></section>
-    <section><h2>Modelos</h2><ul id="models"></ul></section>
-    <section><h2>Repositorios</h2><ul id="repos"></ul></section>
-    <section><h2 id="trend-title">Tokens por dia</h2><div id="trend" class="trend"></div></section>
+    <section><h2>Agents</h2><ul id="agents"></ul></section>
+    <section><h2>Providers</h2><ul id="providers"></ul></section>
+    <section><h2>Models</h2><ul id="models"></ul></section>
+    <section><h2>Repositories</h2><ul id="repos"></ul></section>
+    <section><h2 id="trend-title">Tokens per day</h2><div id="trend" class="trend"></div></section>
   </main>
   <script type="module" src="app.js"></script>
 </body>

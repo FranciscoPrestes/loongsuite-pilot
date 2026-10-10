@@ -4,7 +4,7 @@
 export const RANGES = ['today', 'sevenDays', 'thirtyDays'];
 
 const MISSING_SUMMARY_MESSAGE =
-  'metrics-summary.json nao encontrado. Inicie o daemon do loongsuite-pilot.';
+  'metrics-summary.json not found. Start the loongsuite-pilot daemon first.';
 
 const clamp01 = (raw) => Math.min(1, Math.max(0, Number(raw) || 0));
 const num = (raw) => Number(raw) || 0;
