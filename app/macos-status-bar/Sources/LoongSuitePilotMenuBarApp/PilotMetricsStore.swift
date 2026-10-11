@@ -12,17 +12,17 @@ enum MetricsAggregationRange: String, CaseIterable, Identifiable {
 
     var pickerTitle: String {
         switch self {
-        case .today: return "今日"
-        case .sevenDays: return "7天"
-        case .thirtyDays: return "30天"
+        case .today: return "Today"
+        case .sevenDays: return "7D"
+        case .thirtyDays: return "30D"
         }
     }
 
     var displayTitle: String {
         switch self {
-        case .today: return "今日"
-        case .sevenDays: return "近 7 日"
-        case .thirtyDays: return "近 30 日"
+        case .today: return "Today"
+        case .sevenDays: return "Last 7 days"
+        case .thirtyDays: return "Last 30 days"
         }
     }
 
@@ -294,7 +294,7 @@ final class PilotMetricsStore: ObservableObject {
     private static func buildSnapshot(from file: SummaryFile?, range: MetricsAggregationRange) -> PilotMetricsSnapshot {
         guard let file else {
             var empty = PilotMetricsSnapshot.makeEmpty(range: range)
-            empty.errorMessage = "未发现 metrics-summary.json，请先启动 loongsuite-pilot 守护进程。"
+            empty.errorMessage = "metrics-summary.json not found. Start the loongsuite-pilot daemon first."
             return empty
         }
 

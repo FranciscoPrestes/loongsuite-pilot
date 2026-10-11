@@ -37,7 +37,7 @@ final class PilotRuntimeStore: ObservableObject {
 
     init() {
         self.snapshot = PilotRuntimeSnapshot(
-            statusText: "等待连接",
+            statusText: "Waiting for connection",
             isActive: false,
             isStatusBarAppEnabled: true,
             appVersionText: "v\(BuildInfo.version)",
@@ -75,7 +75,7 @@ final class PilotRuntimeStore: ObservableObject {
 
             if consecutiveFailures >= maxConsecutiveFailuresForStatus {
                 next = PilotRuntimeSnapshot(
-                    statusText: "守护进程未运行",
+                    statusText: "Daemon not running",
                     isActive: false,
                     isStatusBarAppEnabled: next.isStatusBarAppEnabled,
                     appVersionText: next.appVersionText,
@@ -99,7 +99,7 @@ final class PilotRuntimeStore: ObservableObject {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: runtimePath)),
               let file = try? JSONDecoder().decode(RuntimeFile.self, from: data) else {
             return PilotRuntimeSnapshot(
-                statusText: "未发现运行中的服务",
+                statusText: "No running service found",
                 isActive: false,
                 isStatusBarAppEnabled: true,
                 appVersionText: "v\(BuildInfo.version)",
@@ -114,7 +114,7 @@ final class PilotRuntimeStore: ObservableObject {
         let displayVersion = (version?.isEmpty == false) ? "v\(version!)" : "v\(BuildInfo.version)"
 
         return PilotRuntimeSnapshot(
-            statusText: active ? "服务运行中" : "服务状态未知",
+            statusText: active ? "Service running" : "Service status unknown",
             isActive: active,
             isStatusBarAppEnabled: true,
             appVersionText: displayVersion,

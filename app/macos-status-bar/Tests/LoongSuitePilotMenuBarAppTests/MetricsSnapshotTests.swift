@@ -81,8 +81,8 @@ final class MetricsSnapshotTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        // fixture 来源: 仿照 tests/unit/status-bar/metrics-summary-writer.test.ts
-        // 已有的 claude-opus-4-6 / claude-sonnet-4-6 modelShares 结构
+        // fixture source: modeled on tests/unit/status-bar/metrics-summary-writer.test.ts
+        // existing claude-opus-4-6 / claude-sonnet-4-6 modelShares structure
         let json = #"""
         {"version":1,"ranges":{"today":{"totalTokens":10000000,
           "modelShares":[
@@ -126,7 +126,7 @@ final class MetricsSnapshotTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        // 旧 metrics-summary.json 无 modelShares 字段 —— 向后兼容
+        // old metrics-summary.json without a modelShares field — backward compatibility
         let json = #"""
         {"version":1,"ranges":{"today":{"totalTokens":1000}}}
         """#.data(using: .utf8)!
@@ -149,9 +149,9 @@ final class MetricsSnapshotTests: XCTestCase {
     // MARK: - MetricsAggregationRange
 
     func testRangePickerTitles() {
-        XCTAssertEqual(MetricsAggregationRange.today.pickerTitle, "今日")
-        XCTAssertEqual(MetricsAggregationRange.sevenDays.pickerTitle, "7天")
-        XCTAssertEqual(MetricsAggregationRange.thirtyDays.pickerTitle, "30天")
+        XCTAssertEqual(MetricsAggregationRange.today.pickerTitle, "Today")
+        XCTAssertEqual(MetricsAggregationRange.sevenDays.pickerTitle, "7D")
+        XCTAssertEqual(MetricsAggregationRange.thirtyDays.pickerTitle, "30D")
     }
 
     func testRangeTrendRange() {
@@ -161,10 +161,10 @@ final class MetricsSnapshotTests: XCTestCase {
     }
 
     // MARK: - #3 ModelShareItem share extremes / progress bar width safety
-    // 对应 PanelContentView.swift modelsSection: `max(4, geo.size.width * item.share)`
-    // 安全契约: 进度条宽度必须是有限值，回落到最小 4 或被 clamp 到 totalWidth，避免 SwiftUI 因 NaN/越界宽度崩溃。
+    // Mirrors PanelContentView.swift modelsSection: `max(4, geo.size.width * item.share)`
+    // Safety contract: bar width must be finite, falling back to the minimum 4 or clamped to totalWidth, so SwiftUI never crashes on NaN/out-of-range widths.
 
-    /// 模拟 PanelContentView 中 `max(4, geo.size.width * item.share)` 的纯计算，便于在测试里验证安全契约。
+    /// Pure re-computation of `max(4, geo.size.width * item.share)` from PanelContentView, to verify the safety contract in tests.
     private func progressBarWidth(share: Double, totalWidth: Double) -> Double {
         return max(4.0, totalWidth * share)
     }
@@ -172,34 +172,34 @@ final class MetricsSnapshotTests: XCTestCase {
     func testModelShareItem_zeroShare_progressWidthFloorsAtFour() {
         let item = ModelShareItem(model: "claude-haiku-4-5", tokens: 0, share: 0)
         let width = progressBarWidth(share: item.share, totalWidth: 240)
-        XCTAssertEqual(width, 4.0, "share=0 时进度条应回落到最小宽度 4")
+        XCTAssertEqual(width, 4.0, "with share=0 the bar should fall back to the minimum width 4")
         XCTAssertTrue(width.isFinite)
     }
 
     func testModelShareItem_shareGreaterThanOne_progressWidthClampedToTotalWidth() {
-        // share>1 在 totalTokens 重置或上下游聚合异常时可能出现。
-        // 安全契约: 宽度不应超过容器宽度，否则进度条会溢出 GeometryReader。
+        // share>1 can happen when totalTokens resets or upstream aggregation misbehaves.
+        // Safety contract: width must not exceed the container width, otherwise the bar overflows the GeometryReader.
         let item = ModelShareItem(model: "anomaly-model", tokens: 999, share: 1.5)
         let totalWidth = 240.0
         let width = progressBarWidth(share: item.share, totalWidth: totalWidth)
-        XCTAssertTrue(width.isFinite, "share=1.5 时宽度必须有限")
+        XCTAssertTrue(width.isFinite, "with share=1.5 the width must be finite")
         XCTAssertLessThanOrEqual(
             width, totalWidth,
-            "share>1 时进度条宽度应被 clamp 到 totalWidth=\(totalWidth)，实际宽度=\(width)"
+            "with share>1 the bar width should be clamped to totalWidth=\(totalWidth), actual width=\(width)"
         )
     }
 
     func testModelShareItem_nanShare_progressWidthIsFinite() {
-        // share=NaN 在除零(totalTokens=0)等边界下可能出现。
-        // 安全契约: 宽度必须有限，否则 SwiftUI .frame(width: NaN) 会 crash。
+        // share=NaN can appear on edge cases such as division by zero (totalTokens=0).
+        // Safety contract: width must be finite, otherwise SwiftUI .frame(width: NaN) crashes.
         let item = ModelShareItem(model: "nan-model", tokens: 0, share: .nan)
         let width = progressBarWidth(share: item.share, totalWidth: 240)
-        XCTAssertEqual(item.share, 0, "ModelShareItem 应在 init 把 NaN clamp 到 0")
-        XCTAssertFalse(width.isNaN, "share=NaN 时不能让进度条宽度变成 NaN（SwiftUI 会崩），实际宽度=\(width)")
-        XCTAssertTrue(width.isFinite, "share=NaN 时宽度必须有限，实际宽度=\(width)")
+        XCTAssertEqual(item.share, 0, "ModelShareItem should clamp NaN to 0 in init")
+        XCTAssertFalse(width.isNaN, "with share=NaN the bar width must not become NaN (SwiftUI would crash), actual width=\(width)")
+        XCTAssertTrue(width.isFinite, "with share=NaN the width must be finite, actual width=\(width)")
     }
 
-    // MARK: - #4 metrics-summary.json 字段为 null 的逐项缺失
+    // MARK: - #4 metrics-summary.json per-field null values
 
     @MainActor
     func testBuildSnapshot_modelShareEntry_nullModel_fallsBackToUnknown() throws {
@@ -230,8 +230,8 @@ final class MetricsSnapshotTests: XCTestCase {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { expectation.fulfill() }
         wait(for: [expectation], timeout: 2.0)
 
-        XCTAssertEqual(store.snapshot.modelShares.count, 2, "null model entry 应保留并填默认值，不应被吞掉")
-        XCTAssertEqual(store.snapshot.modelShares[0].model, "unknown", "model=null 应回落到 unknown")
+        XCTAssertEqual(store.snapshot.modelShares.count, 2, "a null model entry should be kept with defaults, not swallowed")
+        XCTAssertEqual(store.snapshot.modelShares[0].model, "unknown", "model=null should fall back to unknown")
         XCTAssertEqual(store.snapshot.modelShares[0].tokens, 600)
         XCTAssertEqual(store.snapshot.modelShares[1].model, "claude-opus-4-7")
     }
@@ -267,7 +267,7 @@ final class MetricsSnapshotTests: XCTestCase {
 
         XCTAssertEqual(store.snapshot.modelShares.count, 2)
         XCTAssertEqual(store.snapshot.modelShares[0].model, "claude-opus-4-7")
-        XCTAssertEqual(store.snapshot.modelShares[0].tokens, 0, "totalTokens=null 应回落到 0")
+        XCTAssertEqual(store.snapshot.modelShares[0].tokens, 0, "totalTokens=null should fall back to 0")
         XCTAssertEqual(store.snapshot.modelShares[0].formattedTokens, "0")
         XCTAssertEqual(store.snapshot.modelShares[1].tokens, 500)
     }
@@ -303,7 +303,7 @@ final class MetricsSnapshotTests: XCTestCase {
 
         XCTAssertEqual(store.snapshot.modelShares.count, 2)
         XCTAssertEqual(store.snapshot.modelShares[0].model, "claude-opus-4-7")
-        XCTAssertEqual(store.snapshot.modelShares[0].share, 0, "share=null 应回落到 0")
+        XCTAssertEqual(store.snapshot.modelShares[0].share, 0, "share=null should fall back to 0")
         XCTAssertEqual(store.snapshot.modelShares[0].formattedShare, "0%")
         XCTAssertEqual(store.snapshot.modelShares[1].share, 0.3, accuracy: 0.0001)
     }
@@ -336,13 +336,13 @@ final class MetricsSnapshotTests: XCTestCase {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { expectation.fulfill() }
         wait(for: [expectation], timeout: 2.0)
 
-        XCTAssertEqual(store.snapshot.modelShares.count, 1, "全空 entry 仍应保留，由 UI 决定如何显示")
+        XCTAssertEqual(store.snapshot.modelShares.count, 1, "an all-empty entry should still be kept; the UI decides how to show it")
         XCTAssertEqual(store.snapshot.modelShares[0].model, "unknown")
         XCTAssertEqual(store.snapshot.modelShares[0].tokens, 0)
         XCTAssertEqual(store.snapshot.modelShares[0].share, 0)
     }
 
-    // MARK: - #5 整个 metrics-summary.json 是 malformed JSON
+    // MARK: - #5 the whole metrics-summary.json is malformed JSON
 
     @MainActor
     func testBuildSnapshot_malformedJSON_returnsEmptySnapshotWithError() throws {
@@ -354,7 +354,7 @@ final class MetricsSnapshotTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        // 截断的 JSON: 缺少右括号，JSONDecoder 必失败
+        // Truncated JSON: missing closing brace, JSONDecoder must fail
         let malformed = #"""
         {"version":1,"ranges":{"today":{"totalTokens":1000,"modelShares":[
         """#.data(using: .utf8)!
@@ -370,12 +370,12 @@ final class MetricsSnapshotTests: XCTestCase {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { expectation.fulfill() }
         wait(for: [expectation], timeout: 2.0)
 
-        // 安全契约: malformed → loadFile 返回 nil → buildSnapshot 走 empty + errorMessage 分支，不 crash
-        XCTAssertEqual(store.snapshot.totalTokens, 0, "malformed JSON 应回落到 0 token 的空 snapshot")
-        XCTAssertTrue(store.snapshot.modelShares.isEmpty, "malformed JSON 不应残留任何 modelShares")
+        // Safety contract: malformed → loadFile returns nil → buildSnapshot takes the empty + errorMessage branch, no crash
+        XCTAssertEqual(store.snapshot.totalTokens, 0, "malformed JSON should fall back to an empty snapshot with 0 tokens")
+        XCTAssertTrue(store.snapshot.modelShares.isEmpty, "malformed JSON should leave no modelShares behind")
         XCTAssertTrue(store.snapshot.agentStats.isEmpty)
         XCTAssertTrue(store.snapshot.providerShares.isEmpty)
-        XCTAssertNotNil(store.snapshot.errorMessage, "malformed/缺失文件场景应设置 errorMessage 提示用户")
+        XCTAssertNotNil(store.snapshot.errorMessage, "malformed/missing file should set errorMessage to notify the user")
     }
 
     @MainActor
@@ -388,8 +388,8 @@ final class MetricsSnapshotTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        // 完全不是 JSON 的文本
-        let garbage = "this is not json at all 中文乱码 \u{0000}\u{FFFE}".data(using: .utf8)!
+        // Text that is not JSON at all
+        let garbage = "this is not json at all garbled non-ASCII text \u{0000}\u{FFFE}".data(using: .utf8)!
         try garbage.write(to: tempDir.appendingPathComponent("logs/metrics-summary.json"))
 
         setenv("LOONGSUITE_PILOT_DATA_DIR", tempDir.path, 1)
