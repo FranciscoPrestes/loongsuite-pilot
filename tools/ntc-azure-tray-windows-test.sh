@@ -185,6 +185,7 @@ $wins = [W]::Windows($pids)
 foreach ($w in $wins) { "win=" + $w }
 $panel = $wins | Where-Object { $_ -like "NT TES|*" } | Select-Object -First 1
 "panel=" + $panel
+"webview_processes=" + @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -match 'br.com.ntconsult.tes.tray' }).Count
 $p2 = Start-Process $exe.FullName -PassThru
 Start-Sleep -Seconds 8
 "processes_after_second_launch=" + @(Get-Process ntc-tes-tray -ErrorAction SilentlyContinue).Count
@@ -193,6 +194,7 @@ PS
 LOG="$(in_session panel "$W/panel.ps1" | tr -d '\r')"; echo "$LOG" | tail -8 | cut -c1-160
 [ "$(val "$LOG" first_alive)" = "True" ] && ok "tray stays alive with WebView2" || bad "tray exited"
 panel="$(val "$LOG" panel)"
+[ "$(val "$LOG" webview_processes)" -ge 1 ] 2>/dev/null && ok "WebView2 is running the app ($(val "$LOG" webview_processes) processes)" || bad "no WebView2 process for the app"
 case "$panel" in "NT TES|True|"*) ok "panel window 'NT TES' is visible, size ${panel##*|}";; *) bad "no visible 'NT TES' panel window (panel='$panel')";; esac
 [ "$(val "$LOG" processes_after_second_launch)" = 1 ] && ok "single instance: second launch reused the running tray" || bad "second launch left $(val "$LOG" processes_after_second_launch) processes"
 

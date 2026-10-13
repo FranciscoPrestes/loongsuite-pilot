@@ -41,6 +41,12 @@ fn resolve_data_dir(env_override: Option<String>, home: Option<PathBuf>) -> Opti
     }
 }
 
+/// QA mode (`NTC_TES_SHOW`) opens the panel at launch and keeps it open: a headless or
+/// unattended session has no foreground focus, which would otherwise hide it at once.
+fn hide_on_blur(qa_show: bool) -> bool {
+    !qa_show
+}
+
 /// Only these two files are readable from the webview; anything else is rejected.
 fn file_for(name: &str) -> Option<&'static str> {
     match name {
@@ -180,7 +186,9 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             match event {
-                tauri::WindowEvent::Focused(false) if window.label() == PANEL => {
+                tauri::WindowEvent::Focused(false)
+                    if window.label() == PANEL && hide_on_blur(std::env::var("NTC_TES_SHOW").is_ok()) =>
+                {
                     let _ = window.hide();
                 }
                 tauri::WindowEvent::ThemeChanged(theme) => {
@@ -240,6 +248,12 @@ mod tests {
         assert_ne!(TRAY_ICON_ON_LIGHT, TRAY_ICON_ON_DARK);
         assert!(tray_icon(tauri::Theme::Light).is_some());
         assert!(tray_icon(tauri::Theme::Dark).is_some());
+    }
+
+    #[test]
+    fn panel_hides_on_blur_except_in_qa_mode() {
+        assert!(hide_on_blur(false));
+        assert!(!hide_on_blur(true));
     }
 
     #[test]
