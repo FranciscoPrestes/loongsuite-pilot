@@ -191,3 +191,20 @@ maior na base corrente. Para um canary ruim, basta nao promove-lo e publicar a c
 Tudo em `releases/<v>/` e `deps/` e imutavel (publicado com `--overwrite false`). So mudam: `manifest/latest.json`,
 `manifest/stable.txt`, `manifest/canary.txt` (a cada release e promocao), e, so na promocao, `install.sh`,
 `install.ps1`, `installer.sh`, `installer.ps1` e `releases/latest/*` (aliases, `no-cache`).
+
+## Painel de bandeja (NT TES) no Windows e Linux
+
+O app `app/tray` (Tauri) e entregue assim:
+
+- **Build:** o job `tray` do `ntc-release.yml` compila as 5 plataformas e o `assemble` publica
+  `deps/tray/<v>/tray-<os>-<arch>.tar.gz` + `SHASUMS256.txt`. O job e opcional: se uma plataforma
+  falhar, a release sai sem o painel e avisa no resumo (nao bloqueia o coletor).
+- **Instalacao:** quem instala e o proprio coletor (`src/status-bar/tray-app-manager.ts`), nao os
+  instaladores. Ao subir, le o `latest.json`, baixa o painel do mesmo blob, confere o checksum, instala em
+  `~/.loongsuite-pilot/tray/<v>/` e o executa; troca a versao antiga quando sai release nova.
+  So Windows e Linux (no Mac continua o app Swift). No Linux so roda com sessao grafica (`DISPLAY` ou
+  `WAYLAND_DISPLAY`).
+- **Desligar:** `enableStatusBarApp: false` no `config.json` (ou `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=0`),
+  o mesmo botao do app Mac.
+- **Abrir sem icone:** atalho Cmd/Ctrl+Alt+Shift+T (muda com `NTC_TES_SHORTCUT`), ou abrir o app de novo.
+

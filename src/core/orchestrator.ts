@@ -90,7 +90,7 @@ import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
 import type { DataflowSnapshot, FlusherEndpointStats, InputStats } from '../metrics/metrics-collector.js';
 import type { OtlpEndpointCounter } from '../flushers/otlp-trace-flusher.js';
-import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
+import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager, TrayAppManager } from '../status-bar/index.js';
 import { DashboardServer } from '../dashboard/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -179,6 +179,7 @@ export class Orchestrator extends EventEmitter {
   private interceptorService: InterceptorService | null = null;
   private verdictStore: ToolVerdictStore | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
+  private trayAppManager: TrayAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
   /** Shared multimodal processor (null when disabled). */
@@ -457,6 +458,16 @@ export class Orchestrator extends EventEmitter {
         await this.statusBarAppManager.syncDesiredState(true).catch(err => {
           logger.warn('status bar app start failed (non-fatal)', { error: String(err) });
         });
+      } else {
+        // Windows/Linux: the cross-platform tray panel. Downloaded in the background so a slow
+        // network never delays collection; the manager never throws.
+        this.trayAppManager = new TrayAppManager({
+          dataDir: this.dataDir,
+          manifestUrl: this.config.autoUpdate?.manifestUrl,
+        });
+        void this.trayAppManager.syncDesiredState(true).catch(err => {
+          logger.warn('tray app start failed (non-fatal)', { error: String(err) });
+        });
       }
     }
 
@@ -505,6 +516,10 @@ export class Orchestrator extends EventEmitter {
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(err => {
       logger.warn('status bar app stop failed during orchestrator shutdown', { error: String(err) });
     });
+    await this.trayAppManager?.stop().catch(err => {
+      logger.warn('tray app stop failed during orchestrator shutdown', { error: String(err) });
+    });
+    this.trayAppManager = null;
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
     await this.interceptorService?.stop().catch(err => {

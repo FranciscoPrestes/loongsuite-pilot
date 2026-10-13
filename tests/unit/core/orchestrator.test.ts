@@ -35,6 +35,9 @@ const mockMetricsSummaryStop = vi.fn();
 const mockMetricsSummaryConstructor = vi.fn();
 const mockStatusBarSyncDesiredState = vi.fn().mockResolvedValue(undefined);
 const mockStatusBarStop = vi.fn().mockResolvedValue(undefined);
+const mockTrayConstructor = vi.fn();
+const mockTraySync = vi.fn().mockResolvedValue(undefined);
+const mockTrayStop = vi.fn().mockResolvedValue({ status: 'already-stopped', pid: null });
 vi.mock('../../../src/status-bar/index.js', () => ({
   RuntimeWriter: vi.fn().mockImplementation(() => ({
     start: mockRuntimeWriterStart,
@@ -51,6 +54,10 @@ vi.mock('../../../src/status-bar/index.js', () => ({
     syncDesiredState: mockStatusBarSyncDesiredState,
     stop: mockStatusBarStop,
   })),
+  TrayAppManager: vi.fn().mockImplementation((options: unknown) => {
+    mockTrayConstructor(options);
+    return { syncDesiredState: mockTraySync, stop: mockTrayStop };
+  }),
 }));
 
 const mockDashboardStart = vi.fn().mockResolvedValue(undefined);
@@ -382,6 +389,44 @@ describe('Orchestrator', () => {
       await expect(orch.stop()).resolves.toBeUndefined();
       expect(mockDashboardStop).toHaveBeenCalledOnce();
       expect((orch as unknown as { isRunning: boolean }).isRunning).toBe(false);
+    });
+
+    describe('tray panel on Windows and Linux', () => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      const statusBar = { enabled: true, metricsSummaryIntervalMs: 60_000, runtimeRefreshIntervalMs: 30_000 };
+      const autoUpdate = { enabled: false, checkIntervalMs: 1000, manifestUrl: 'https://blob.example/pilot/manifest/latest.json' };
+      const asPlatform = (value: NodeJS.Platform) => Object.defineProperty(process, 'platform', { value, configurable: true });
+      afterEach(() => { Object.defineProperty(process, 'platform', platform); });
+
+      it('starts the tray manager with the manifest url, and stops it on shutdown', async () => {
+        asPlatform('linux');
+        const orch = new Orchestrator(makeConfig({ statusBar, autoUpdate } as never));
+        await orch.start();
+        expect(mockTrayConstructor).toHaveBeenCalledWith(expect.objectContaining({
+          dataDir: '/tmp/test-data',
+          manifestUrl: 'https://blob.example/pilot/manifest/latest.json',
+        }));
+        expect(mockTraySync).toHaveBeenCalledWith(true);
+        expect(mockStatusBarSyncDesiredState).not.toHaveBeenCalled();
+        await orch.stop();
+        expect(mockTrayStop).toHaveBeenCalledOnce();
+      });
+
+      it('does not create it on macOS (native menu bar app) or when the status bar is disabled', async () => {
+        asPlatform('darwin');
+        await new Orchestrator(makeConfig({ statusBar, autoUpdate } as never)).start();
+        asPlatform('win32');
+        await new Orchestrator(makeConfig({ statusBar: { ...statusBar, enabled: false }, autoUpdate } as never)).start();
+        expect(mockTrayConstructor).not.toHaveBeenCalled();
+      });
+
+      it('keeps starting when the tray manager throws', async () => {
+        asPlatform('win32');
+        mockTraySync.mockRejectedValueOnce(new Error('tray exploded'));
+        const orch = new Orchestrator(makeConfig({ statusBar, autoUpdate } as never));
+        await expect(orch.start()).resolves.toBeUndefined();
+        await expect(orch.stop()).resolves.toBeUndefined();
+      });
     });
 
     it('reports a menu bar stop failure during orchestrator shutdown', async () => {
