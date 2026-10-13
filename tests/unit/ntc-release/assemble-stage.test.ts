@@ -13,6 +13,7 @@ let root: string;
 let pkg: string;
 let thin: string;
 let nm: string;
+let tray: string;
 let out: string;
 
 const run = (args: string[]) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
@@ -22,8 +23,8 @@ const stageArgs = (extra: string[] = []) => [
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'ntc-stage-'));
-  pkg = join(root, 'pkg'); thin = join(root, 'thin'); nm = join(root, 'nm'); out = join(root, 'stage');
-  for (const d of [pkg, thin, nm]) mkdirSync(d);
+  pkg = join(root, 'pkg'); thin = join(root, 'thin'); nm = join(root, 'nm'); tray = join(root, 'tray'); out = join(root, 'stage');
+  for (const d of [pkg, thin, nm, tray]) mkdirSync(d);
   for (const f of ['loongsuite-pilot.tar.gz', 'loongsuite-pilot.zip', 'installer.sh', 'installer.ps1', 'apply-config.mjs']) {
     writeFileSync(join(pkg, f), `content of ${f}`);
   }
@@ -33,6 +34,9 @@ beforeEach(() => {
     const name = `node-modules-${p}.tar.gz`;
     writeFileSync(join(nm, name), `archive ${p}`);
     writeFileSync(join(nm, `SHASUMS256.txt.${p}`), `${sha(`archive ${p}`)}  ${name}\n`);
+    const trayName = `tray-${p}.tar.gz`;
+    writeFileSync(join(tray, trayName), `tray ${p}`);
+    writeFileSync(join(tray, `SHASUMS256.txt.${p}`), `${sha(`tray ${p}`)}  ${trayName}\n`);
   }
 });
 afterEach(() => { rmSync(root, { recursive: true, force: true }); });
@@ -89,6 +93,38 @@ describe('assemble-stage stage', () => {
   it('works without node-modules (smoke-style stage)', () => {
     expect(run(stageArgs()).status).toBe(0);
     expect(existsSync(join(out, 'deps'))).toBe(false);
+  });
+});
+
+describe('assemble-stage tray', () => {
+  it('stages the five tray archives and their checksums under deps/tray/<v>/', () => {
+    expect(run(stageArgs(['--tray-dir', tray])).status).toBe(0);
+    const dir = join(out, 'deps', 'tray', VERSION);
+    const lines = readFileSync(join(dir, 'SHASUMS256.txt'), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(5);
+    for (const p of PLATFORMS) {
+      expect(lines).toContain(`${sha(`tray ${p}`)}  tray-${p}.tar.gz`);
+      expect(existsSync(join(dir, `tray-${p}.tar.gz`))).toBe(true);
+    }
+  });
+
+  it('keeps node-modules and tray side by side', () => {
+    expect(run(stageArgs(['--node-modules-dir', nm, '--tray-dir', tray])).status).toBe(0);
+    expect(readdirSync(join(out, 'deps')).sort()).toEqual(['node-modules', 'tray']);
+  });
+
+  it('fails when a platform archive is missing or does not match its checksum', () => {
+    rmSync(join(tray, 'tray-linux-arm64.tar.gz'));
+    expect(run(stageArgs(['--tray-dir', tray])).stderr).toMatch(/linux-arm64/);
+    writeFileSync(join(tray, 'tray-linux-arm64.tar.gz'), 'tampered');
+    const r = run(stageArgs(['--tray-dir', tray]));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/does not match/);
+  });
+
+  it('adds nothing when --tray-dir is not given', () => {
+    expect(run(stageArgs(['--node-modules-dir', nm])).status).toBe(0);
+    expect(existsSync(join(out, 'deps', 'tray'))).toBe(false);
   });
 });
 

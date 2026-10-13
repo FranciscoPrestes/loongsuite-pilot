@@ -10,7 +10,7 @@ for (const m of jobsText.matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:\n|$(?![
 
 describe('ntc-release.yml publish guards', () => {
   it('finds the expected jobs', () => {
-    expect([...jobs.keys()]).toEqual(['prepare', 'test', 'package', 'node-modules', 'assemble', 'publish']);
+    expect([...jobs.keys()]).toEqual(['prepare', 'test', 'package', 'node-modules', 'tray', 'assemble', 'publish']);
   });
 
   it('publish only runs for an explicit workflow_dispatch with dry_run == false', () => {

@@ -193,8 +193,52 @@ jobs:
           path: nm-out/
           if-no-files-found: error
 
+  # The tray app is optional: a failed platform build must not block the Pilot release.
+  # assemble ships deps/tray/<v>/ only when all five platforms built, and says so in the summary.
+  tray:
+    needs: [prepare]
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, os: darwin, arch: arm64 }
+          - { runner: macos-15-intel, os: darwin, arch: x64 }
+          - { runner: ubuntu-24.04, os: linux, arch: x64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: arm64 }
+          - { runner: windows-2022, os: win, arch: x64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Linux build dependencies (webkit2gtk, appindicator)
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf
+      - name: Build the tray app for this platform
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: bash tools/ntc-release/build-tray.sh "$TARGET_OS" "$TARGET_ARCH" "$VERSION" tray-out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tray-${{ matrix.os }}-${{ matrix.arch }}
+          path: tray-out/
+          if-no-files-found: error
+
   assemble:
-    needs: [prepare, package, node-modules]
+    needs: [prepare, package, node-modules, tray]
     runs-on: ubuntu-24.04
     outputs:
       etag: ${{ steps.prev.outputs.etag }}
@@ -223,6 +267,11 @@ jobs:
           pattern: nm-*
           path: nm
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: tray-*
+          path: tray
+          merge-multiple: true
       - name: Read the current latest.json (anonymous) and its ETag
         id: prev
         env:
@@ -241,8 +290,19 @@ jobs:
           PREV_STATUS: ${{ steps.prev.outputs.status }}
         run: |
           set -euo pipefail
+          tray_args=()
+          missing=""
+          for p in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win-x64; do
+            [ -f "tray/tray-$p.tar.gz" ] && [ -f "tray/SHASUMS256.txt.$p" ] || missing="$missing $p"
+          done
+          if [ -z "$missing" ]; then
+            tray_args=(--tray-dir tray)
+          else
+            echo "::warning::tray app not shipped; missing platforms:$missing"
+            echo "Tray app NOT shipped in this release (missing:$missing)." >> "$GITHUB_STEP_SUMMARY"
+          fi
           sha="$(node tooling/tools/ntc-release/assemble-stage.mjs stage --version "$VERSION" \
-            --pkg-dir release --thin-dir src/deploy/ntc --node-modules-dir nm --out stage)"
+            --pkg-dir release --thin-dir src/deploy/ntc --node-modules-dir nm "${tray_args[@]}" --out stage)"
           prev='-'
           [ "$PREV_STATUS" = "existing" ] && prev="$(cat "$RUNNER_TEMP/prev.json")"
           node tooling/tools/ntc-release/cli.mjs check-newer --version "$VERSION" --prev "$prev"
@@ -316,7 +376,11 @@ jobs:
       - name: Check latest.json is unchanged since assemble (before writing anything)
         run: bash tooling/tools/ntc-release/assert-etag.sh "$NTC_BLOB_BASE_URL" "$NTC_ETAG"
       - name: Upload the immutable release paths (resumable; an existing blob must be identical)
-        run: bash tooling/tools/ntc-release/upload-immutable.sh stage "releases/${VERSION}" "deps/node-modules/${VERSION}"
+        run: |
+          set -euo pipefail
+          prefixes=("releases/${VERSION}" "deps/node-modules/${VERSION}")
+          [ -d "stage/deps/tray/${VERSION}" ] && prefixes+=("deps/tray/${VERSION}")
+          bash tooling/tools/ntc-release/upload-immutable.sh stage "${prefixes[@]}"
       - name: Mirror the managed Node.js (only if absent)
         run: |
           set -euo pipefail

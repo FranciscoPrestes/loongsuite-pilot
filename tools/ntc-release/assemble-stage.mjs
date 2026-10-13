@@ -7,6 +7,7 @@
 // Plain ESM, no dependencies. Layout (relative to the container root):
 //   releases/<v>/{loongsuite-pilot.tar.gz,loongsuite-pilot.zip,installer.sh,installer.ps1,apply-config.mjs,SHA256SUMS,thin/install.{sh,ps1}} (SHA256SUMS lists all but itself)
 //   deps/node-modules/<v>/{node-modules-<os>-<arch>.tar.gz,SHASUMS256.txt}
+//   deps/tray/<v>/{tray-<os>-<arch>.tar.gz,SHASUMS256.txt}   (only with --tray-dir)
 //   install.sh, install.ps1, manifest/{latest.json,stable.txt,canary.txt}
 import {
   copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
@@ -37,25 +38,26 @@ export function renderSha256Sums(dir, names) {
   return names.map((n) => `${sha256File(join(dir, n))}  ${n}\n`).join('');
 }
 
-function assembleNodeModules(nmDir, destDir, platforms) {
+/** Per-platform archives `<prefix>-<platform>.tar.gz` + checksum fragments -> one dir with SHASUMS256.txt. */
+function assemblePlatformArchives(srcDir, destDir, platforms, prefix) {
   mkdirSync(destDir, { recursive: true });
   const lines = [];
   for (const p of platforms) {
-    const archive = `node-modules-${p}.tar.gz`;
-    const fragment = join(nmDir, `SHASUMS256.txt.${p}`);
-    requireFile(join(nmDir, archive), `node-modules archive for ${p}`);
+    const archive = `${prefix}-${p}.tar.gz`;
+    const fragment = join(srcDir, `SHASUMS256.txt.${p}`);
+    requireFile(join(srcDir, archive), `${prefix} archive for ${p}`);
     requireFile(fragment, `shasum fragment for ${p}`);
     const m = /^([0-9a-f]{64})  (\S+)\n?$/.exec(readFileSync(fragment, 'utf8'));
     if (!m || m[2] !== archive) throw new Error(`bad shasum fragment for ${p}`);
-    if (m[1] !== sha256File(join(nmDir, archive))) throw new Error(`shasum fragment does not match archive for ${p}`);
-    copyFileSync(join(nmDir, archive), join(destDir, archive));
+    if (m[1] !== sha256File(join(srcDir, archive))) throw new Error(`shasum fragment does not match archive for ${p}`);
+    copyFileSync(join(srcDir, archive), join(destDir, archive));
     lines.push(`${m[1]}  ${archive}\n`);
   }
   writeFileSync(join(destDir, 'SHASUMS256.txt'), lines.join(''));
 }
 
 /** Build the stage tree. Returns { sha256 } of the package tar.gz. */
-export function assembleStage({ version, pkgDir, thinDir, nodeModulesDir, out, platforms = PLATFORMS }) {
+export function assembleStage({ version, pkgDir, thinDir, nodeModulesDir, trayDir, out, platforms = PLATFORMS }) {
   if (!VERSION_RE.test(version ?? '')) throw new Error(`invalid version: ${JSON.stringify(version)}`);
   for (const f of RELEASE_FILES) requireFile(join(pkgDir, f), f);
   for (const f of ['install.sh', 'install.ps1']) requireFile(join(thinDir, f), `thin installer ${f}`);
@@ -71,7 +73,10 @@ export function assembleStage({ version, pkgDir, thinDir, nodeModulesDir, out, p
     copyFileSync(join(thinDir, f), join(rel, 'thin', f));
   }
   writeFileSync(join(rel, 'SHA256SUMS'), renderSha256Sums(rel, SUMMED_FILES));
-  if (nodeModulesDir) assembleNodeModules(nodeModulesDir, join(out, 'deps', 'node-modules', version), platforms);
+  if (nodeModulesDir) {
+    assemblePlatformArchives(nodeModulesDir, join(out, 'deps', 'node-modules', version), platforms, 'node-modules');
+  }
+  if (trayDir) assemblePlatformArchives(trayDir, join(out, 'deps', 'tray', version), platforms, 'tray');
   return { sha256: sha256File(join(rel, 'loongsuite-pilot.tar.gz')) };
 }
 
@@ -87,7 +92,7 @@ export function placeManifest({ manifestDir, out }) {
   else rmSync(join(out, 'manifest', 'canary.txt'), { force: true });
 }
 
-const VALUE_FLAGS = new Set(['version', 'pkg-dir', 'thin-dir', 'node-modules-dir', 'manifest-dir', 'out']);
+const VALUE_FLAGS = new Set(['version', 'pkg-dir', 'thin-dir', 'node-modules-dir', 'tray-dir', 'manifest-dir', 'out']);
 
 function parseArgs(argv) {
   const out = {};
@@ -115,7 +120,7 @@ function main() {
   if (cmd === 'stage') {
     const { sha256 } = assembleStage({
       version: need(args, 'version'), pkgDir: need(args, 'pkg-dir'), thinDir: need(args, 'thin-dir'),
-      nodeModulesDir: args['node-modules-dir'], out: need(args, 'out'),
+      nodeModulesDir: args['node-modules-dir'], trayDir: args['tray-dir'], out: need(args, 'out'),
     });
     process.stdout.write(`${sha256}\n`);
   } else if (cmd === 'place-manifest') {
