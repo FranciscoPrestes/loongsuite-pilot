@@ -464,6 +464,7 @@ export class Orchestrator extends EventEmitter {
         this.trayAppManager = new TrayAppManager({
           dataDir: this.dataDir,
           manifestUrl: this.config.autoUpdate?.manifestUrl,
+          gitCommit: packageGitCommit || undefined,
         });
         void this.trayAppManager.syncDesiredState(true).catch(err => {
           logger.warn('tray app start failed (non-fatal)', { error: String(err) });

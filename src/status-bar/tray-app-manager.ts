@@ -41,6 +41,26 @@ export function resolveTrayUrls(
   return { archiveUrl: `${base}/${archiveName}`, sumsUrl: `${base}/SHASUMS256.txt`, archiveName };
 }
 
+const MIN_COMMIT_LEN = 7;
+
+/** Two git commits match when one is a prefix of the other and both are at least 7 chars. */
+export function commitsMatch(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b || a.length < MIN_COMMIT_LEN || b.length < MIN_COMMIT_LEN) return false;
+  const [x, y] = [a.toLowerCase(), b.toLowerCase()];
+  return x.startsWith(y) || y.startsWith(x);
+}
+
+interface ManifestEntry { version?: unknown; git_commit?: unknown }
+interface TrayManifest extends ManifestEntry { canary?: ManifestEntry }
+
+/** The manifest entry (stable or canary) for the release this collector runs, or null. */
+export function entryForCommit(manifest: TrayManifest, gitCommit: string | undefined): string | null {
+  for (const entry of [manifest, manifest.canary]) {
+    if (entry && commitsMatch(gitCommit, String(entry.git_commit ?? ''))) return String(entry.version ?? '');
+  }
+  return null;
+}
+
 /** Hash of `name` in sha256sum-format text, or null. */
 export function parseSums(text: string, name: string): string | null {
   for (const line of text.split('\n')) {
@@ -56,6 +76,9 @@ type SpawnFn = (cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; de
 export interface TrayAppManagerOptions {
   dataDir: string;
   manifestUrl?: string;
+  /** Git commit of the running collector. The tray follows that release, so it ships with the
+   *  same canary/stable gating as the collector itself. */
+  gitCommit?: string;
   platform?: NodeJS.Platform;
   arch?: string;
   fetchFn?: typeof fetch;
@@ -178,7 +201,8 @@ export class TrayAppManager {
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
       if (!resp.ok) return null;
-      const version = String(((await resp.json()) as { version?: unknown }).version ?? '');
+      const version = entryForCommit((await resp.json()) as TrayManifest, this.opts.gitCommit);
+      if (!version) return null;
       const urls = resolveTrayUrls(this.opts.manifestUrl, version, this.platformKey);
       return urls ? { version, urls } : null;
     } catch (err) {

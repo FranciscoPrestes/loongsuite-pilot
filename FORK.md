@@ -200,8 +200,10 @@ O app `app/tray` (Tauri) e entregue assim:
   `deps/tray/<v>/tray-<os>-<arch>.tar.gz` + `SHASUMS256.txt`. O job e opcional: se uma plataforma
   falhar, a release sai sem o painel e avisa no resumo (nao bloqueia o coletor).
 - **Instalacao:** quem instala e o proprio coletor (`src/status-bar/tray-app-manager.ts`), nao os
-  instaladores. Ao subir, le o `latest.json`, baixa o painel do mesmo blob, confere o checksum, instala em
-  `~/.loongsuite-pilot/tray/<v>/` e o executa; troca a versao antiga quando sai release nova.
+  instaladores. Ao subir, procura no `latest.json` a entrada (estavel ou canary) cujo `git_commit` e o do coletor em
+  execucao, baixa o painel dessa release do mesmo blob, confere o checksum, instala em
+  `~/.loongsuite-pilot/tray/<v>/` e o executa. Assim o painel segue a mesma regra de canary/promocao do coletor
+  (quem ainda esta numa release sem painel nao baixa nada); troca a versao antiga quando o coletor atualiza.
   So Windows e Linux (no Mac continua o app Swift). No Linux so roda com sessao grafica (`DISPLAY` ou
   `WAYLAND_DISPLAY`).
 - **Desligar:** `enableStatusBarApp: false` no `config.json` (ou `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=0`),

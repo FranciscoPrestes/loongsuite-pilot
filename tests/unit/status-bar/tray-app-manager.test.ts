@@ -69,7 +69,12 @@ describe('TrayAppManager', () => {
     const fn = vi.fn(async (url: string) => {
       calls.push(url);
       if (overrides[url]) return overrides[url]();
-      if (url === MANIFEST) return new Response(JSON.stringify({ version: VERSION }));
+      if (url === MANIFEST) {
+        return new Response(JSON.stringify({
+          version: '1.2.0-ntc.5', git_commit: '6812573',
+          canary: { version: VERSION, git_commit: '5055741' },
+        }));
+      }
       if (url.endsWith('tray-linux-x64.tar.gz')) return new Response(archive);
       if (url.endsWith('SHASUMS256.txt')) return new Response(`${sha(archive)}  tray-linux-x64.tar.gz\n`);
       return new Response('nope', { status: 404 });
@@ -92,6 +97,7 @@ describe('TrayAppManager', () => {
     const manager = new TrayAppManager({
       dataDir: dir,
       manifestUrl: MANIFEST,
+      gitCommit: '5055741a1b2c3d4e',
       platform: 'linux',
       arch: 'x64',
       fetchFn: fetched.fn as never,
@@ -140,6 +146,34 @@ describe('TrayAppManager', () => {
     });
     const { manager } = makeManager({ fetchFn: none.fn as never });
     await expect(manager.ensureInstalled()).resolves.toBeNull();
+  });
+
+  it('follows the release the collector runs: the canary entry when the commit matches it', async () => {
+    const { manager } = makeManager({ gitCommit: '5055741' });
+    expect(await manager.ensureInstalled()).toBe(path.join(dir, 'tray', VERSION, 'ntc-tes-tray'));
+  });
+
+  it('uses the stable entry when the running commit is the stable release (which has no tray yet)', async () => {
+    const noTray = makeFetch({
+      [`${ROOT}/deps/tray/1.2.0-ntc.5/SHASUMS256.txt`]: () => new Response('missing', { status: 404 }),
+    });
+    const { manager, fetched } = makeManager({ gitCommit: '6812573deadbeef', fetchFn: noTray.fn as never });
+    expect(await manager.ensureInstalled()).toBeNull(); // ntc.5 shipped no tray: 404
+    fetched.calls.push(...noTray.calls);
+    expect(fetched.calls.some((u) => u.includes('/deps/tray/1.2.0-ntc.5/'))).toBe(true);
+    expect(fetched.calls.some((u) => u.includes(`/deps/tray/${VERSION}/`))).toBe(false);
+  });
+
+  it('installs nothing when the running commit is in neither manifest entry or is unknown', async () => {
+    const other = makeManager({ gitCommit: 'abcdef1' });
+    expect(await other.manager.ensureInstalled()).toBeNull();
+    const unknown = makeManager({ gitCommit: undefined });
+    expect(await unknown.manager.ensureInstalled()).toBeNull();
+    const short = makeManager({ gitCommit: '5055' }); // too short to be trusted
+    expect(await short.manager.ensureInstalled()).toBeNull();
+    for (const m of [other, unknown, short]) {
+      expect(m.fetched.calls.filter((u) => u.includes('/deps/tray/'))).toEqual([]);
+    }
   });
 
   it('does nothing on macOS or without a manifest url', async () => {
@@ -221,7 +255,7 @@ describe('TrayAppManager', () => {
       [`${ROOT}/deps/tray/${VERSION}/SHASUMS256.txt`]: () => new Response(`${sha(bytes)}  tray-linux-x64.tar.gz\n`),
     });
     const manager = new TrayAppManager({
-      dataDir: dir, manifestUrl: MANIFEST, platform: 'linux', arch: 'x64',
+      dataDir: dir, manifestUrl: MANIFEST, gitCommit: '5055741', platform: 'linux', arch: 'x64',
       fetchFn: real.fn as never, env: { DISPLAY: ':0' },
     });
     const exe = await manager.ensureInstalled();
