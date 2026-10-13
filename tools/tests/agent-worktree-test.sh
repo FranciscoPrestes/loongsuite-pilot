@@ -59,5 +59,13 @@ bash "$WT" finish fix/conflict >/dev/null 2>&1; [ "$?" != 0 ]; ok "$?" "finish f
 [ "$(G -C "$T/origin.git" show main:a.txt)" = "theirs" ]; ok "$?" "origin/main untouched"
 G -C "$AGENT_WT_ROOT/fix-conflict" rebase --show-current-patch >/dev/null 2>&1; [ "$?" != 0 ]; ok "$?" "rebase was aborted, no half-done state"
 
+echo "finish finds a worktree created by hand"
+setup
+G worktree add -q "$T/handmade" -b docs/manual origin/main
+( cd "$T/handmade" && echo m > m.txt && G add . && G commit -qm "manual" )
+bash "$WT" finish docs/manual >/dev/null 2>&1; ok "$?" "finish succeeds for a hand-made worktree"
+[ "$(G -C "$T/origin.git" show main:m.txt 2>/dev/null)" = "m" ]; ok "$?" "commit reached origin/main"
+[ ! -d "$T/handmade" ]; ok "$?" "hand-made worktree removed"
+
 echo; echo "passed: $pass  failed: $fail"
 [ "$fail" = 0 ]

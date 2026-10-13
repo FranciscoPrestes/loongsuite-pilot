@@ -17,6 +17,12 @@ ROOT="${AGENT_WT_ROOT:-$(dirname "$MAIN_REPO")/$(basename "$MAIN_REPO")-wt}"
 
 die() { echo "agent-worktree: $*" >&2; exit 1; }
 slug() { printf '%s' "$1" | tr '/' '-'; }
+# Path of the worktree that has <branch> checked out (works for hand-made worktrees too).
+worktree_of() {
+  git -C "$MAIN_REPO" worktree list --porcelain | awk -v ref="refs/heads/$1" '
+    /^worktree / { path = substr($0, 10) }
+    $0 == "branch " ref { print path; exit }'
+}
 need_branch() { [ -n "${1:-}" ] || die "usage: $0 $2 <branch>"; }
 
 cmd_start() {
@@ -32,8 +38,9 @@ cmd_start() {
 
 cmd_finish() {
   local branch="${1:-}"; need_branch "$branch" finish
-  local dir="$ROOT/$(slug "$branch")"
-  [ -d "$dir" ] || die "no worktree at $dir"
+  local dir; dir="$(worktree_of "$branch")"
+  [ -n "$dir" ] && [ -d "$dir" ] || die "no worktree has branch '$branch' checked out"
+  [ "$dir" != "$MAIN_REPO" ] || die "'$branch' is checked out in the main clone, not in a worktree"
   [ -z "$(git -C "$dir" status --porcelain)" ] || die "uncommitted files in $dir; commit or discard them first"
 
   git -C "$dir" fetch -q origin
