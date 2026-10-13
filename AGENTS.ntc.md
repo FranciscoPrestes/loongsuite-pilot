@@ -26,8 +26,8 @@ branch já fizeram commit na branch errada e levaram trabalho alheio para uma re
   O script exige árvore limpa, faz rebase sobre `origin/NTConsult-main`, envia para a
   `NTConsult-main` e remove a worktree e as branches. Se o rebase tiver conflito, ele para e
   mantém a worktree para você resolver. Não deixe worktree nem branch para trás.
-- Worktree nova não tem `node_modules`: ligue com `ln -s <clone-principal>/node_modules node_modules`
-  ou rode `npm ci`.
+- O `start` já liga o `node_modules` do clone principal na worktree (e o esconde do git). Se precisar de
+  dependências isoladas, apague o link e rode `npm ci`.
 - `bash tools/agent-worktree.sh list` mostra quem está trabalhando onde.
 - Mudança que exige revisão antes de entrar: abra PR da branch em vez de rodar `finish`, e só
   apague a worktree depois do merge.

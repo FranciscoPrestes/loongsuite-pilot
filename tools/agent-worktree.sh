@@ -25,6 +25,16 @@ worktree_of() {
 }
 need_branch() { [ -n "${1:-}" ] || die "usage: $0 $2 <branch>"; }
 
+# A worktree has no node_modules. Link the main clone's, and exclude the link: the
+# project's `node_modules/` ignore rule only matches directories, not symlinks.
+link_node_modules() {
+  [ -d "$MAIN_REPO/node_modules" ] || return 0
+  ln -s "$MAIN_REPO/node_modules" "$1/node_modules"
+  local exclude="$COMMON/info/exclude"
+  mkdir -p "$(dirname "$exclude")"
+  grep -qx '/node_modules' "$exclude" 2>/dev/null || echo '/node_modules' >> "$exclude"
+}
+
 cmd_start() {
   local branch="${1:-}"; need_branch "$branch" start
   local dir="$ROOT/$(slug "$branch")"
@@ -33,6 +43,7 @@ cmd_start() {
   git -C "$MAIN_REPO" fetch -q origin
   mkdir -p "$ROOT"
   git -C "$MAIN_REPO" worktree add -q "$dir" -b "$branch" "origin/$BASE"
+  link_node_modules "$dir"
   echo "$dir"
 }
 

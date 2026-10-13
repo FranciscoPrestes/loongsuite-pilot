@@ -67,5 +67,15 @@ bash "$WT" finish docs/manual >/dev/null 2>&1; ok "$?" "finish succeeds for a ha
 [ "$(G -C "$T/origin.git" show main:m.txt 2>/dev/null)" = "m" ]; ok "$?" "commit reached origin/main"
 [ ! -d "$T/handmade" ]; ok "$?" "hand-made worktree removed"
 
+echo "start links node_modules without dirtying the worktree"
+setup
+mkdir -p "$T/repo/node_modules/dep"; echo x > "$T/repo/node_modules/dep/i.js"
+bash "$WT" start feat/deps >/dev/null 2>&1
+[ -L "$AGENT_WT_ROOT/feat-deps/node_modules" ]; ok "$?" "node_modules is linked to the main clone"
+[ -f "$AGENT_WT_ROOT/feat-deps/node_modules/dep/i.js" ]; ok "$?" "the link resolves"
+[ -z "$(G -C "$AGENT_WT_ROOT/feat-deps" status --porcelain)" ]; ok "$?" "worktree stays clean (link is ignored)"
+bash "$WT" finish feat/deps >/dev/null 2>&1; ok "$?" "finish works with the link present"
+[ -d "$T/repo/node_modules/dep" ]; ok "$?" "main clone node_modules untouched after finish"
+
 echo; echo "passed: $pass  failed: $fail"
 [ "$fail" = 0 ]
