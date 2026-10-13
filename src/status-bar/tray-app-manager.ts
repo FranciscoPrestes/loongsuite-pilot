@@ -61,6 +61,28 @@ export function entryForCommit(manifest: TrayManifest, gitCommit: string | undef
   return null;
 }
 
+/** Shared libraries `ldd` reports as missing for `exe`; empty when ldd is unavailable (never blocks). */
+async function lddMissing(exe: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFile('ldd', [exe], { timeout: 10_000 });
+    return stdout.split('\n').filter((l) => l.includes('not found')).map((l) => l.trim().split(/\s+/)[0]);
+  } catch {
+    return [];
+  }
+}
+
+/** Debian/Ubuntu packages that provide the libraries the tray links against. */
+export function installHint(missing: string[]): string {
+  const pkgs = new Set<string>();
+  for (const lib of missing) {
+    if (/webkit2gtk|javascriptcoregtk|libsoup/.test(lib)) pkgs.add('libwebkit2gtk-4.1-0');
+    else if (/gtk-3|gdk|cairo|pixbuf/.test(lib)) pkgs.add('libgtk-3-0');
+    else if (/appindicator/.test(lib)) pkgs.add('libayatana-appindicator3-1');
+  }
+  pkgs.add('libayatana-appindicator3-1');
+  return `sudo apt install ${[...pkgs].join(' ')}`;
+}
+
 /** Hash of `name` in sha256sum-format text, or null. */
 export function parseSums(text: string, name: string): string | null {
   for (const line of text.split('\n')) {
@@ -88,6 +110,8 @@ export interface TrayAppManagerOptions {
   killFn?: (pid: number) => void;
   /** Environment used to detect a graphical session on Linux (default process.env). */
   env?: NodeJS.ProcessEnv;
+  /** Missing shared libraries of the installed executable (Linux only; default: ldd). */
+  checkLibs?: (exe: string) => Promise<string[]>;
 }
 
 export type TrayStartResult = { status: 'started' | 'already-running'; pid: number };
@@ -131,6 +155,8 @@ export class TrayAppManager {
   private readonly exeName: string;
   private readonly platform: NodeJS.Platform;
   private readonly opts: TrayAppManagerOptions;
+  /** Libraries found missing by the last start() on Linux; null until checked. */
+  lastMissingLibs: string[] | null = null;
 
   constructor(options: TrayAppManagerOptions) {
     this.opts = options;
@@ -162,6 +188,17 @@ export class TrayAppManager {
     if (!resolved) return null;
     const exe = await this.install(resolved.version, resolved.urls);
     if (!exe) return null;
+
+    if (this.platform === 'linux') {
+      const missing = await (this.opts.checkLibs ?? lddMissing)(exe);
+      this.lastMissingLibs = missing;
+      if (missing.length > 0) {
+        logger.warn('tray app cannot start: shared libraries are missing', {
+          libraries: missing, hint: installHint(missing),
+        });
+        return null;
+      }
+    }
 
     const running = await this.readRunning();
     if (running) {

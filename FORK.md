@@ -205,7 +205,8 @@ O app `app/tray` (Tauri) e entregue assim:
   `~/.loongsuite-pilot/tray/<v>/` e o executa. Assim o painel segue a mesma regra de canary/promocao do coletor
   (quem ainda esta numa release sem painel nao baixa nada); troca a versao antiga quando o coletor atualiza.
   So Windows e Linux (no Mac continua o app Swift). No Linux so roda com sessao grafica (`DISPLAY` ou
-  `WAYLAND_DISPLAY`).
+  `WAYLAND_DISPLAY`) e com as bibliotecas `libwebkit2gtk-4.1-0`, `libgtk-3-0` e `libayatana-appindicator3-1`;
+  se faltarem, o coletor nao abre o painel e registra no log o `apt install` exato.
 - **Desligar:** `enableStatusBarApp: false` no `config.json` (ou `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=0`),
   o mesmo botao do app Mac.
 - **Abrir sem icone:** atalho Cmd/Ctrl+Alt+Shift+T (muda com `NTC_TES_SHORTCUT`), ou abrir o app de novo.

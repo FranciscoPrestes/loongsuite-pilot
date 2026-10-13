@@ -9,6 +9,7 @@ import {
   trayPlatform,
   resolveTrayUrls,
   parseSums,
+  installHint,
 } from '../../../src/status-bar/tray-app-manager.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -60,6 +61,16 @@ describe('parseSums', () => {
   });
 });
 
+describe('installHint', () => {
+  it('maps missing libraries to Debian/Ubuntu packages', () => {
+    const hint = installHint(['libwebkit2gtk-4.1.so.0', 'libgtk-3.so.0']);
+    expect(hint).toContain('sudo apt install');
+    expect(hint).toContain('libwebkit2gtk-4.1-0');
+    expect(hint).toContain('libgtk-3-0');
+    expect(hint).toContain('libayatana-appindicator3-1');
+  });
+});
+
 describe('TrayAppManager', () => {
   let dir: string;
   const archive = Buffer.from('fake archive bytes');
@@ -106,6 +117,7 @@ describe('TrayAppManager', () => {
       isAlive: (pid) => alive.has(pid),
       killFn: kill,
       env: { DISPLAY: ':0' },
+      checkLibs: async () => [],
       ...opts,
     });
     return { manager, fetched, extract, spawned, spawnFn, alive, kill };
@@ -218,6 +230,29 @@ describe('TrayAppManager', () => {
     expect(await manager.stop()).toEqual({ status: 'stopped', pid: 4242 });
     expect(kill).toHaveBeenCalledWith(4242);
     expect(await manager.stop()).toEqual({ status: 'already-stopped', pid: null });
+  });
+
+  it('on Linux, does not start (and says why) when shared libraries are missing', async () => {
+    const { manager, spawnFn } = makeManager({
+      checkLibs: async () => ['libwebkit2gtk-4.1.so.0', 'libgtk-3.so.0'],
+    });
+    expect(await manager.start()).toBeNull();
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(manager.lastMissingLibs).toEqual(['libwebkit2gtk-4.1.so.0', 'libgtk-3.so.0']);
+  });
+
+  it('on Linux, starts once the libraries are present', async () => {
+    const { manager, spawnFn } = makeManager({ checkLibs: async () => [] });
+    expect(await manager.start()).toEqual({ status: 'started', pid: 4242 });
+    expect(spawnFn).toHaveBeenCalledOnce();
+    expect(manager.lastMissingLibs).toEqual([]);
+  });
+
+  it('does not check libraries on Windows', async () => {
+    const checkLibs = vi.fn(async () => ['x']);
+    const { manager } = makeManager({ platform: 'win32', checkLibs });
+    await manager.start();
+    expect(checkLibs).not.toHaveBeenCalled();
   });
 
   it('replaces a running older version with the current one', async () => {
