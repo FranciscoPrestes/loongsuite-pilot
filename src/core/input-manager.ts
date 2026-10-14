@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { WorkspacePolicy } from './workspace-policy.js';
 import type {
   AgentActivityEntry,
   AgentDetectionEntry,
@@ -99,6 +100,13 @@ export class InputManager extends EventEmitter {
   private multimodalProcessor: MultimodalProcessor | null = null;
   private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
 
+  private workspacePolicy = new WorkspacePolicy();
+
+  setWorkspacePolicy(policy: WorkspacePolicy): void {
+    this.workspacePolicy = policy;
+    for (const input of this.inputs.values()) input.setWorkspacePolicy(policy);
+  }
+
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
   }
@@ -146,6 +154,7 @@ export class InputManager extends EventEmitter {
       logger.warn('input already registered', { id: input.id });
       return;
     }
+    input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
     this.counters.set(input.id, {
       sourceKind: 'primary',
@@ -341,6 +350,7 @@ export class InputManager extends EventEmitter {
     inputId: string,
     entries: AgentActivityEntry[],
   ): Promise<void> {
+    entries = this.workspacePolicy.filter(entries, this.inputs.get(inputId)?.agentType);
     if (entries.length === 0) return;
 
     // Join while entries still carry the agent-native session id.

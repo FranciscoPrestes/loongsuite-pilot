@@ -142,6 +142,7 @@ vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
     id: 'qoder-work',
     agentType: 'qoder-work',
     collectionMethod: 'sqlite-polling',
+    setWorkspacePolicy: vi.fn(),
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -154,6 +155,7 @@ vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
     id: 'cursor-hook',
     agentType: 'cursor',
     collectionMethod: 'hook-jsonl',
+    setWorkspacePolicy: vi.fn(),
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -178,12 +180,10 @@ vi.mock('../../../src/metrics/alarm-manager.js', () => ({
 }));
 
 const {
-  mockResolveMultimodalEventStorageBasePath,
-  mockCreateUploader,
+  mockCreateDelegatedOssUploader,
   MockMultimodalProcessor,
 } = vi.hoisted(() => ({
-  mockResolveMultimodalEventStorageBasePath: vi.fn(),
-  mockCreateUploader: vi.fn(),
+  mockCreateDelegatedOssUploader: vi.fn(),
   MockMultimodalProcessor: vi.fn(),
 }));
 
@@ -191,10 +191,7 @@ vi.mock('../../../src/multimodal/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/multimodal/index.js')>();
   return {
     ...actual,
-    resolveMultimodalEventStorageBasePath: (...args: unknown[]) => (
-      mockResolveMultimodalEventStorageBasePath(...args)
-    ),
-    createUploader: (...args: unknown[]) => mockCreateUploader(...args),
+    createDelegatedOssUploader: (...args: unknown[]) => mockCreateDelegatedOssUploader(...args),
     MultimodalProcessor: MockMultimodalProcessor,
   };
 });
@@ -739,7 +736,6 @@ describe('Orchestrator', () => {
   });
 
   describe('multimodal startup wiring', () => {
-    const fakeUploader = { upload: vi.fn(), shutdown: vi.fn() };
     const agentsWantMultimodal = {
       codex: {
         enabled: true,
@@ -763,13 +759,26 @@ describe('Orchestrator', () => {
       },
       storageBasePath: 'sls://proj/logstore',
     };
+    const uploader = { upload: vi.fn(), shutdown: vi.fn() };
+    const resolveStorageBase = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'presign failed',
+    });
 
     let setProcessor: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
-      mockCreateUploader.mockReturnValue(fakeUploader);
-      MockMultimodalProcessor.mockImplementation((base: string) => ({
-        storageBasePath: base,
+      mockCreateDelegatedOssUploader.mockClear();
+      resolveStorageBase.mockReset().mockResolvedValue({
+        ok: false,
+        error: 'presign failed',
+      });
+      mockCreateDelegatedOssUploader.mockReturnValue({
+        uploader,
+        resolveStorageBase,
+      });
+      MockMultimodalProcessor.mockImplementation((storageBasePath?: string) => ({
+        storageBasePath,
         shutdown: vi.fn().mockResolvedValue(undefined),
       }));
       setProcessor = vi.spyOn(InputManager.prototype, 'setMultimodalProcessor');
@@ -779,30 +788,63 @@ describe('Orchestrator', () => {
       setProcessor.mockRestore();
     });
 
-    it('does not install a processor when event-base resolution fails', async () => {
-      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
-        ok: false,
-        error: 'presign failed',
-      });
+    it('uses the configured storageBasePath directly for sls', async () => {
+      const sls = {
+        storage: {
+          type: 'sls' as const,
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'proj',
+            logstore: 'logstore',
+          },
+          auth: {
+            mode: 'ak' as const,
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+        storageBasePath: 'sls://proj/logstore',
+      };
       const orch = new Orchestrator(makeConfig({
         agents: agentsWantMultimodal,
-        multimodal: delegatedOss,
+        multimodal: sls,
       }));
 
       await orch.start();
 
-      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
-      expect(mockCreateUploader).not.toHaveBeenCalled();
-      expect(MockMultimodalProcessor).not.toHaveBeenCalled();
-      expect(setProcessor).not.toHaveBeenCalled();
+      expect(mockCreateDelegatedOssUploader).not.toHaveBeenCalled();
+      expect(MockMultimodalProcessor).toHaveBeenCalledWith(
+        sls.storageBasePath,
+        expect.anything(),
+      );
       await orch.stop();
     });
 
-    it('installs a processor when event-base resolution succeeds', async () => {
-      mockResolveMultimodalEventStorageBasePath.mockResolvedValue({
+    it('leaves delegatedOss retrying inside the processor when the startup sniff fails', async () => {
+      const orch = new Orchestrator(makeConfig({
+        agents: agentsWantMultimodal,
+        multimodal: delegatedOss,
+      }));
+
+      await orch.start();
+
+      expect(resolveStorageBase).toHaveBeenCalledOnce();
+      expect(mockCreateDelegatedOssUploader).toHaveBeenCalledWith(
+        delegatedOss.storage,
+        delegatedOss.storageBasePath,
+      );
+      expect(MockMultimodalProcessor).toHaveBeenCalledWith(
+        undefined,
+        uploader,
+        resolveStorageBase,
+      );
+      await orch.stop();
+    });
+
+    it('installs a processor when the delegatedOss sniff succeeds', async () => {
+      resolveStorageBase.mockResolvedValue({
         ok: true,
         storageBasePath: 'oss://user-bucket/proj/logstore',
-        origin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
       });
       const orch = new Orchestrator(makeConfig({
         agents: agentsWantMultimodal,
@@ -811,20 +853,16 @@ describe('Orchestrator', () => {
 
       await orch.start();
 
-      expect(mockResolveMultimodalEventStorageBasePath).toHaveBeenCalledOnce();
-      expect(mockCreateUploader).toHaveBeenCalledWith(expect.objectContaining({
-        storage: expect.objectContaining({ type: 'delegatedOss' }),
-      }), {
-        expectedPresignOrigin: 'https://user-bucket.oss-cn-hangzhou.aliyuncs.com',
-      });
+      expect(mockCreateDelegatedOssUploader).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'delegatedOss' }),
+        delegatedOss.storageBasePath,
+      );
       expect(MockMultimodalProcessor).toHaveBeenCalledWith(
         'oss://user-bucket/proj/logstore',
-        fakeUploader,
+        uploader,
+        resolveStorageBase,
       );
       expect(setProcessor).toHaveBeenCalledTimes(1);
-      expect(setProcessor.mock.calls[0]?.[0]).toMatchObject({
-        storageBasePath: 'oss://user-bucket/proj/logstore',
-      });
       await orch.stop();
     });
   });
