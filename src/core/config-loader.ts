@@ -91,6 +91,7 @@ export interface InnerDataConfig {
  * All fields optional — missing fields fall back to env vars then defaults.
  */
 export interface ConfigFile {
+  enrichment?: Partial<NonNullable<AnalyticsConfig['enrichment']>>;
   instrumentation?: AnalyticsConfig['instrumentation'];
   enabled?: boolean;
   dataDir?: string;
@@ -321,6 +322,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
       : undefined,
     autoUpdate: buildAutoUpdateConfig(file),
     instrumentation: buildInstrumentationConfig(file),
+    enrichment: buildEnrichmentConfig(file),
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
@@ -1492,4 +1494,10 @@ export function buildInstrumentationConfig(file: ConfigFile | null | undefined):
     return { localEnabled: value.localEnabled, portalBaseUrl: origin.origin, ...(value.deviceId ? { deviceId: value.deviceId } : {}),
       ...(value.authorization ? { authorization: value.authorization } : {}) };
   } catch { return undefined; }
+}
+
+/** Local bounds can be reduced, never expanded by configuration. */
+export function buildEnrichmentConfig(file: ConfigFile | null | undefined): NonNullable<AnalyticsConfig['enrichment']> {
+  const bounded=(value:number|undefined,maximum:number)=>Number.isInteger(value)&&value!>0&&value!<=maximum?value!:maximum;
+  return {timeoutMs:bounded(file?.enrichment?.timeoutMs,2000),maxAgeDays:bounded(file?.enrichment?.maxAgeDays,7),maxSpoolBytes:bounded(file?.enrichment?.maxSpoolBytes,268435456)};
 }

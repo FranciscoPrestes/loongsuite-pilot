@@ -132,6 +132,7 @@ export interface InstrumentationConfig {
 }
 
 export interface AnalyticsConfig {
+  enrichment?: {timeoutMs:number;maxAgeDays:number;maxSpoolBytes:number};
   instrumentation?: InstrumentationConfig;
   privacy?: { excludeWorkspaces: string[] };
   enabled: boolean;

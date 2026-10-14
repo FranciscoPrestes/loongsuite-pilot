@@ -1,3 +1,7 @@
+import { JobStore } from '../enrichment/job-store.js';
+import { EnrichmentScheduler } from '../enrichment/scheduler.js';
+import { jobFromEntry, type LocalJob } from '../enrichment/job-contract.js';
+import type { AgentActivityEntry } from '../types/index.js';
 import { createInputAdapter } from '../inputs/input-adapter-registry.js';
 import { WorkspacePolicy } from './workspace-policy.js';
 import { EventEmitter } from 'node:events';
@@ -173,6 +177,9 @@ export class Orchestrator extends EventEmitter {
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
+  private enrichmentStore: JobStore | null = null;
+  private enrichmentScheduler: EnrichmentScheduler | null = null;
+  private enrichmentUnavailable = false;
   private desiredStateReconciler: DesiredStateReconciler | null = null;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
   private pipelineManager: PipelineManager | null = null;
@@ -194,6 +201,21 @@ export class Orchestrator extends EventEmitter {
     super();
     this.config = config;
     this.dataDir = resolveHome(config.dataDir || DEFAULT_DATA_DIR);
+  }
+
+  getEnrichmentScheduler(): EnrichmentScheduler | null { return this.enrichmentScheduler; }
+  /** C7 synchronizes tombstones and consumes replayBatch; raw records are never exposed. */
+  getEnrichmentStore(): JobStore | null { return this.enrichmentStore; }
+  async enqueueEnrichment(job: LocalJob): Promise<'created'|'existing'|'disabled'|'unavailable'> {
+    // Every enrichment failure is isolated: the harness and base capture never wait on it.
+    try {
+      if (this.enrichmentUnavailable) return 'unavailable';
+      if (!this.enrichmentStore || !this.desiredStateReconciler?.getEffectivePolicy().enrichmentEnabled) return 'disabled';
+      return await this.enrichmentStore.enqueue(job);
+    } catch {
+      try { this.emit('enrichment:status', { state: 'error', reason: 'enqueue_unavailable' }); } catch { /* observer failure */ }
+      return 'unavailable';
+    }
   }
 
   async start(): Promise<void> {
@@ -359,6 +381,31 @@ export class Orchestrator extends EventEmitter {
       onStatuses: statuses => this.emit('instrumentation:status', statuses),
     });
     await this.desiredStateReconciler.start();
+    // Invalid or direct enrichment config must never disable base capture:
+    // the analytics queue degrades to disabled and capture keeps running.
+    this.enrichmentUnavailable = false;
+    try {
+      const policy = () => this.desiredStateReconciler!.getEffectivePolicy();
+      this.enrichmentStore = new JobStore(this.dataDir, {policy, ...this.config.enrichment});
+      this.enrichmentScheduler = new EnrichmentScheduler(this.enrichmentStore, {policy, timeoutMs:this.config.enrichment?.timeoutMs,
+        onError:reason=>this.emit('enrichment:status',{state:'error',reason})});
+      this.inputManager.on('enrichment:signals', ({inputId,entries}:{inputId:string;entries:AgentActivityEntry[]}) => {
+        try {
+          if(!policy().enrichmentEnabled)return;
+          for(const entry of entries) {
+            const job=jobFromEntry(entry,inputId,this.config.instrumentation?.deviceId??'',version);
+            if(job)void this.enqueueEnrichment(job);
+          }
+        } catch { /* fail open: signal conversion never blocks base capture */ }
+      });
+      this.enrichmentScheduler.start();
+    } catch (err) {
+      this.enrichmentStore = null;
+      this.enrichmentScheduler = null;
+      this.enrichmentUnavailable = true;
+      logger.warn('enrichment queue unavailable', { error: String(err) });
+      try { this.emit('enrichment:status', { state: 'error', reason: 'init_unavailable' }); } catch { /* observer failure */ }
+    }
 
     // 7. Build deployment detection entries for dynamic discovery
     const deployDetectionEntries = this.buildDeployDetectionEntries();
@@ -580,6 +627,10 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    await this.enrichmentScheduler?.stop();
+    this.enrichmentScheduler=null;
+    this.enrichmentStore?.invalidateReplay();
+    this.enrichmentStore=null;
     await this.desiredStateReconciler?.stop();
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
