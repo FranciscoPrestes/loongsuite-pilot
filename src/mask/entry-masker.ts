@@ -1,4 +1,5 @@
 import type { AgentActivityEntry, MaskConfig } from '../types/index.js';
+import { SUPPORTED_MASK_TYPES } from '../types/index.js';
 import { shouldMaskField } from './field-whitelist.js';
 import { loadMaskPlan } from './rule-loader.js';
 import { maskString } from './string-masker.js';
@@ -83,4 +84,26 @@ function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): M
     };
   }
   return planOrRules as MaskPlan;
+}
+
+/**
+ * Full sensitive + PII plan used to sanitize enrichment evidence snippets before
+ * they are ever persisted. Reuses the same maskString/loadMaskPlan machinery the
+ * C4 job store applies to persisted evidence (maskEvidence).
+ */
+const SNIPPET_MASK_CONFIG: MaskConfig = {
+  mode: 'all',
+  types: [...SUPPORTED_MASK_TYPES],
+  replacementMode: 'placeholder',
+};
+let snippetPlan: MaskPlan | undefined;
+
+/**
+ * Sanitize a single evidence snippet (local manifest / documentation / command
+ * body) before persistence. Bounding the byte size is the caller's job; this
+ * only removes sensitive material. Paths are locators and must never be masked.
+ */
+export function sanitizeSnippetText(text: string): string {
+  snippetPlan ??= loadMaskPlan(SNIPPET_MASK_CONFIG);
+  return maskString(text, snippetPlan);
 }

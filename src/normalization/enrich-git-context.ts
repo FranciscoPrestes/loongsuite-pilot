@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { inferGitContext } from '../utils/git-context.js';
 import { createLogger } from '../utils/logger.js';
@@ -117,3 +118,55 @@ function normalizeStringArray(value: unknown): string[] {
     .map(item => typeof item === 'string' ? item.trim() : undefined)
     .filter((item): item is string => !!item);
 }
+
+/**
+ * Canonical form used for path containment checks across POSIX and Windows.
+ * Collapses backslashes to forward slashes, lowercases drive letters (Windows
+ * paths are case-insensitive), and strips a trailing separator. This is a pure
+ * lexical normalization; callers resolve symlinks with realpath before using it
+ * to decide whether a path escapes a root.
+ */
+export function normalizePathForCompare(value: string): string {
+  let normalized = value.replace(/\\/g, '/');
+  // Lowercase only a leading Windows drive letter (e.g. "C:" -> "c:").
+  normalized = normalized.replace(/^[A-Za-z]:/, match => match.toLowerCase());
+  if (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1);
+  return normalized;
+}
+
+/**
+ * True when `candidate` is the root itself or lives beneath it. Used to reject
+ * symlink/path escapes so enrichment never reads outside the workspace root.
+ * Both arguments must already be real (symlink-resolved) absolute paths.
+ * Windows drive-letter paths compare case-insensitively; POSIX stays
+ * case-sensitive.
+ */
+export function isPathInside(root: string, candidate: string): boolean {
+  const win = /^[a-z]:\//i.test(normalizePathForCompare(root));
+  let normRoot = normalizePathForCompare(root);
+  let normCandidate = normalizePathForCompare(candidate);
+  if (win) {
+    normRoot = normRoot.toLowerCase();
+    normCandidate = normCandidate.toLowerCase();
+  }
+  if (normRoot === normCandidate) return true;
+  const separator = normRoot.endsWith('/') ? '' : '/';
+  return normCandidate.startsWith(normRoot + separator);
+}
+
+/**
+ * Stable per-worktree identity derived from the worktree's own git directory.
+ * Two worktrees of the same repository hash to different ids (the linked
+ * worktree git dir is `.git/worktrees/<name>`), while repeated snapshots of the
+ * same worktree hash to the same id. The input must already be canonicalized.
+ */
+export function computeWorktreeId(canonicalGitDir: string): string {
+  return createHash('sha256')
+    .update(normalizePathForCompare(canonicalGitDir))
+    .digest('hex')
+    .slice(0, 32);
+}
+
+// A git diff (or any local file snapshot) must NEVER be used to attribute human
+// vs. AI authorship. Enrichment records repository structure/state only; no
+// authorship, blame or commit-identity signal is ever derived or emitted here.
