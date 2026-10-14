@@ -163,11 +163,28 @@ describe('command context resolution', () => {
 
   it('builds a correlated command_context observation with a real timestamp', async () => {
     writePackage(dir, { name: 'root', scripts: { build: 'tsc' } });
-    const payload = await resolveCommandContext('npm run build', dir, signal());
-    const observation = buildCommandContextObservation(job(), payload);
+    const result = await resolveCommandContext('npm run build', dir, signal());
+    const observation = buildCommandContextObservation(job(), result);
     expect(observation.kind).toBe('command_context');
-    expect(observation.payload).toEqual(payload);
+    expect(observation.payload).toEqual({
+      resolvedCommand: result.resolvedCommand,
+      scriptChain: result.scriptChain,
+      modulePaths: result.modulePaths,
+      reason: result.reason,
+    });
+    expect(observation.truncated).toBe(result.truncated);
     expect(observation.sourceRefs).toEqual(job().sourceRefs);
     expect(Date.parse(observation.occurredAt)).toBeGreaterThan(Date.now() - 10_000);
+  });
+
+  it('carries module-map truncation into the command_context observation (#3)', async () => {
+    writePackage(dir, { name: 'root', scripts: { build: 'tsc' } });
+    fs.writeFileSync(path.join(dir, 'README.md'), 'A'.repeat(200 * 1024)); // snippet-budget overflow
+
+    const result = await resolveCommandContext('npm run build', dir, signal());
+    expect(result.truncated).toBe(true);
+    const observation = buildCommandContextObservation(job(), result);
+    expect(observation.truncated).toBe(true);
+    expect(observation.payload).not.toHaveProperty('truncated'); // payload stays the 4-field schema shape
   });
 });

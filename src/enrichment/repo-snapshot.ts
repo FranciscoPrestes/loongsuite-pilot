@@ -32,46 +32,92 @@ export interface RepoSnapshotPayload {
 export const MAX_SNAPSHOT_FILES = 100;
 
 /**
- * Only read-only git subcommands are ever invoked, and only with argument
- * arrays built here (never shell interpolation). This allowlist is the guard
- * that keeps snapshotRepository from ever mutating a repository.
+ * Only the read-only git subcommands actually used here are permitted, invoked
+ * with argument arrays built here (never shell interpolation). `diff`/`log`/
+ * `show`/`config` are deliberately excluded: they can trigger textconv or
+ * external-diff filters from the target repo's config. This allowlist is the
+ * guard that keeps snapshotRepository from ever mutating or executing code in a
+ * repository.
  */
-const READONLY_GIT_SUBCOMMANDS = new Set([
-  'rev-parse',
-  'status',
-  'symbolic-ref',
-  'config',
-  'ls-files',
-  'diff',
-  'log',
-  'show',
-]);
+export const READONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set(['rev-parse', 'status', 'symbolic-ref']);
 
-const WRITE_CONFIG_FLAGS = /^--(unset|unset-all|add|replace|remove|remove-section|rename-section)(=|$)/;
+/**
+ * Hardened config for every git invocation. A target repository's local config
+ * must never run code during a read-only snapshot: `core.fsmonitor` would
+ * otherwise spawn a daemon/hook from `.git/config`, and `core.untrackedCache`
+ * can interact with it. These flags force both off regardless of repo config.
+ */
+export const GIT_SAFE_CONFIG = [
+  '-c', 'core.fsmonitor=false',
+  '-c', 'core.untrackedCache=false',
+  '-c', 'core.pager=cat',
+];
 
+/** Bounded stdout capture: enough for a very large dirty set, never unbounded. */
+const MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024;
+
+interface GitErrorLike {
+  code?: unknown;
+  killed?: boolean;
+  signal?: unknown;
+  name?: unknown;
+  message?: unknown;
+}
+
+/**
+ * An "infrastructure" failure is one where git did not simply report "no value"
+ * (timeout, stdio overflow, spawn error, abort). These must NEVER be silently
+ * converted into a clean result — see snapshotRepository. A plain non-zero exit
+ * (numeric code, child not killed) is git legitimately saying "there is none".
+ */
+function isInfrastructureFailure(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return true;
+  const e = err as GitErrorLike;
+  if (e.name === 'AbortError') return true;
+  if (e.killed === true) return true;
+  if (e.signal != null) return true;
+  if (typeof e.code !== 'number') return true;
+  return false;
+}
+
+function describeGitError(err: unknown): string {
+  const e = (err ?? {}) as GitErrorLike;
+  return typeof e.message === 'string' ? e.message : String(e.code ?? 'unknown');
+}
+
+/**
+ * Run a read-only git command with separate arguments and hardened config.
+ * Returns the trimmed-free stdout, or `undefined` when `allowMissing` and git
+ * exited non-zero ("no such value"). Throws on ANY infrastructure failure or
+ * abort so a broken/aborted probe can never masquerade as a clean repository.
+ */
 async function runGitReadonly(
   cwd: string,
   gitArgs: readonly string[],
   signal?: AbortSignal,
+  opts: { allowMissing?: boolean } = {},
 ): Promise<string | undefined> {
   const sub = gitArgs[0];
   if (!sub || !READONLY_GIT_SUBCOMMANDS.has(sub)) {
     throw new Error(`read-only git violation: ${sub ?? '(none)'}`);
   }
-  if (sub === 'config' && gitArgs.some(arg => WRITE_CONFIG_FLAGS.test(arg))) {
-    throw new Error('read-only git violation: config write');
-  }
   try {
-    const { stdout } = await execFile('git', ['-C', cwd, ...gitArgs], {
+    const { stdout } = await execFile('git', ['-C', cwd, ...GIT_SAFE_CONFIG, ...gitArgs], {
       shell: false,
       timeout: 1500,
-      maxBuffer: 64 * 1024,
+      maxBuffer: MAX_GIT_OUTPUT_BYTES,
       encoding: 'utf8',
       ...(signal ? { signal } : {}),
     });
     return stdout.length > 0 ? stdout : undefined;
-  } catch {
-    return undefined;
+  } catch (err) {
+    if (signal?.aborted) throw new Error('snapshot aborted');
+    if (isInfrastructureFailure(err)) {
+      throw new Error(`git ${sub} failed: ${describeGitError(err)}`);
+    }
+    // Plain non-zero exit: git ran and reported "no value".
+    if (opts.allowMissing) return undefined;
+    throw new Error(`git ${sub} failed: ${describeGitError(err)}`);
   }
 }
 
@@ -155,29 +201,37 @@ export async function snapshotRepository(
   workspacePath: string,
   signal: AbortSignal,
 ): Promise<RepoSnapshotPayload> {
+  if (signal.aborted) throw new Error('snapshot aborted');
   const realRoot = await fs.realpath(workspacePath);
   const stat = await fs.stat(realRoot);
   if (!stat.isDirectory()) throw new Error('workspace is not a directory');
 
+  // Required: repo identity. Fails (throws) for a non-repo — never a silent fallback.
   const gitDirRaw = await runGitReadonly(realRoot, ['rev-parse', '--absolute-git-dir'], signal);
   const gitDir = gitDirRaw?.trim();
   const worktreeId = computeWorktreeId(
     gitDir ? path.resolve(realRoot, gitDir) : realRoot,
   );
 
-  const headRaw = await runGitReadonly(realRoot, ['rev-parse', 'HEAD'], signal);
+  // `HEAD` / branch probes legitimately return "no value" on an empty or
+  // detached repo (allowMissing), but any infrastructure failure still throws.
+  const headRaw = await runGitReadonly(realRoot, ['rev-parse', 'HEAD'], signal, { allowMissing: true });
   const head = headRaw?.trim() || null;
 
   let branch: string | null = null;
-  const abbrev = await runGitReadonly(realRoot, ['rev-parse', '--abbrev-ref', 'HEAD'], signal);
+  const abbrev = await runGitReadonly(realRoot, ['rev-parse', '--abbrev-ref', 'HEAD'], signal, { allowMissing: true });
   const abbrevTrimmed = abbrev?.trim();
   if (abbrevTrimmed && abbrevTrimmed !== 'HEAD') branch = abbrevTrimmed;
   else {
-    const symbolic = await runGitReadonly(realRoot, ['symbolic-ref', '--short', 'HEAD'], signal);
+    const symbolic = await runGitReadonly(realRoot, ['symbolic-ref', '--short', 'HEAD'], signal, { allowMissing: true });
     branch = symbolic?.trim() || null;
   }
 
+  // Required: dirty state. A failure here throws rather than reporting a clean
+  // tree — "falta de informação nunca vira sucesso". Empty stdout (exit 0) is a
+  // genuinely clean repo and only then yields files: [].
   const statusRaw = (await runGitReadonly(realRoot, ['status', '--porcelain'], signal)) ?? '';
+  if (signal.aborted) throw new Error('snapshot aborted');
   const rawEntries = parsePorcelain(statusRaw);
 
   const included: RepoSnapshotFile[] = [];

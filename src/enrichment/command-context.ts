@@ -9,6 +9,13 @@ export interface CommandContextPayload {
   readonly scriptChain: readonly string[];
   readonly modulePaths: readonly string[];
   readonly reason: string | null;
+  /**
+   * Diagnostic only: reflects module-map truncation (manifest cap / snippet
+   * budget overflow) reached while resolving. This is NOT part of the persisted
+   * `command_context` payload (which is exactly the 4 schema fields); it is
+   * surfaced via the observation-level `truncated` flag. See #3.
+   */
+  readonly truncated: boolean;
 }
 
 export const MAX_SCRIPT_DEPTH = 5;
@@ -36,7 +43,9 @@ export async function resolveCommandContext(
   workspacePath: string,
   signal: AbortSignal,
 ): Promise<CommandContextPayload> {
-  const modulePaths = (await buildModuleMap(workspacePath, signal)).modulePaths;
+  const moduleMap = await buildModuleMap(workspacePath, signal);
+  const modulePaths = moduleMap.modulePaths;
+  const truncated = moduleMap.truncated;
   const invocation = RUN_INVOCATION.exec(command.trim());
   if (!invocation) {
     // Not a script invocation: it is already a concrete command. Return it
@@ -46,12 +55,13 @@ export async function resolveCommandContext(
       scriptChain: [],
       modulePaths,
       reason: null,
+      truncated,
     };
   }
 
   const scripts = await collectPackageScripts(workspacePath, signal);
   if (!scripts) {
-    return { resolvedCommand: null, scriptChain: [], modulePaths, reason: 'manifest_unreadable' };
+    return { resolvedCommand: null, scriptChain: [], modulePaths, reason: 'manifest_unreadable', truncated };
   }
 
   const chain: string[] = [];
@@ -62,14 +72,14 @@ export async function resolveCommandContext(
     if (signal?.aborted) throw new Error('aborted');
     if (!current) break;
     if (visited.has(current)) {
-      return { resolvedCommand: null, scriptChain: chain, modulePaths, reason: 'cycle_detected' };
+      return { resolvedCommand: null, scriptChain: chain, modulePaths, reason: 'cycle_detected', truncated };
     }
     visited.add(current);
     chain.push(current);
 
     const body = scripts[current];
     if (typeof body !== 'string') {
-      return { resolvedCommand: null, scriptChain: chain, modulePaths, reason: 'script_not_found' };
+      return { resolvedCommand: null, scriptChain: chain, modulePaths, reason: 'script_not_found', truncated };
     }
 
     const nested = RUN_INVOCATION.exec(body.trim());
@@ -83,10 +93,11 @@ export async function resolveCommandContext(
       scriptChain: chain,
       modulePaths,
       reason: null,
+      truncated,
     };
   }
 
-  return { resolvedCommand: null, scriptChain: chain, modulePaths, reason: 'depth_exceeded' };
+  return { resolvedCommand: null, scriptChain: chain, modulePaths, reason: 'depth_exceeded', truncated };
 }
 
 /**
@@ -96,9 +107,13 @@ export async function resolveCommandContext(
  */
 export function buildCommandContextObservation(
   job: LocalJob,
-  payload: CommandContextPayload,
+  full: CommandContextPayload,
   capturedAt: string = new Date().toISOString(),
 ): Observation {
+  // The persisted `command_context` payload is exactly the 4 schema fields; the
+  // diagnostic `truncated` flag moves to the observation level (schema allows it
+  // there). See #3 — truncation must reach the observation, never be dropped.
+  const { truncated, ...payload } = full;
   const observation = {
     schemaVersion: '1' as const,
     observationId: job.id,
@@ -110,7 +125,7 @@ export function buildCommandContextObservation(
     capabilitiesVersion: job.capabilitiesVersion,
     occurredAt: capturedAt,
     missingFields: [] as string[],
-    truncated: false,
+    truncated,
     sourceRefs: job.sourceRefs,
     generatedBy: 'collector' as const,
     kind: 'command_context' as const,

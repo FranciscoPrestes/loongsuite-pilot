@@ -5,7 +5,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   buildRepoSnapshotObservation,
+  GIT_SAFE_CONFIG,
   MAX_SNAPSHOT_FILES,
+  READONLY_GIT_SUBCOMMANDS,
   snapshotRepository,
 } from '../../../src/enrichment/repo-snapshot.js';
 import { buildModuleMap, MAX_SNIPPET_BYTES } from '../../../src/enrichment/repo-module-map.js';
@@ -111,6 +113,59 @@ describe('repo snapshot', () => {
     expect(snippetBytes).toBeLessThanOrEqual(65_536);
     expect(snippetBytes).toBeLessThanOrEqual(MAX_SNIPPET_BYTES);
     expect(truncated).toBe(true);
+  });
+
+  it('a git status failure never fabricates a clean snapshot (#1)', async () => {
+    const repo = path.join(dir, 'repo');
+    initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+    commitAll(repo, 'init');
+    fs.writeFileSync(path.join(repo, 'dirty.txt'), 'dirty'); // real dirty state
+
+    // Corrupt the index so `git status` fails (exit 128) instead of reporting.
+    // The snapshot must reject — never report the tree as clean on a probe error.
+    fs.writeFileSync(path.join(repo, '.git', 'index'), 'GARBAGEGARBAGE');
+    await expect(snapshotRepository(repo, signal())).rejects.toThrow();
+  });
+
+  it('an abort never fabricates a clean snapshot (#1)', async () => {
+    const repo = path.join(dir, 'repo');
+    initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'dirty.txt'), 'dirty');
+
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(snapshotRepository(repo, aborted.signal)).rejects.toThrow();
+  });
+
+  it('out-of-root workspace patterns cannot escape into modulePaths (#2)', async () => {
+    const repo = path.join(dir, 'repo');
+    const sibling = path.join(dir, 'sibling');
+    initRepo(repo);
+    fs.mkdirSync(sibling, { recursive: true });
+    fs.writeFileSync(path.join(sibling, 'package.json'), JSON.stringify({ name: 'evil' }));
+    fs.writeFileSync(
+      path.join(repo, 'package.json'),
+      JSON.stringify({ name: 'root', workspaces: ['../*'] }),
+    );
+
+    const map = await buildModuleMap(repo, signal());
+    expect(map.modulePaths.some(p => p.startsWith('..') || path.isAbsolute(p))).toBe(false);
+    expect(map.modulePaths).not.toContain('../sibling');
+  });
+
+  it('snippet byte bound holds across multibyte UTF-8 truncation (#4)', async () => {
+    const repo = path.join(dir, 'repo');
+    initRepo(repo);
+    // "€" is 3 bytes; a large multibyte doc forces the budget cut to land
+    // mid-codepoint (65_536 = 21845*3 + 1).
+    fs.writeFileSync(path.join(repo, 'README.md'), '€'.repeat(25_000));
+
+    const map = await buildModuleMap(repo, signal());
+    expect(map.snippetBytes).toBeLessThanOrEqual(65_536);
+    for (const snippet of map.snippets) {
+      expect(snippet.content).not.toContain('\uFFFD');
+    }
   });
 
   it('monorepo workspace packages are discovered as modules', async () => {
@@ -226,5 +281,17 @@ describe('repo snapshot', () => {
     const captured = Date.parse(observation.occurredAt);
     expect(captured).toBeGreaterThanOrEqual(before - 5);
     expect(captured).toBeLessThanOrEqual(after + 5);
+  });
+
+  it('a snapshot can never execute target-repo code (#5)', () => {
+    // The allowlist must stay trimmed to non-executing subcommands: `diff`/`log`/
+    // `show`/`config` are textconv/external-diff/config execution vectors.
+    expect([...READONLY_GIT_SUBCOMMANDS].sort()).toEqual(['rev-parse', 'status', 'symbolic-ref']);
+    for (const forbidden of ['config', 'diff', 'log', 'show', 'ls-files']) {
+      expect(READONLY_GIT_SUBCOMMANDS.has(forbidden)).toBe(false);
+    }
+    // Every invocation forces off repo-configured code execution (fsmonitor hook).
+    expect(GIT_SAFE_CONFIG).toContain('core.fsmonitor=false');
+    expect(GIT_SAFE_CONFIG).toContain('core.untrackedCache=false');
   });
 });

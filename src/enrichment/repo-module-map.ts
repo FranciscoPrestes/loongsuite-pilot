@@ -51,6 +51,19 @@ interface BoundedRead {
   readonly bytesRead: number;
 }
 
+/**
+ * Largest prefix of `buf` up to `limit` bytes that ends on a UTF-8 codepoint
+ * boundary. A raw `subarray(0, limit)` can split a multi-byte sequence and
+ * decode to U+FFFD (3 bytes), pushing the retained byte count over the budget;
+ * stepping back over any trailing continuation bytes keeps the bound exact.
+ */
+function utf8SafePrefix(buf: Buffer, limit: number): Buffer {
+  if (limit >= buf.length) return buf;
+  let end = limit;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--; // drop trailing continuation bytes
+  return buf.subarray(0, end);
+}
+
 /** Read at most `maxBytes` so a huge manifest/doc cannot blow memory. */
 async function readTextBounded(absolute: string, maxBytes: number): Promise<BoundedRead | null> {
   let handle: fs.FileHandle | undefined;
@@ -58,7 +71,10 @@ async function readTextBounded(absolute: string, maxBytes: number): Promise<Boun
     handle = await fs.open(absolute, 'r');
     const buffer = Buffer.alloc(maxBytes);
     const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
-    return { text: buffer.subarray(0, bytesRead).toString('utf8'), bytesRead };
+    return {
+      text: utf8SafePrefix(buffer.subarray(0, bytesRead), bytesRead).toString('utf8'),
+      bytesRead,
+    };
   } catch {
     return null; // deleted mid-read / unreadable: skip gracefully
   } finally {
@@ -118,6 +134,22 @@ function workspacePatterns(data: Record<string, unknown> | null): string[] {
   return [];
 }
 
+/**
+ * A workspace directory is only reported when its real (symlink-resolved) path
+ * stays inside the repository root. Without this, a manifest with a pattern like
+ * `../*` would enumerate sibling directories and persist `../…` paths in the
+ * unmasked module list — an escape. Rejecting anything outside the root keeps
+ * modulePaths strictly within the workspace.
+ */
+async function isContainedDir(realRoot: string, candidate: string): Promise<boolean> {
+  try {
+    const real = await fs.realpath(candidate);
+    return isPathInside(realRoot, real);
+  } catch {
+    return false;
+  }
+}
+
 async function expandWorkspaceDirs(
   realRoot: string,
   patterns: readonly string[],
@@ -143,6 +175,7 @@ async function expandWorkspaceDirs(
         } catch {
           continue;
         }
+        if (!(await isContainedDir(realRoot, candidate))) continue; // escape rejected
         const hasManifest = await fs
           .access(path.join(candidate, 'package.json'))
           .then(() => true)
@@ -151,6 +184,7 @@ async function expandWorkspaceDirs(
       }
     } else {
       const candidate = path.resolve(realRoot, normalized);
+      if (!(await isContainedDir(realRoot, candidate))) continue; // escape rejected
       const hasManifest = await fs
         .access(path.join(candidate, 'package.json'))
         .then(() => true)
@@ -197,7 +231,7 @@ export async function buildModuleMap(
     let content = sanitized;
     let bytes = Buffer.byteLength(content, 'utf8');
     if (bytes > remaining) {
-      content = Buffer.from(content, 'utf8').subarray(0, remaining).toString('utf8');
+      content = utf8SafePrefix(Buffer.from(content, 'utf8'), remaining).toString('utf8');
       bytes = Buffer.byteLength(content, 'utf8');
       truncated = true;
     }
