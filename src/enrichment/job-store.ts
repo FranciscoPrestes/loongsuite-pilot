@@ -28,9 +28,9 @@ interface JournalRecord {
   result?: Observation;
 }
 
-export interface LossState { reason: 'expired' | 'quota'; count: number; from: string; to: string; unreported: false }
+export interface LossState { reason: 'expired' | 'quota' | 'busy'; count: number; from: string; to: string; unreported: false }
 const lossSchema = z.object({
-  reason: z.enum(['expired', 'quota']), count: z.number().int().positive(),
+  reason: z.enum(['expired', 'quota', 'busy']), count: z.number().int().positive(),
   from: z.string().min(1), to: z.string().min(1), unreported: z.literal(false),
 }).strict();
 
@@ -43,27 +43,41 @@ type Exclusions = z.infer<typeof exclusionsSchema>;
 
 const usageSchema = z.object({ bytes: z.number().int().nonnegative() }).strict();
 const idIndexSchema = z.object({ key: hex64 }).strict();
+const markerSchema = z.object({ key: hex64, at: z.number().finite() }).strict();
+const spillSchema = z.object({ reason: z.literal('busy'), occurredAt: z.string().min(1) }).strict();
 
 const MAX_RECORD_BYTES = 4 * 1024 * 1024;
 const MAX_QUARANTINED = 20;
 const TMP_NAME = /^\.[a-f0-9-]{36}\.tmp$/;
 const JOURNAL_NAME = /^[a-f0-9]{64}\.json$/;
+const PENDING_NAME = /^(\d{13,})-([a-f0-9]{64})\.json$/;
+/** One lock acquisition window for worker operations. */
+const LOCK_BUDGET_MS = 80;
+/** Enqueue waits out a concurrent worker's bounded maintenance window before recording a loss. */
+const ENQUEUE_LOCK_BUDGET_MS = 240;
+/** Orphaned index/marker files younger than this may belong to a concurrent in-flight write. */
+const ORPHAN_GRACE_MS = 60000;
 
 /**
  * Private atomic per-job journals. Result and lease transitions are one
  * fsync+rename. Quota bytes cover journals plus the derived id index; the
- * control plane (queue lock, exclusions, loss manifest, bounded quarantine) is
- * a separate bounded reserve and is never counted as a hard overall disk bound.
+ * control plane (queue lock, exclusions, loss manifest, pending markers, spill
+ * markers, bounded quarantine) is a separate bounded reserve and is never
+ * counted as a hard overall disk bound.
  *
- * Steady-state enqueue/complete/retry/claim bookkeeping is bounded: O(1) lookups
- * through the per-job id index and the durable usage reservation. The full spool
- * scan runs only in worker maintenance and in crash recovery (once per instance,
- * before its first operation).
+ * The shared cross-process lock is held only around O(1) work: every full spool
+ * scan (crash recovery, expiry sweep, replay reading) runs outside it. The
+ * durable `pending/` marker index (wakeAt-keyed, rebuilt by recovery) lets
+ * `claim` find runnable jobs without parsing the spool. Enqueue is bounded
+ * bookkeeping with a bounded busy budget; if contention still wins, the job is
+ * recorded as a durable `busy` loss marker, never dropped silently.
  */
 export class JobStore {
   readonly config: QueueConfig;
   private readonly root: string;
   private readonly idsDir: string;
+  private readonly pendingDir: string;
+  private readonly spillDir: string;
   private readonly quarantineDir: string;
   private readonly now: () => number;
   // Session-scoped: restart or credential rotation must synchronize again before replay.
@@ -75,6 +89,8 @@ export class JobStore {
   constructor(dataDir: string, private readonly options: JobStoreOptions) {
     this.root = path.join(dataDir, 'enrichment');
     this.idsDir = path.join(this.root, 'ids');
+    this.pendingDir = path.join(this.root, 'pending');
+    this.spillDir = path.join(this.root, 'spill');
     this.quarantineDir = path.join(this.root, 'quarantine');
     this.now = options.now ?? Date.now;
     this.config = { ...DEFAULT_QUEUE_CONFIG, maxAgeDays: options.maxAgeDays ?? 7, maxSpoolBytes: options.maxSpoolBytes ?? 268435456 };
@@ -89,23 +105,28 @@ export class JobStore {
     fs.accessSync(this.root, fs.constants.W_OK);
   }
 
-  private async locked<T>(operation: () => T): Promise<T> {
+  private async locked<T>(operation: () => T, busyBudgetMs = LOCK_BUDGET_MS): Promise<T> {
     this.ensure();
-    const deadline = Date.now() + 80;
+    const deadline = Date.now() + busyBudgetMs;
     while (true) {
       const { lock, error } = acquireSingleInstanceLock(path.join(this.root, 'queue.lock'));
       if (lock) {
-        try {
-          // Crash recovery lives in the worker side: one bounded rebuild per
-          // instance, before any operation trusts the derived bookkeeping.
-          if (!this.recovered) { this.recoverLocked(); this.recovered = true; }
-          return operation();
-        } finally { lock.release(); }
+        try { return operation(); } finally { lock.release(); }
       }
       if (error) throw error;
       if (Date.now() >= deadline) throw new Error('queue busy');
       await new Promise(r => setTimeout(r, 5));
     }
+  }
+
+  private recovery: Promise<void> | null = null;
+  /** Crash recovery runs once per instance; concurrent callers share one rebuild. */
+  private async ready(busyBudgetMs = LOCK_BUDGET_MS): Promise<void> {
+    if (this.recovered) return;
+    if (!this.recovery) {
+      this.recovery = this.recover(busyBudgetMs).catch(e => { this.recovery = null; throw e; });
+    }
+    await this.recovery;
   }
 
   private file(name: string): string { return path.join(this.root, name); }
@@ -130,10 +151,11 @@ export class JobStore {
   }
 
   /**
-   * Derived bookkeeping (quota usage, id index) is rebuildable by recovery, so
-   * it needs only atomic visibility, not power-loss durability. Reservations are
-   * written before the artifacts they account for; releases after. A crash can
-   * therefore only overcount until recovery recomputes, never undercount.
+   * Derived bookkeeping (quota usage, id index, pending markers, spill markers)
+   * is rebuildable by recovery, so it needs only atomic visibility, not
+   * power-loss durability. Reservations are written before the artifacts they
+   * account for; releases after. A crash can therefore only overcount until
+   * recovery recomputes, never undercount.
    */
   private writeDerived(file: string, value: unknown): void {
     const tmp = path.join(path.dirname(file), '.' + randomUUID() + '.tmp');
@@ -192,15 +214,83 @@ export class JobStore {
     }
   }
 
-  /** Rebuilds the derived id index and quota usage from the journals (source of truth). */
-  private recoverLocked(): void {
+  // ---- Durable pending marker index (wakeAt-keyed) ----
+
+  private wakeAtOf(record: Pick<JournalRecord, 'job' | 'state' | 'leaseUntil'>): number {
+    return record.state === 'leased' ? (record.leaseUntil ?? 0) : record.job.notBefore;
+  }
+
+  private markerNameFor(record: Pick<JournalRecord, 'job' | 'state' | 'leaseUntil' | 'key'>): string {
+    return `${String(this.wakeAtOf(record)).padStart(13, '0')}-${record.key}.json`;
+  }
+
+  private writeMarker(record: Pick<JournalRecord, 'job' | 'state' | 'leaseUntil' | 'key'>): void {
+    if (record.state === 'complete' || record.state === 'dead') return;
+    this.writeDerived(path.join(this.pendingDir, this.markerNameFor(record)), { key: record.key, at: this.now() });
+  }
+
+  private dropMarker(record: Pick<JournalRecord, 'job' | 'state' | 'leaseUntil' | 'key'>): void {
+    try { fs.unlinkSync(path.join(this.pendingDir, this.markerNameFor(record))); } catch { /* absent */ }
+  }
+
+  /** Marker probe age: only prunes orphans old enough to not race a concurrent enqueue. */
+  private markerAge(file: string): number {
+    try { return this.now() - markerSchema.parse(this.readBounded(file)).at; } catch { return Number.POSITIVE_INFINITY; }
+  }
+
+  /**
+   * Lock-free frontier scan over the marker index. Sorted by wake time, so the
+   * claimable candidates sit at the head. Stale markers self-heal here (O(1)
+   * journal reads); the lease commit itself happens under the shared lock.
+   */
+  private scanPending(now: number, kinds: readonly ObservationKind[] | undefined, exclusions: Exclusions): string[] {
+    if (!fs.existsSync(this.pendingDir)) return [];
+    const candidates: string[] = [];
+    for (const name of fs.readdirSync(this.pendingDir).sort()) {
+      const match = PENDING_NAME.exec(name);
+      if (!match) continue;
+      if (Number(match[1]) > now) break; // sorted by wake time: nothing later is due
+      const key = match[2];
+      const file = path.join(this.pendingDir, name);
+      const record = this.readRecord(key);
+      if (!record) {
+        // Orphaned marker (journal never landed or was removed): prune when old.
+        if (this.markerAge(file) > ORPHAN_GRACE_MS) { try { fs.unlinkSync(file); } catch { /* gone */ } }
+        continue;
+      }
+      const expected = this.markerNameFor(record);
+      if (expected !== name) { // journal is authoritative; heal the wake index
+        try { fs.unlinkSync(file); } catch { /* gone */ }
+        this.writeMarker(record);
+      }
+      if ((kinds && !kinds.includes(record.job.kind)) || this.excluded(record.job, exclusions)
+        || record.job.notBefore > now || record.state === 'complete' || record.state === 'dead'
+        || (record.state === 'leased' && (record.leaseUntil ?? 0) > now)) continue;
+      candidates.push(key);
+    }
+    return candidates;
+  }
+
+  private readRecordTolerant(key: string): JournalRecord | null {
+    try { return this.readRecord(key); } catch { return null; }
+  }
+
+  /**
+   * Crash recovery: the expensive journal validation/parse scan stays OUTSIDE
+   * the shared lock. Only the derived rebuild (id index, pending markers),
+   * spill folding and the exact quota recompute serialize on it. The rebuild is
+   * self-healing, so a scan that raced a concurrent mutation converges through
+   * claim probes and the next recovery; the usage recompute runs under the lock
+   * and is therefore exact against concurrent reservations.
+   */
+  private async recover(busyBudgetMs = LOCK_BUDGET_MS): Promise<void> {
     fs.mkdirSync(this.idsDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(this.pendingDir, { recursive: true, mode: 0o700 });
     const kept = new Map<string, JournalRecord>();
     const byId = new Map<string, JournalRecord>();
     for (const name of fs.readdirSync(this.root)) {
-      if (TMP_NAME.test(name)) { try { fs.unlinkSync(this.file(name)); } catch { /* residue */ } continue; }
       if (!JOURNAL_NAME.test(name)) continue;
-      const record = this.readRecord(name.slice(0, -5));
+      const record = this.readRecordTolerant(name.slice(0, -5));
       if (!record) continue;
       const duplicate = byId.get(record.job.id);
       if (duplicate) {
@@ -217,29 +307,53 @@ export class JobStore {
       kept.set(record.key, record);
       byId.set(record.job.id, record);
     }
-    const owners = new Map<string, string>();
-    for (const record of kept.values()) owners.set(digest(record.job.id), record.key);
-    for (const name of fs.readdirSync(this.idsDir)) {
-      const file = path.join(this.idsDir, name);
-      if (TMP_NAME.test(name)) { try { fs.unlinkSync(file); } catch { /* residue */ } continue; }
-      if (!JOURNAL_NAME.test(name)) continue;
-      let key: string | null = null;
-      try { key = idIndexSchema.parse(this.readBounded(file)).key; }
-      catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.quarantine(file);
-        continue;
+    await this.locked(() => {
+      this.sweepTmpLocked();
+      const owners = new Map<string, string>();
+      for (const record of kept.values()) owners.set(digest(record.job.id), record.key);
+      for (const name of fs.readdirSync(this.idsDir)) {
+        const file = path.join(this.idsDir, name);
+        if (!JOURNAL_NAME.test(name)) continue;
+        let key: string | null = null;
+        try { key = idIndexSchema.parse(this.readBounded(file)).key; }
+        catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.quarantine(file);
+          continue;
+        }
+        if (owners.get(name.slice(0, -5)) !== key) fs.unlinkSync(file);
       }
-      if (owners.get(name.slice(0, -5)) !== key) fs.unlinkSync(file);
-    }
-    for (const [idDigest, key] of owners) {
-      const file = path.join(this.idsDir, idDigest + '.json');
-      if (this.readIdIndexKey(file) !== key) this.writeDerived(file, { key });
-    }
-    this.writeDerived(this.file('usage.json'), { bytes: this.sumSpoolBytes() });
+      for (const [idDigest, key] of owners) {
+        const file = path.join(this.idsDir, idDigest + '.json');
+        if (this.readIdIndexKey(file) !== key) this.writeDerived(file, { key });
+      }
+      // Reconcile the pending marker index against the journals.
+      const expected = new Set<string>();
+      for (const record of kept.values()) {
+        if (record.state === 'complete' || record.state === 'dead') continue;
+        const name = this.markerNameFor(record);
+        expected.add(name);
+        if (!this.readMarkerKey(path.join(this.pendingDir, name))) this.writeMarker(record);
+      }
+      for (const name of fs.readdirSync(this.pendingDir)) {
+        const file = path.join(this.pendingDir, name);
+        if (TMP_NAME.test(name)) { try { fs.unlinkSync(file); } catch { /* residue */ } continue; }
+        if (expected.has(name)) continue;
+        // Young orphans may be a concurrent process's in-flight enqueue marker.
+        if (this.markerAge(file) <= ORPHAN_GRACE_MS && PENDING_NAME.test(name)) continue;
+        try { fs.unlinkSync(file); } catch { /* gone */ }
+      }
+      this.foldSpillsLocked();
+      this.writeDerived(this.file('usage.json'), { bytes: this.sumSpoolBytes() });
+    }, busyBudgetMs);
+    this.recovered = true;
   }
 
   private readIdIndexKey(file: string): string | null {
     try { return idIndexSchema.parse(this.readBounded(file)).key; } catch { return null; }
+  }
+
+  private readMarkerKey(file: string): string | null {
+    try { return markerSchema.parse(this.readBounded(file)).key; } catch { return null; }
   }
 
   /** Exact quota accounting over journals plus id index (crash-recovery recompute). */
@@ -281,6 +395,7 @@ export class JobStore {
     const idFile = this.idFile(record.job.id);
     let freed = this.fileBytes(journal);
     fs.unlinkSync(journal);
+    this.dropMarker(record);
     if (this.readIdIndex(record.job.id) === record.key) {
       freed += this.fileBytes(idFile);
       fs.unlinkSync(idFile);
@@ -296,15 +411,15 @@ export class JobStore {
     }
   }
 
-  private loss(reason: LossState['reason'], jobs: LocalJob[]): void {
+  private loss(reason: LossState['reason'], entries: readonly { occurredAt: string }[]): void {
     // Strict read: an unusable loss manifest must fail closed and block any
     // discard, never be healed into a fresh manifest that drops earlier losses.
     const losses = this.readLosses();
-    const dates = jobs.map(j => j.occurredAt).sort();
+    const dates = entries.map(j => j.occurredAt).sort();
     const old = losses.find(l => l.reason === reason);
     const next: LossState = {
       reason,
-      count: (old?.count ?? 0) + jobs.length,
+      count: (old?.count ?? 0) + entries.length,
       from: [old?.from, ...dates].filter((v): v is string => !!v).sort()[0]!,
       to: [old?.to, ...dates].filter((v): v is string => !!v).sort().at(-1)!,
       unreported: false,
@@ -312,63 +427,119 @@ export class JobStore {
     this.write('loss-manifest.json', [...losses.filter(l => l.reason !== reason), next]);
   }
 
-  private maintainLocked(now: number): void {
-    const expired = this.records().filter(r => Date.parse(r.job.occurredAt) < now - this.config.maxAgeDays * 86400000);
-    if (expired.length) {
-      // D5: the loss manifest is durably recorded before any expired spool is discarded.
-      this.loss('expired', expired.map(r => r.job));
-      for (const r of expired) this.deleteRecordLocked(r);
-    }
-    // A crashed atomic write never owns source data. Only our named temp files are removed.
-    for (const name of fs.readdirSync(this.root)) if (TMP_NAME.test(name)) { try { fs.unlinkSync(this.file(name)); } catch { /* residue */ } }
-    for (const name of fs.readdirSync(this.idsDir)) if (TMP_NAME.test(name)) { try { fs.unlinkSync(path.join(this.idsDir, name)); } catch { /* residue */ } }
+  /** Durable record for a job that contention kept out of the spool; folded into the loss manifest. */
+  private spill(job: LocalJob): void {
+    try {
+      fs.mkdirSync(this.spillDir, { recursive: true, mode: 0o700 });
+      this.writeDerived(path.join(this.spillDir, `${Date.now()}-${randomUUID()}.json`), { reason: 'busy', occurredAt: job.occurredAt });
+    } catch { /* the rethrown busy error remains the truthful signal */ }
   }
 
-  async maintain(now = this.now()): Promise<void> { await this.locked(() => this.maintainLocked(now)); }
+  /** Durable loss record before spill markers are removed (D5 ordering). */
+  private foldSpillsLocked(): void {
+    if (!fs.existsSync(this.spillDir)) return;
+    const entries: { occurredAt: string }[] = [];
+    for (const name of fs.readdirSync(this.spillDir)) {
+      const file = path.join(this.spillDir, name);
+      try { entries.push(spillSchema.parse(this.readBounded(file)) as { occurredAt: string }); }
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.quarantine(file);
+      }
+    }
+    if (!entries.length) return;
+    this.loss('busy', entries);
+    for (const name of fs.readdirSync(this.spillDir)) { try { fs.unlinkSync(path.join(this.spillDir, name)); } catch { /* gone */ } }
+  }
+
+  private sweepTmpLocked(): void {
+    for (const dir of [this.root, this.idsDir, this.pendingDir, this.spillDir]) {
+      if (!fs.existsSync(dir)) continue;
+      for (const name of fs.readdirSync(dir)) if (TMP_NAME.test(name)) { try { fs.unlinkSync(path.join(dir, name)); } catch { /* residue */ } }
+    }
+  }
+
+  /**
+   * Two-phase maintenance: the full spool scan runs OUTSIDE the shared lock;
+   * only bounded per-record revalidation and writes hold it. D5: the loss
+   * manifest is durably recorded before any expired spool is discarded.
+   */
+  async maintain(now = this.now()): Promise<void> {
+    await this.ready();
+    const expired = this.records()
+      .filter(r => Date.parse(r.job.occurredAt) < now - this.config.maxAgeDays * 86400000)
+      .map(r => r.key);
+    await this.locked(() => {
+      const doomed: JournalRecord[] = [];
+      for (const key of expired) {
+        const r = this.readRecord(key);
+        if (r && Date.parse(r.job.occurredAt) < now - this.config.maxAgeDays * 86400000) doomed.push(r);
+      }
+      if (doomed.length) {
+        this.loss('expired', doomed.map(r => r.job));
+        for (const r of doomed) this.deleteRecordLocked(r);
+      }
+      this.foldSpillsLocked();
+      this.sweepTmpLocked();
+    });
+  }
 
   async enqueue(value: LocalJob): Promise<'created' | 'existing'> {
     const job = prepareJob(value);
     if (job.leaseToken || job.attempt !== 0) throw new Error('new job cannot carry lease or attempt');
-    return this.locked(() => {
-      const time = Date.parse(job.occurredAt);
-      if (time > this.now() + 300000) throw new Error('future occurrence');
-      if (time < this.now() - this.config.maxAgeDays * 86400000) {
-        this.loss('expired', [job]);
-        throw new Error('expired signal');
-      }
-      const key = jobKey(job);
-      if (this.excluded(job) || this.readRecord(key)) return 'existing';
-      const conflictKey = this.readIdIndex(job.id);
-      if (conflictKey) {
-        if (this.readRecord(conflictKey)) throw new Error('job id conflict');
-        // Pointer orphaned by a crash between index and journal writes.
-      }
-      const record: JournalRecord = { key, job, state: 'pending' };
-      const indexBytes = Buffer.byteLength(JSON.stringify({ key }));
-      this.reserveLocked(Buffer.byteLength(JSON.stringify(record)) + indexBytes, job);
-      this.writeDerived(this.idFile(job.id), { key });
-      this.write(key + '.json', record);
-      return 'created';
-    });
+    try {
+      await this.ready(ENQUEUE_LOCK_BUDGET_MS);
+      return await this.locked(() => {
+        const time = Date.parse(job.occurredAt);
+        if (time > this.now() + 300000) throw new Error('future occurrence');
+        if (time < this.now() - this.config.maxAgeDays * 86400000) {
+          this.loss('expired', [job]);
+          throw new Error('expired signal');
+        }
+        const key = jobKey(job);
+        if (this.excluded(job) || this.readRecord(key)) return 'existing';
+        const conflictKey = this.readIdIndex(job.id);
+        if (conflictKey) {
+          if (this.readRecord(conflictKey)) throw new Error('job id conflict');
+          // Pointer orphaned by a crash between index and journal writes.
+        }
+        const record: JournalRecord = { key, job, state: 'pending' };
+        const indexBytes = Buffer.byteLength(JSON.stringify({ key }));
+        this.reserveLocked(Buffer.byteLength(JSON.stringify(record)) + indexBytes, job);
+        this.writeDerived(this.idFile(job.id), { key });
+        // Marker before journal: a crash leaves an orphan marker (age-pruned),
+        // never a journal invisible to the worker.
+        this.writeMarker(record);
+        this.write(key + '.json', record);
+        return 'created';
+      }, ENQUEUE_LOCK_BUDGET_MS);
+    } catch (e) {
+      // Bounded busy budget exhausted under contention: never drop silently.
+      if (e instanceof Error && e.message === 'queue busy') this.spill(job);
+      throw e;
+    }
   }
 
   async claim(now: number, leaseMs: number, kinds?: readonly ObservationKind[]): Promise<LocalJob | null> {
     if (!Number.isFinite(leaseMs) || leaseMs <= 0 || leaseMs > 10000) throw new Error('invalid lease');
-    return this.locked(() => {
-      this.maintainLocked(now);
-      if (!this.options.policy().enrichmentEnabled) return null;
-      let exclusions: Exclusions;
-      // Corrupt tombstone state fails closed: the worker idles until C7 reinstalls it.
-      try { exclusions = this.exclusions(); } catch { return null; }
-      for (const r of this.records()) {
-        if ((kinds && !kinds.includes(r.job.kind)) || this.excluded(r.job, exclusions) || r.job.notBefore > now
-          || r.state === 'complete' || r.state === 'dead' || (r.state === 'leased' && (r.leaseUntil ?? 0) > now)) continue;
-        const job = { ...r.job, leaseToken: randomUUID() };
-        this.commitJournalLocked(r.key, { ...r, job, state: 'leased', leaseUntil: now + leaseMs }, null);
-        return job;
-      }
-      return null;
-    });
+    await this.ready();
+    if (!this.options.policy().enrichmentEnabled) return null;
+    let exclusions: Exclusions;
+    // Corrupt tombstone state fails closed: the worker idles until C7 reinstalls it.
+    try { exclusions = this.exclusions(); } catch { return null; }
+    for (const key of this.scanPending(now, kinds, exclusions)) {
+      const job = await this.locked(() => {
+        const r = this.readRecord(key);
+        if (!r || (kinds && !kinds.includes(r.job.kind)) || this.excluded(r.job) || r.job.notBefore > now
+          || r.state === 'complete' || r.state === 'dead' || (r.state === 'leased' && (r.leaseUntil ?? 0) > now)) return null;
+        const leased = { ...r, job: { ...r.job, leaseToken: randomUUID() }, state: 'leased' as const, leaseUntil: now + leaseMs };
+        this.commitJournalLocked(r.key, leased, null);
+        this.dropMarker(r);
+        this.writeMarker(leased);
+        return leased.job;
+      });
+      if (job) return job;
+    }
+    return null;
   }
 
   private claimed(id: string, token: string): JournalRecord {
@@ -383,6 +554,7 @@ export class JobStore {
   async complete(id: string, value: Observation, leaseToken: string): Promise<void> {
     const observation = validateObservation(maskEvidence(validateObservation(value)));
     if (Buffer.byteLength(JSON.stringify(observation)) > 65536) throw new Error('observation too large');
+    await this.ready();
     await this.locked(() => {
       const r = this.claimed(id, leaseToken);
       if (r.state === 'complete') return;
@@ -396,31 +568,37 @@ export class JobStore {
         throw new Error('observation provenance mismatch');
       }
       this.commitJournalLocked(r.key, { ...r, state: 'complete', result: observation }, r.job);
+      this.dropMarker(r);
     });
   }
 
   async retry(id: string, token: string): Promise<void> {
+    await this.ready();
     await this.locked(() => {
       const r = this.claimed(id, token);
       if (r.state === 'complete') return;
       const attempt = r.job.attempt + 1;
-      this.commitJournalLocked(r.key, {
+      const next: JournalRecord = {
         ...r,
         state: attempt >= 5 ? 'dead' : 'pending',
         job: { ...r.job, attempt, leaseToken: undefined, notBefore: this.now() + Math.min(60000, 1000 * 2 ** attempt) },
         leaseUntil: undefined,
-      }, null);
+      };
+      this.commitJournalLocked(r.key, next, null);
+      this.dropMarker(r);
+      this.writeMarker(next);
     });
   }
 
-  async losses(): Promise<LossState[]> { return this.locked(() => this.readLosses()); }
+  async losses(): Promise<LossState[]> { await this.ready(); return this.locked(() => this.readLosses()); }
 
   /** Only the authenticated C7 deletion synchronizer may call this after fetching current exclusions. */
   async synchronizeTombstones(revision: string, values: readonly Tombstone[]): Promise<void> {
     operationalRevision(revision);
     if (values.length > 10000) throw new Error('too many tombstones');
     const parsed = values.map(v => tombstoneSchema.parse(v));
-    await this.locked(() => {
+    await this.ready();
+    const exclusions = await this.locked(() => {
       const policy = this.options.policy();
       if (!policy.enrichmentEnabled || policy.deletionRevision !== revision) throw new Error('exclusion revision mismatch');
       // A quarantined corrupt tombstone state loses no authority: the server
@@ -435,11 +613,19 @@ export class JobStore {
         ...(t.workspacePath ? { workspacePath: digest(t.workspacePath) } : {}),
       });
       if (map.size > 10000) throw new Error('tombstone capacity exceeded');
-      const exclusions: Exclusions = { revision, tombstones: [...map.values()] };
-      this.write('exclusions.json', exclusions); // Durable authority precedes deletion, including crash recovery.
+      const next: Exclusions = { revision, tombstones: [...map.values()] };
+      this.write('exclusions.json', next); // Durable authority precedes deletion, including crash recovery.
       this.exclusionsCache = null;
       this.exclusionsUntrusted = false;
-      for (const r of this.records()) if (this.excluded(r.job, exclusions)) this.deleteRecordLocked(r);
+      return next;
+    });
+    // Deletion phase: the scan stays outside the lock; per-record drops are bounded.
+    const doomed = this.records().filter(r => this.excluded(r.job, exclusions)).map(r => r.key);
+    await this.locked(() => {
+      for (const key of doomed) {
+        const r = this.readRecord(key);
+        if (r && this.excluded(r.job, exclusions)) this.deleteRecordLocked(r);
+      }
       if (this.options.policy().deletionRevision !== revision) throw new Error('exclusion revision changed');
       this.synchronizedRevision = revision;
     });
@@ -447,19 +633,18 @@ export class JobStore {
 
   invalidateReplay(): void { this.synchronizedRevision = null; }
 
+  /** Read-only replay view; maintenance stays bounded and outside the shared lock. */
   async replayBatch(limit = 100): Promise<Observation[]> {
-    return this.locked(() => {
-      const p = this.options.policy();
-      if (!p.replayEnabled || !p.deletionRevision || this.synchronizedRevision !== p.deletionRevision) return [];
-      let exclusions: Exclusions;
-      try { exclusions = this.exclusions(); } catch { return []; }
-      if (exclusions.revision !== p.deletionRevision) return [];
-      this.maintainLocked(this.now());
-      return this.records()
-        .filter(r => r.state === 'complete' && r.result && !this.excluded(r.job, exclusions))
-        .slice(0, Math.max(0, Math.min(100, limit)))
-        .map(r => r.result!);
-    });
+    await this.maintain();
+    const p = this.options.policy();
+    if (!p.replayEnabled || !p.deletionRevision || this.synchronizedRevision !== p.deletionRevision) return [];
+    let exclusions: Exclusions;
+    try { exclusions = this.exclusions(); } catch { return []; }
+    if (exclusions.revision !== p.deletionRevision) return [];
+    return this.records()
+      .filter(r => r.state === 'complete' && r.result && !this.excluded(r.job, exclusions))
+      .slice(0, Math.max(0, Math.min(100, limit)))
+      .map(r => r.result!);
   }
 
   private exclusions(): Exclusions {

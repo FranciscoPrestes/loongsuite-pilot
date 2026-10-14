@@ -104,5 +104,28 @@ describe('durable enrichment queue',()=>{
   await fresh.complete(claimed.id,observation(claimed),claimed.leaseToken!);
   expect(await observationsFor(dir,'job-1')).toHaveLength(1);
   await expect(fresh.enqueue(job({id:'job-1',dedupeKey:'other'}))).rejects.toThrow('conflict');});
+ it('records a truthful busy loss instead of silently dropping enqueues while a worker holds the lock',async()=>{
+  const a=store();await a.enqueue(job());
+  const {acquireSingleInstanceLock}=await import('../../../src/utils/single-instance-lock.js');
+  // The lock hold simulates a concurrent worker's maintenance window on the shared spool lock.
+  const held=acquireSingleInstanceLock(path.join(dir,'enrichment','queue.lock'));
+  expect(held.lock).not.toBeNull();
+  try{
+   const attempts=await Promise.allSettled(Array.from({length:5},(_,i)=>store().enqueue(job({id:`busy-${i}`,dedupeKey:`busy-${i}`}))));
+   expect(attempts.every(r=>r.status==='rejected')).toBe(true);
+  }finally{held.lock!.release();}
+  await store().maintain(now);
+  expect((await store().losses()).find(l=>l.reason==='busy')).toMatchObject({count:5,unreported:false});
+  // Accounting: attempted = created journals + recorded losses; nothing vanished.
+  const journals=(await fs.readdir(path.join(dir,'enrichment'))).filter(f=>/^[a-f0-9]{64}\.json$/.test(f));
+  expect(journals).toHaveLength(1);});
+ it('recovers transient lock contention in budget instead of losing the job',async()=>{
+  const a=store();await a.enqueue(job());
+  const {acquireSingleInstanceLock}=await import('../../../src/utils/single-instance-lock.js');
+  const held=acquireSingleInstanceLock(path.join(dir,'enrichment','queue.lock'));
+  setTimeout(()=>held.lock!.release(),120);
+  // Contention outlives one 80ms acquisition window but not the bounded enqueue budget.
+  expect(await store().enqueue(job({id:'retry-job',dedupeKey:'retry-event'}))).toBe('created');
+  expect((await store().losses()).find(l=>l.reason==='busy')).toBeUndefined();});
 
 });

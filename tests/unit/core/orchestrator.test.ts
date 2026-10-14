@@ -367,7 +367,6 @@ describe('Orchestrator', () => {
         }] as unknown as AgentActivityEntry[];
         input.emit('entries', entries2);
         expect((await flushed).count).toBe(1); // base capture still flows with enrichment disabled
-        console.error('STEP flushed');
       } finally { await orch.stop(); }
     });
 

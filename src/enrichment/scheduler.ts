@@ -20,7 +20,8 @@ export class EnrichmentScheduler {
   const job=await this.store.claim(Date.now(),this.config.timeoutMs+1000,[...this.handlers.keys()]);if(!job)return;
   const controller=new AbortController();this.active=controller;
   try{const result=await this.run(job,controller.signal);if(!this.stopping&&!controller.signal.aborted&&this.options.policy().enrichmentEnabled)await this.store.complete(job.id,result,job.leaseToken!);}
-  catch{await this.store.retry(job.id,job.leaseToken!).catch(()=>{});}
+  catch{ // A stop-initiated abort is a shutdown, not a failed attempt; only real failures burn retries.
+   if(!this.stopping)await this.store.retry(job.id,job.leaseToken!).catch(()=>{});}
   finally{this.active=null;}
  }
  async run(job:LocalJob,signal:AbortSignal):Promise<Observation>{

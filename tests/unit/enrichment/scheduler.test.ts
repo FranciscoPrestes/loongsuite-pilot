@@ -18,4 +18,28 @@ describe('bounded scheduler',()=>{
   const aborted=new AbortController();aborted.abort();
   await expect(scheduler.run(fresh,aborted.signal)).rejects.toThrow('worker aborted');
   const drain=scheduler.tick();expect(scheduler.tick()).toBe(drain);await drain;});
+ it('does not count a stop-initiated abort as a failed attempt',async()=>{
+  const store=new JobStore(dir,{policy});const scheduler=new EnrichmentScheduler(store,{policy});
+  scheduler.register('repo_snapshot',async(j,s)=>{await new Promise(()=>{});return observation(j);});
+  await store.enqueue(job({occurredAt:new Date().toISOString()}));
+  const pending=scheduler.tick();await new Promise(r=>setTimeout(r,30));
+  await scheduler.stop();await pending;
+  // After the lease expires the job is reclaimed untouched by the shutdown.
+  const claimed=(await store.claim(Date.now()+5000,2000))!;
+  expect(claimed.id).toBe('job-1');
+  expect(claimed.attempt).toBe(0);});
+ it('accounts for every job under a concurrent worker instead of dropping any',async()=>{
+  const store=new JobStore(dir,{policy});const scheduler=new EnrichmentScheduler(store,{policy});
+  scheduler.register('repo_snapshot',async(j,s)=>{await new Promise(r=>setTimeout(r,15));return observation(j);});
+  scheduler.start();
+  try{
+   const results=await Promise.all(Array.from({length:20},(_,i)=>store.enqueue(job({id:`w-${i}`,dedupeKey:`w-${i}`}))));
+   expect(results).toEqual(Array.from({length:20},()=>'created'));
+   const completed=async()=>(await Promise.all(Array.from({length:20},(_,i)=>observationsFor(dir,`w-${i}`)))).filter(a=>a.length===1).length;
+   const deadline=Date.now()+8000;
+   while(Date.now()<deadline&&await completed()<20){await scheduler.tick();}
+   expect(await completed()).toBe(20);
+   expect((await store.losses()).find(l=>l.reason==='busy')).toBeUndefined();
+  }finally{await scheduler.stop();}});
+
 });
