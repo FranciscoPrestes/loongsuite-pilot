@@ -61,7 +61,8 @@ export class DesiredStateReconciler {
           status = { ...status, detected: true };
           if (await this.options.deployment.needsRedeploy(def)) {
             const result = await this.options.deployment.deploySingle(def);
-            status = { ...status, state: result.reason === 'disabled' ? 'disabled' : result.success && result.reason !== 'not-detected' ? 'configured' : 'error', repairResult: result.success ? 'repaired' : 'failed',
+            status = { ...status, state: result.reason === 'disabled' ? 'disabled' : result.success && result.reason !== 'not-detected' ? 'configured' : 'error', repairResult: result.reason === 'disabled' ? 'disabled' : result.success ? 'repaired' : 'failed',
+              ...(result.reason === 'disabled' ? { reason: 'native_disabled' } : {}),
               ...(result.error ? { reason: result.error } : {}) };
           } else {
             status = { ...status, state: def.deployMode === 'detection-only' ? 'detected' : 'configured' };

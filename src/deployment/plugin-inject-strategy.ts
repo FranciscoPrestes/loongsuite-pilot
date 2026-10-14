@@ -77,6 +77,19 @@ function stripJsoncComments(text: string): string {
   return result;
 }
 
+/** An explicit host/user opt-out is never a repair target. Check every fresh attempt. */
+export function isOpenClawInstrumentationDisabled(json: Record<string, unknown>, pluginId: string): boolean {
+  const plugins = json.plugins;
+  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return false;
+  const config = plugins as Record<string, unknown>;
+  if (config.enabled === false) return true;
+  const entries = config.entries;
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return false;
+  const owned = (entries as Record<string, unknown>)[pluginId];
+  return !!owned && typeof owned === 'object' && !Array.isArray(owned) && (owned as Record<string, unknown>).enabled === false;
+}
+class NativeInstrumentationDisabled extends Error {}
+
 export class PluginInjectStrategy implements DeployStrategy {
   private readonly dataDir: string;
   private lastOpenClawProblem?: string;
@@ -162,8 +175,10 @@ export class PluginInjectStrategy implements DeployStrategy {
 
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
       await updateJsonConfig(configPath, json => {
-        if (this.isOpenclawNested(config)) this.openclawInject(json, resolvedSpec, config, host!);
-        else this.flatArrayInject(json, resolvedSpec, config);
+        if (this.isOpenclawNested(config)) {
+          if (isOpenClawInstrumentationDisabled(json, config.pluginId)) throw new NativeInstrumentationDisabled();
+          this.openclawInject(json, resolvedSpec, config, host!);
+        } else this.flatArrayInject(json, resolvedSpec, config);
         return json;
       }, 'jsonc', '.bak');
       logger.info('plugin configured', { agentId: def.id, configPath });
@@ -174,6 +189,7 @@ export class PluginInjectStrategy implements DeployStrategy {
         pluginInjectConfigPath: path.resolve(configPath),
       };
     } catch (err) {
+      if (err instanceof NativeInstrumentationDisabled) return { success: true, agentId: def.id, deployMode: 'plugin-inject', skipped: true, reason: 'disabled' };
       return { success: false, agentId: def.id, deployMode: 'plugin-inject', error: String(err) };
     }
   }

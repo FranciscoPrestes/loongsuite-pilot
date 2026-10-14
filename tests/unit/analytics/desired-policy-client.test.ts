@@ -65,4 +65,17 @@ describe('DesiredPolicyClient',()=>{
  credential='Bearer another-key';await client.refresh();expect(client.getState().policy).toBeNull();expect(client.effective(true).enrichmentEnabled).toBe(false);
  });
 
+ it.each([401,403])('persists authentication denial %s across offline restart until authenticated success',async status=>{
+  let stored:any=null;const cache={load:async()=>structuredClone(stored),save:async(state:unknown)=>{stored=structuredClone(state);}};
+  const first=new DesiredPolicyClient({baseUrl:'https://portal.test',deviceId:'device',authorization:()=> 'Bearer fixture',fetch:vi.fn().mockResolvedValueOnce(response(policy())).mockResolvedValueOnce(response(null,status)),now:()=>now,cache});
+  await first.refresh();await first.refresh();expect(first.effective(true)).toMatchObject({enrichmentEnabled:false,reason:'unauthorized',baseTelemetryEnabled:true});
+  const restartedFetcher=vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(response(policy()));
+  const restarted=new DesiredPolicyClient({baseUrl:'https://portal.test',deviceId:'device',authorization:()=> 'Bearer fixture',fetch:restartedFetcher,now:()=>now,cache});
+  await restarted.refresh();expect(restarted.effective(true)).toMatchObject({enrichmentEnabled:false,replayEnabled:false,reason:'unauthorized',baseTelemetryEnabled:true});
+  expect(stored.authorizationDenied).toBe(true);expect(JSON.stringify(stored)).not.toContain('Bearer fixture');
+  await restarted.refresh();expect(restarted.effective(true).enrichmentEnabled).toBe(true);expect(stored.authorizationDenied).toBe(false);
+  const healthyRestart=new DesiredPolicyClient({baseUrl:'https://portal.test',deviceId:'device',authorization:()=> 'Bearer fixture',fetch:vi.fn().mockRejectedValue(new Error('offline')),now:()=>now,cache});
+  await healthyRestart.refresh();expect(healthyRestart.effective(true).enrichmentEnabled).toBe(true);
+ });
+
 });

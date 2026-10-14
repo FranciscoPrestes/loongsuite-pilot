@@ -9,7 +9,7 @@ import type {
 import { AgentDefLoader, type AgentDefLoaderOptions } from './agent-def-loader.js';
 import { HookStrategy } from './hook-strategy.js';
 import { PluginProbeStrategy } from './plugin-probe-strategy.js';
-import { PluginInjectStrategy } from './plugin-inject-strategy.js';
+import { PluginInjectStrategy, isOpenClawInstrumentationDisabled } from './plugin-inject-strategy.js';
 import { DirectoryPluginStrategy } from './directory-plugin-strategy.js';
 import { DetectionOnlyStrategy } from './detection-only-strategy.js';
 import { DshYamlPatchStrategy } from './dsh-yaml-patch-strategy.js';
@@ -229,9 +229,8 @@ export class DeploymentManager {
     if (def.deployMode === 'plugin-inject' && def.pluginInject?.configShape === 'openclaw-nested') {
       const configPath = await this.pluginInjectStrategy.resolveExistingConfigPath(def.pluginInject);
       if (!configPath) return false;
-      const document = await readJsonDocument<{ plugins?: { enabled?: boolean; entries?: Record<string, { enabled?: boolean }> } }>(configPath, 'jsonc');
-      const value = document.status === 'ok' ? document.data : null;
-      return value?.plugins?.enabled === false || value?.plugins?.entries?.[def.pluginInject.pluginId]?.enabled === false;
+      const document = await readJsonDocument<Record<string, unknown>>(configPath, 'jsonc');
+      return document.status === 'ok' && isOpenClawInstrumentationDisabled(document.data, def.pluginInject.pluginId);
     }
     return false;
   }
@@ -327,6 +326,7 @@ export class DeploymentManager {
       ? await this.dshYamlPatchStrategy.deployAt(def, dshTarget)
       : await strategy.deploy(def);
 
+    if (result.reason === 'disabled') return result;
     if (result.success) {
       const newRecord: DeployedAgentRecord = {
         deployMode: def.deployMode,

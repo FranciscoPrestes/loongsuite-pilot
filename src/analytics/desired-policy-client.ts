@@ -25,7 +25,8 @@ export interface DesiredPolicyClientOptions {
   fetch?: typeof fetch; now?: () => number; bundleCompatible?: (version: string) => boolean;
   cache?: { load: () => Promise<unknown>; save: (state: PolicyCache) => Promise<void> };
 }
-export interface PolicyCache { policy: InstrumentationPolicy; etag: string | null; lastHealthyAt: number; portalOrigin: string; credentialFingerprint: string }
+export interface PolicyCache { policy: InstrumentationPolicy | null; etag: string | null; lastHealthyAt: number | null;
+  portalOrigin: string; credentialFingerprint: string; authorizationDenied: boolean }
 async function boundedPolicyBody(response: Response): Promise<unknown> {
   if (!response.body) return response.json(); // injectable fixture transport
   const reader = response.body.getReader();
@@ -90,6 +91,8 @@ export class DesiredPolicyClient {
         try {
           const stored = await this.options.cache?.load() as Partial<PolicyCache> | null;
           if (stored && stored.credentialFingerprint === fingerprint && stored.portalOrigin === new URL(this.endpoint).origin) {
+            // A denial is authority even without a cached policy, or with an expired/corrupt one.
+            this.authorizationDenied = stored.authorizationDenied === true;
             const parsed = instrumentationPolicySchema.parse(stored.policy);
             operationalRevision(parsed.revision); operationalRevision(parsed.deletionRevision);
             if (parsed.deviceId !== null && (!this.options.deviceId || parsed.deviceId === this.options.deviceId) && typeof stored.lastHealthyAt === 'number' &&
@@ -103,8 +106,16 @@ export class DesiredPolicyClient {
       const response = await this.fetcher(this.endpoint, { method: 'GET', redirect: 'error',
         headers: { Authorization: authorization, Accept: 'application/json', ...(this.etag ? { 'If-None-Match': this.etag } : {}) },
         signal: AbortSignal.timeout(2000) });
-      if (response.status === 401 || response.status === 403) { this.reason = 'unauthorized'; this.authorizationDenied = true; return; }
-      if (response.status === 304 && this.policy) { this.lastHealthyAt = this.now(); this.reason = 'ready'; this.authorizationDenied = false; return; }
+      if (response.status === 401 || response.status === 403) {
+        this.reason = 'unauthorized'; this.authorizationDenied = true;
+        await this.persistAuthority();
+        return;
+      }
+      if (response.status === 304 && this.policy) {
+        this.lastHealthyAt = this.now(); this.reason = 'ready'; this.authorizationDenied = false;
+        await this.persistAuthority().catch(() => {});
+        return;
+      }
       if (!response.ok || response.status !== 200) { this.reason = 'offline'; return; }
       const body: unknown = await boundedPolicyBody(response);
       if (Buffer.byteLength(JSON.stringify(body)) > 64 * 1024) throw new Error('policy too large');
@@ -115,10 +126,16 @@ export class DesiredPolicyClient {
       if (this.policy && (revision < operationalRevision(this.policy.revision) || deletionRevision < operationalRevision(this.policy.deletionRevision) ||
         (revision === operationalRevision(this.policy.revision) && canonical(next) !== canonical(this.policy)))) throw new Error('policy revision conflict');
       this.policy = next; this.etag = response.headers.get('ETag'); this.lastHealthyAt = this.now(); this.reason = 'ready'; this.authorizationDenied = false;
-      await this.options.cache?.save({ policy: next, etag: this.etag, lastHealthyAt: this.lastHealthyAt, portalOrigin: new URL(this.endpoint).origin, credentialFingerprint: fingerprint }).catch(() => {});
+      await this.persistAuthority().catch(() => {});
     } catch (error) {
       this.reason = error instanceof TypeError || (error instanceof Error && /offline|fetch|timeout|abort/i.test(error.message)) ? 'offline' : 'invalid_policy';
     }
+  }
+  private async persistAuthority(): Promise<void> {
+    if (this.credentialFingerprint === null) return;
+    await this.options.cache?.save({ policy: this.policy, etag: this.etag, lastHealthyAt: this.lastHealthyAt,
+      portalOrigin: new URL(this.endpoint).origin, credentialFingerprint: this.credentialFingerprint,
+      authorizationDenied: this.authorizationDenied });
   }
   getState(): { policy: InstrumentationPolicy | null; reason: PolicyReason; lastHealthyAt: number | null } {
     return { policy: this.policy ? structuredClone(this.policy) : null, reason: this.reason, lastHealthyAt: this.lastHealthyAt };

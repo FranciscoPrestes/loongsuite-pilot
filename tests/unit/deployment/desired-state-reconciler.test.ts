@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DesiredStateReconciler } from '../../../src/deployment/desired-state-reconciler.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
+import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
 import { HookManager } from '../../../src/hooks/hook-manager.js';
 import * as io from '../../../src/utils/fs-utils.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
@@ -66,6 +67,34 @@ describe('DesiredStateReconciler', () => {
   const def:AgentDefinition={id:'fixture',displayName:'fixture',deployMode:'plugin-inject',detection:{paths:[],commands:[]},pluginInject:{configPaths:[file],pluginSpec:'file://'+tmp+'/owned.mjs',pluginId:'owned',configShape:'openclaw-nested'}};
   const {deployment,reconciler}=runtime(def);const deploy=vi.spyOn(deployment,'deploySingle');const before=await fs.readFile(file);
   expect((await reconciler.reconcile('timer'))[0].state).toBe('disabled');expect(deploy).not.toHaveBeenCalled();expect(await fs.readFile(file)).toEqual(before);
+ });
+
+ it.each(['global','owned'] as const)('preserves concurrent %s opt-out after preflight and reports disabled',async target=>{
+  const file=path.join(tmp,'openclaw.jsonc');await fs.writeFile(file,'{"user":"keep","plugins":{}}');
+  const disabledBytes=Buffer.from(target==='global' ? '{// user opt-out\n"user":"keep","plugins":{"enabled":false}}' : '{// user opt-out\n"user":"keep","plugins":{"entries":{"owned":{"enabled":false}}}}');
+  const def:AgentDefinition={id:'fixture',displayName:'fixture',deployMode:'plugin-inject',detection:{paths:[],commands:[]},pluginInject:{configPaths:[file],pluginSpec:'file://'+tmp+'/owned.mjs',pluginId:'owned',configShape:'openclaw-nested'}};
+  const {deployment,reconciler}=runtime(def);
+  Object.assign(deployment,{pluginInjectStrategy:new PluginInjectStrategy(tmp,tmp,async()=>({version:'2026.5.12',adapter:'modern',conversationAccess:true,source:'test',binding:'explicit-entry',executable:path.join(tmp,'openclaw.mjs')}))});
+  const preflight=deployment.isInstrumentationExplicitlyDisabled.bind(deployment);let checks=0;
+  vi.spyOn(deployment,'isInstrumentationExplicitlyDisabled').mockImplementation(async definition=>{
+    const wasDisabled=await preflight(definition);if(++checks===2)await fs.writeFile(file,disabledBytes);return wasDisabled;
+  });
+  const status=(await reconciler.reconcile('timer'))[0];expect(status).toMatchObject({state:'disabled',repairResult:'disabled'});
+  expect(await fs.readFile(file)).toEqual(disabledBytes);expect(JSON.parse(await fs.readFile(path.join(tmp,'data','deployed-agents.json'),'utf8')).fixture).toBeUndefined();
+ });
+ it.each(['global','owned'] as const)('preserves concurrent %s opt-out on fresh compare retry and reports disabled',async target=>{
+  const file=path.join(tmp,'openclaw.jsonc');await fs.writeFile(file,'{"user":"keep","plugins":{}}');
+  const disabledBytes=Buffer.from(target==='global' ? '{// user opt-out\n"user":"keep","plugins":{"enabled":false}}' : '{// user opt-out\n"user":"keep","plugins":{"entries":{"owned":{"enabled":false}}}}');
+  const def:AgentDefinition={id:'fixture',displayName:'fixture',deployMode:'plugin-inject',detection:{paths:[],commands:[]},pluginInject:{configPaths:[file],pluginSpec:'file://'+tmp+'/owned.mjs',pluginId:'owned',configShape:'openclaw-nested'}};
+  const {deployment,reconciler}=runtime(def);
+  Object.assign(deployment,{pluginInjectStrategy:new PluginInjectStrategy(tmp,tmp,async()=>({version:'2026.5.12',adapter:'modern',conversationAccess:true,source:'test',binding:'explicit-entry',executable:path.join(tmp,'openclaw.mjs')}))});
+  const original=io.writeTextFileAtomic;let attempts=0;
+  vi.spyOn(io,'writeTextFileAtomic').mockImplementation(async(...args)=>{
+    if(args[0]===file && ++attempts===1) await fs.writeFile(file,disabledBytes);
+    return original(...args);
+  });
+  const status=(await reconciler.reconcile('timer'))[0];expect(status).toMatchObject({state:'disabled',repairResult:'disabled'});
+  expect(await fs.readFile(file)).toEqual(disabledBytes);expect(attempts).toBe(1);expect(JSON.parse(await fs.readFile(path.join(tmp,'data','deployed-agents.json'),'utf8')).fixture).toBeUndefined();
  });
 
 });
