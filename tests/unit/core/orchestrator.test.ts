@@ -76,7 +76,8 @@ vi.mock('../../../src/dashboard/index.js', () => ({
 const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
 const mockResolveHome = vi.fn((p: string) => p.replace(/^~/, os.homedir()));
 
-vi.mock('../../../src/utils/fs-utils.js', () => ({
+vi.mock('../../../src/utils/fs-utils.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/utils/fs-utils.js')>(),
   ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
   resolveHome: (p: string) => mockResolveHome(p),
   readJsonFile: vi.fn().mockResolvedValue(null),
@@ -274,6 +275,19 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('keeps command-only deployment discovery and starts the real sixty-second reconciler', async () => {
+      const orch = new Orchestrator(makeConfig({ dataDir: path.join(homeDir, 'pilot-data') }));
+      try {
+        await orch.start();
+        const commandOnly = discoveryEntries.find(entry => entry.id === 'deploy:cursor-cli');
+        expect(commandOnly).toBeDefined(); expect(commandOnly!.watchPaths).toEqual([]);
+        expect(orch.getDesiredStateReconciler()?.nextTickMs).toBe(60_000);
+        expect(orch.getDesiredStateReconciler()?.getEffectivePolicy()).toMatchObject({ enrichmentEnabled: false, baseTelemetryEnabled: true });
+        const reconcile = vi.spyOn(orch.getDesiredStateReconciler()!, 'reconcile');
+        discoveryHandlers['discovery:refreshed'](); expect(reconcile).toHaveBeenCalledWith('discovery');
+      } finally { await orch.stop(); }
+    });
+
     it('creates a detected OpenCode config only inside the isolated home', async () => {
       const binDir = path.join(homeDir, 'bin');
       fs.mkdirSync(binDir);

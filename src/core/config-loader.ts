@@ -91,6 +91,7 @@ export interface InnerDataConfig {
  * All fields optional — missing fields fall back to env vars then defaults.
  */
 export interface ConfigFile {
+  instrumentation?: AnalyticsConfig['instrumentation'];
   enabled?: boolean;
   dataDir?: string;
   userId?: string;
@@ -319,6 +320,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
         }
       : undefined,
     autoUpdate: buildAutoUpdateConfig(file),
+    instrumentation: buildInstrumentationConfig(file),
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
@@ -1476,4 +1478,18 @@ export function buildAutoUpdateConfig(
     canaryPolicy: file?.canary?.policy,
     canaryHotfixVersion: file?.canary?.hotfix_version ?? 0,
   };
+}
+
+/** Invalid governance config pauses analytics and cannot affect base telemetry. */
+export function buildInstrumentationConfig(file: ConfigFile | null | undefined): AnalyticsConfig['instrumentation'] {
+  const value = file?.instrumentation;
+  if (!value) return undefined;
+  try {
+    const origin = new URL(value.portalBaseUrl);
+    if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/' ||
+      typeof value.localEnabled !== 'boolean' || (value.deviceId !== undefined && (typeof value.deviceId !== 'string' || !value.deviceId.length || value.deviceId.length > 500)) ||
+      (value.authorization !== undefined && (typeof value.authorization !== 'string' || !/^Bearer [^\r\n]+$/.test(value.authorization)))) return undefined;
+    return { localEnabled: value.localEnabled, portalBaseUrl: origin.origin, ...(value.deviceId ? { deviceId: value.deviceId } : {}),
+      ...(value.authorization ? { authorization: value.authorization } : {}) };
+  } catch { return undefined; }
 }

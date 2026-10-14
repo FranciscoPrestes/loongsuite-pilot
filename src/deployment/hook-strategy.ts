@@ -12,12 +12,11 @@ import { withClaudeSettingsLock, quoteClaudeHookPath, legacyClaudeHookPaths } fr
 import {
   fileExists,
   readJsonFile,
-  writeJsonFile,
-  writeTextFileAtomic,
   resolveHome,
   ensureDir,
 } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
+import { updateJsonConfig } from './config-repair.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
 import {
@@ -573,39 +572,39 @@ export class HookStrategy implements DeployStrategy {
     // NOTE: $PILOT_DATA tokens in `env` values are already resolved by
     // AgentDefLoader.resolveVariables() before the config reaches here
     // (see agent-def-loader.ts), so no further expansion is needed.
-    const existing =
-      (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
-    const envBlock =
-      (existing.env as Record<string, string> | undefined) ?? {};
-    let changed = false;
+    await updateJsonConfig(settingsPath, existing => {
+      const envBlock =
+        (existing.env as Record<string, string> | undefined) ?? {};
+      let changed = false;
 
-    for (const [key, value] of Object.entries(env)) {
-      if (key === 'BUN_OPTIONS') {
-        const current = envBlock[key];
-        if (typeof current === 'string' && current.length > 0) {
-          // Match against full whitespace-delimited tokens to avoid a
-          // superstring false-positive (e.g., `...intercept.mjs-debug`
-          // would otherwise be treated as already containing our path).
-          const ourTokens = value.split(/\s+/).filter(Boolean);
-          const currentTokens = current.split(/\s+/).filter(Boolean);
-          if (ourTokens.every((t) => currentTokens.includes(t))) {
-            continue; // already injected (exact tokens present)
+      for (const [key, value] of Object.entries(env)) {
+        if (key === 'BUN_OPTIONS') {
+          const current = envBlock[key];
+          if (typeof current === 'string' && current.length > 0) {
+            // Match against full whitespace-delimited tokens to avoid a
+            // superstring false-positive (e.g., `...intercept.mjs-debug`
+            // would otherwise be treated as already containing our path).
+            const ourTokens = value.split(/\s+/).filter(Boolean);
+            const currentTokens = current.split(/\s+/).filter(Boolean);
+            if (ourTokens.every((t) => currentTokens.includes(t))) {
+              continue; // already injected (exact tokens present)
+            }
+            envBlock[key] = `${current} ${value}`.trim();
+            changed = true;
+            continue;
           }
-          envBlock[key] = `${current} ${value}`.trim();
+        }
+
+        if (envBlock[key] !== value) {
+          envBlock[key] = value;
           changed = true;
-          continue;
         }
       }
 
-      if (envBlock[key] !== value) {
-        envBlock[key] = value;
-        changed = true;
-      }
-    }
-
-    if (!changed) return;
-    existing.env = envBlock;
-    await writeJsonFile(settingsPath, existing);
+      if (!changed) return existing;
+      existing.env = envBlock;
+      return existing;
+    });
     logger.info('settings.env merged', { settingsPath, keys: Object.keys(env) });
   }
 
@@ -623,11 +622,11 @@ export class HookStrategy implements DeployStrategy {
     const hookCommandBase = resolveHome(hookConfig.hookCommand);
 
     await ensureDir(path.dirname(settingsPath));
-    const existing = (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+    await updateJsonConfig(settingsPath, existing => {
 
     const merged: Record<string, unknown> = { ...existing };
-    merged['name'] = agent.name;
-    merged['tools'] = agent.tools;
+    if (merged['name'] === undefined) merged['name'] = agent.name;
+    if (merged['tools'] === undefined) merged['tools'] = agent.tools;
 
     const hooks = (merged['hooks'] && typeof merged['hooks'] === 'object')
       ? { ...(merged['hooks'] as Record<string, unknown>) }
@@ -651,7 +650,8 @@ export class HookStrategy implements DeployStrategy {
     }
 
     merged['hooks'] = hooks;
-    await writeJsonFile(settingsPath, merged);
+    return merged;
+    });
 
     // Make pilot-kiro the default agent so users can run `kiro-cli` without
     // `--agent pilot-kiro`. Only set when missing — don't override a user's
@@ -672,11 +672,11 @@ export class HookStrategy implements DeployStrategy {
     const cliSettingsPath = resolveHome('~/.kiro/settings/cli.json');
     try {
       await ensureDir(path.dirname(cliSettingsPath));
-      const cli = (await readJsonFile<Record<string, unknown>>(cliSettingsPath)) ?? {};
-      const cur = cli['chat.defaultAgent'];
-      if (typeof cur === 'string' && cur.length > 0) return; // respect existing choice
-      cli['chat.defaultAgent'] = agentName;
-      await writeJsonFile(cliSettingsPath, cli);
+      await updateJsonConfig(cliSettingsPath, cli => {
+        const cur = cli['chat.defaultAgent'];
+        if (typeof cur !== 'string' || !cur.length) cli['chat.defaultAgent'] = agentName;
+        return cli;
+      });
       logger.info('kiro default agent set', { path: cliSettingsPath, agent: agentName });
     } catch (err) {
       logger.warn('failed to set kiro default agent', { error: String(err) });
@@ -710,39 +710,11 @@ export class HookStrategy implements DeployStrategy {
     if (!isHooksJson) return;
 
     const needsVersion = isHooksJson && settingsPath.includes('.cursor');
-    const existed = await fileExists(settingsPath);
-    const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
-    if (existed && !existing) {
-      const raw = await fs.readFile(settingsPath, 'utf8');
-      if (raw.trim() !== '') {
-        throw new Error(`refusing to overwrite invalid settings: ${settingsPath}`);
-      }
-
-      const initial: Record<string, unknown> = { hooks: {} };
-      if (needsVersion) {
-        initial.version = 1;
-      }
-      await writeTextFileAtomic(
-        settingsPath,
-        `${JSON.stringify(initial, null, 2)}\n`,
-        { expected: { exists: true, content: raw } },
-      );
-      return;
-    }
-    if (!existing) {
-      const initial: Record<string, unknown> = { hooks: {} };
-      if (needsVersion) {
-        initial.version = 1;
-      }
-      await writeJsonFile(settingsPath, initial);
-    } else if (needsVersion && existing.version === undefined) {
-      existing.version = 1;
-      await writeJsonFile(settingsPath, existing);
-    } else if (isHooksJson && settingsPath.includes('.codex') && existing.version !== undefined) {
-      // Clean up stale `version` field previously injected by older pilot versions.
-      // Codex uses #[serde(deny_unknown_fields)] and rejects any key other than `hooks`.
-      delete existing.version;
-      await writeJsonFile(settingsPath, existing);
-    }
+    await updateJsonConfig(settingsPath, existing => {
+        if (!existing.hooks) existing.hooks = {};
+        if (needsVersion && existing.version === undefined) existing.version = 1;
+        if (settingsPath.includes('.codex') && existing.version !== undefined) delete existing.version;
+        return existing;
+    });
   }
 }

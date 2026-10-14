@@ -434,6 +434,9 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       // can still race the final read/rename pair; Pilot writers share the lock.
       const finalBytes = await this.readBytes(target);
       if (this.sha256Bytes(finalBytes) !== h0) return false;
+      try { await fs.copyFile(target, target + '.loongsuite-pilot.bak', 1); await fs.chmod(target + '.loongsuite-pilot.bak', 0o600); }
+      catch (error) { if (!['ENOENT', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+      if (this.sha256Bytes(await this.readBytes(target)) !== h0) return false;
       await fs.rename(tmp, target);
       await this.syncDirectory(path.dirname(target));
       return true;

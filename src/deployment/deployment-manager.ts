@@ -17,6 +17,7 @@ import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
+import { readJsonDocument } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
 import {
   applyPersistedDeployTargets,
@@ -186,7 +187,11 @@ export class DeploymentManager {
    * uninstaller path so the agent's config doesn't keep a dangling spec
    * pointing at a (possibly purged) plugin.mjs.
    */
-  async undeployAgent(def: AgentDefinition): Promise<boolean> {
+  undeployAgent(def: AgentDefinition): Promise<boolean> {
+    return this.runExclusive(() => this.undeployAgentUnlocked(def));
+  }
+
+  private async undeployAgentUnlocked(def: AgentDefinition): Promise<boolean> {
     await this.loadState();
     const strategy = this.getStrategy(def);
     if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
@@ -219,6 +224,18 @@ export class DeploymentManager {
     });
   }
 
+  /** Native explicit disable is an opt-out, not drift to repair. */
+  async isInstrumentationExplicitlyDisabled(def: AgentDefinition): Promise<boolean> {
+    if (def.deployMode === 'plugin-inject' && def.pluginInject?.configShape === 'openclaw-nested') {
+      const configPath = await this.pluginInjectStrategy.resolveExistingConfigPath(def.pluginInject);
+      if (!configPath) return false;
+      const document = await readJsonDocument<{ plugins?: { enabled?: boolean; entries?: Record<string, { enabled?: boolean }> } }>(configPath, 'jsonc');
+      const value = document.status === 'ok' ? document.data : null;
+      return value?.plugins?.enabled === false || value?.plugins?.entries?.[def.pluginInject.pluginId]?.enabled === false;
+    }
+    return false;
+  }
+
   /**
    * Whether the agent's integration is currently missing and needs to be
    * (re)deployed. Used by the watchdog to detect specs overwritten by other
@@ -249,6 +266,7 @@ export class DeploymentManager {
   }
 
   private async deployAgent(def: AgentDefinition): Promise<DeployResult> {
+    if (await this.isInstrumentationExplicitlyDisabled(def)) return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true, reason: 'disabled' };
     const record = this.state[def.id];
     def = applyPersistedDeployTargets(def, record);
     const strategy = this.getStrategy(def);

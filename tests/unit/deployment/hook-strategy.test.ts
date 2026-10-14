@@ -91,6 +91,15 @@ describe('HookStrategy', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(fileExists).mockResolvedValue(false);
+    // Guarded repairs now read the raw document and use atomic compare/backup writes.
+    vi.mocked(fs.readFile).mockImplementation(async file => {
+      const value = await readJsonFile(String(file));
+      if (value === null || value === undefined) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      return JSON.stringify(value);
+    });
+    vi.mocked(writeTextFileAtomic).mockImplementation(async (file, raw) => {
+      await writeJsonFile(file, JSON.parse(raw));
+    });
     mockHookManager = {
       isHookInstalled: vi.fn(),
       installHook: vi.fn(),
@@ -687,10 +696,9 @@ describe('HookStrategy', () => {
       expect(result.success).toBe(true);
       expect(writeTextFileAtomic).toHaveBeenCalledWith(
         '/home/.cursor/hooks.json',
-        '{\n  "hooks": {},\n  "version": 1\n}\n',
-        { expected: { exists: true, content: '  \n' } },
+        expect.any(String),
+        expect.objectContaining({ expected: { exists: true, content: '  \n' }, backupPath: '/home/.cursor/hooks.json.loongsuite-pilot.bak' }),
       );
-      expect(writeJsonFile).not.toHaveBeenCalled();
       expect(mockHookManager.installHook).toHaveBeenCalled();
     });
 
@@ -756,7 +764,7 @@ describe('HookStrategy', () => {
       const result = await strategy.deploy(makeDef());
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('disk error');
+      expect(result.error).toContain('refusing to overwrite invalid settings');
     });
 
     it('returns failure when Codex trust writing fails', async () => {

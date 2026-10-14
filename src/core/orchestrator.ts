@@ -14,6 +14,8 @@ import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorService, type InterceptorService } from '../interceptor/daemon/lifecycle.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
+import { DesiredStateReconciler } from '../deployment/desired-state-reconciler.js';
+import { createRuntimePolicyClient } from '../analytics/instrumentation-runtime.js';
 import {
   areGrokBuildHookAssetsHealthy,
   restoreGrokBuildHookAssets,
@@ -171,6 +173,7 @@ export class Orchestrator extends EventEmitter {
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
+  private desiredStateReconciler: DesiredStateReconciler | null = null;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
   private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
@@ -348,11 +351,21 @@ export class Orchestrator extends EventEmitter {
     // 6. Register inputs & build detection entries
     const detectionEntries = await this.registerAllInputs();
 
+    this.desiredStateReconciler = new DesiredStateReconciler({
+      definitions: this.deploymentManager.getDefinitions(), deployment: this.deploymentManager,
+      intervalMs: 60_000, now: Date.now, agentEnabled: id => this.isAgentGatedEnabled(id),
+      localEnabled: () => this.config.instrumentation?.localEnabled === true,
+      policyClient: createRuntimePolicyClient(this.config, readInstalledVersion(this.dataDir)),
+      onStatuses: statuses => this.emit('instrumentation:status', statuses),
+    });
+    await this.desiredStateReconciler.start();
+
     // 7. Build deployment detection entries for dynamic discovery
     const deployDetectionEntries = this.buildDeployDetectionEntries();
 
     // 8. Start AgentDiscoveryService (input entries + deploy detection entries)
     this.agentDiscoveryService = new AgentDiscoveryService([...detectionEntries, ...deployDetectionEntries]);
+    this.agentDiscoveryService.on('discovery:refreshed', () => { void this.desiredStateReconciler?.reconcile('discovery'); });
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
@@ -567,6 +580,7 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    await this.desiredStateReconciler?.stop();
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
@@ -606,6 +620,8 @@ export class Orchestrator extends EventEmitter {
     return this.agentDiscoveryService;
   }
 
+  getDesiredStateReconciler(): DesiredStateReconciler | null { return this.desiredStateReconciler; }
+
   getDeploymentManager(): DeploymentManager {
     return this.deploymentManager;
   }
@@ -629,7 +645,6 @@ export class Orchestrator extends EventEmitter {
       const watchPaths = def.detection.paths.map(p =>
         p.startsWith('~') ? resolveHome(p) : p,
       );
-      if (watchPaths.length === 0) continue;
 
       const entryId = `deploy:${def.id}`;
       entries.push({
@@ -640,10 +655,11 @@ export class Orchestrator extends EventEmitter {
         enabled: () => this.isAgentGatedEnabled(def.id),
         start: async () => {
           logger.info('new agent discovered, deploying', { agentId: def.id });
-          await this.deploymentManager.deploySingle(def);
+          if (this.desiredStateReconciler) await this.desiredStateReconciler.reconcile('discovery');
+          else await this.deploymentManager.deploySingle(def);
         },
         stop: async () => {},
-        pollIntervalMs: 300_000,
+        pollIntervalMs: 60_000,
       });
     }
 

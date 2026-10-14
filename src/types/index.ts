@@ -122,7 +122,17 @@ export interface InnerTraceConfig {
   serviceNamePrefix?: string;
 }
 
+export interface InstrumentationConfig {
+  localEnabled: boolean;
+  /** Explicit portal HTTPS origin. Never inferred from an OTLP endpoint. */
+  portalBaseUrl: string;
+  deviceId?: string;
+  /** Existing machine Bearer credential; never included in status or logs. */
+  authorization?: string;
+}
+
 export interface AnalyticsConfig {
+  instrumentation?: InstrumentationConfig;
   privacy?: { excludeWorkspaces: string[] };
   enabled: boolean;
   autoStart: boolean;
