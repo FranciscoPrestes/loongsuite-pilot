@@ -272,6 +272,38 @@ export interface AgentDefinition {
   input?: AgentInputConfig;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
+  /** Declared support, never a claim that collection is active or healthy. */
+  analytics?: HarnessAnalyticsDeclaration;
+}
+
+export type HarnessLifecycle = 'supported' | 'deprecated' | 'retired' | 'unavailable';
+export type CapabilitySupport = 'conditional' | 'unavailable' | 'validated';
+export interface AnalyticsAdapterBinding {
+  id: string;
+  role: 'primary' | 'fallback' | 'supplement' | 'shared' | 'retired';
+  whenPrimaryDisabled?: string;
+  reason?: string;
+}
+export interface AnalyticsSourceRule {
+  eventClass: 'message' | 'tool_call' | 'tool_result' | 'llm_usage' | 'hook_health';
+  primary: string;
+  secondary: string[];
+  equivalence: 'native-id-or-validated-rule';
+  unresolvedSecondary: 'exclude-additive-volumes';
+  usageSemantics?: 'delta' | 'cumulative' | 'unavailable';
+  /** Native adapter variant selects authority; this is metadata, not text/time inference. */
+  variantPrimaries?: Array<{ variant: 'cli' | 'ide'; primary: string; secondary: string[] }>;
+}
+export interface HarnessAnalyticsDeclaration {
+  version: 1;
+  lifecycle: HarnessLifecycle;
+  platforms: Array<'darwin' | 'linux' | 'win32'>;
+  versionRange: string | null;
+  mechanisms: string[];
+  adapters: AnalyticsAdapterBinding[];
+  sourceRules: AnalyticsSourceRule[];
+  capabilities: Record<'messages' | 'tools' | 'results' | 'tokens' | 'subagents', CapabilitySupport>;
+  gaps: string[];
 }
 
 // ─── Deploy Result ───

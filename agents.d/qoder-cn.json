@@ -3,12 +3,19 @@
   "displayName": "QoderCN",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.qoder-cn"],
+    "paths": [
+      "~/.qoder-cn"
+    ],
     "commands": []
   },
   "hook": {
     "settingsPath": "~/.qoder-cn/settings.json",
-    "events": ["Stop", "PreToolUse", "PostToolUse", "UserPromptSubmit"],
+    "events": [
+      "Stop",
+      "PreToolUse",
+      "PostToolUse",
+      "UserPromptSubmit"
+    ],
     "hookCommand": "$PILOT_DATA/hooks/qodercn-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
@@ -17,5 +24,94 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/qoder-cn/history"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-hook-transcript-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "qoder-cn-trace",
+        "role": "primary"
+      },
+      {
+        "id": "qoder-cn",
+        "role": "fallback",
+        "whenPrimaryDisabled": "qoder-cn-trace"
+      },
+      {
+        "id": "qoder-cn-sqlite",
+        "role": "fallback",
+        "whenPrimaryDisabled": "qoder-cn-trace"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "qoder-cn.managed-hook-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "qoder-cn.managed-hook-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "qoder-cn.managed-hook-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "qoder-cn.trace.native-variant-token-authority",
+        "secondary": [
+          "qoder-cn.hook",
+          "qoder-cn.ide-sqlite"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta",
+        "variantPrimaries": [
+          {
+            "variant": "cli",
+            "primary": "qoder-cn.cli-token-intercept",
+            "secondary": [
+              "qoder-cn.native-segments-timing-only"
+            ]
+          },
+          {
+            "variant": "ide",
+            "primary": "qoder-cn.ide-sqlite",
+            "secondary": []
+          }
+        ]
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

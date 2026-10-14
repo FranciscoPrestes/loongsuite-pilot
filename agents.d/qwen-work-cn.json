@@ -3,18 +3,26 @@
   "displayName": "QwenWorkCN",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.qwenworkcn"],
+    "paths": [
+      "~/.qwenworkcn"
+    ],
     "commands": []
   },
   "hook": {
     "settingsPath": "~/.qwenworkcn/settings.json",
-    "events": ["Stop"],
+    "events": [
+      "Stop"
+    ],
     "hookCommand": "$PILOT_DATA/hooks/qwenworkcn-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
     "winShell": "powershell",
     "interceptor": {
-      "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
+      "events": [
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse"
+      ],
       "hookCommand": "$PILOT_DATA/hooks/interceptor-qwenworkcn-hook.sh",
       "matcher": "*",
       "timeout": {
@@ -28,5 +36,80 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/qwen-work-cn/history"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-hook-transcript-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "qwen-work-cn-trace",
+        "role": "primary"
+      },
+      {
+        "id": "qwen-work-cn-hook",
+        "role": "fallback",
+        "whenPrimaryDisabled": "qwen-work-cn-trace"
+      },
+      {
+        "id": "qwen-work-cn-sqlite",
+        "role": "fallback",
+        "whenPrimaryDisabled": "qwen-work-cn-trace"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "qwen-work-cn.managed-hook-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "qwen-work-cn.managed-hook-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "qwen-work-cn.managed-hook-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "qwen-work-cn.trace.native-session",
+        "secondary": [
+          "qwen-work-cn.hook",
+          "qwen-work-cn.sqlite"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

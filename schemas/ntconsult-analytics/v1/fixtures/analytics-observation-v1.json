@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "1",
+  "valid": [
+    {
+      "schemaVersion": "1", "observationId": "health:1", "harnessId": "claude-code", "harnessVersion": "2.0.0",
+      "collectorVersion": "1.0.0", "deviceId": "device:1", "occurredAt": "2026-10-14T12:00:00Z",
+      "capabilitiesVersion": "1", "missingFields": [], "truncated": false,
+      "sourceRefs": [{"sourceNamespace": "nt-tes", "nativeId": "heartbeat:1", "phase": "event"}],
+      "kind": "hook_health", "payload": {"state": "configured", "lastEventAt": null, "ack": null, "reason": null}
+    },
+    {
+      "schemaVersion": "1", "observationId": "capability:1", "harnessId": "pi-sdk:declared-new", "harnessVersion": "1.0.0",
+      "collectorVersion": "1.0.0", "deviceId": "device:1", "occurredAt": "2026-10-14T12:00:00Z",
+      "capabilitiesVersion": "1", "missingFields": [], "truncated": false,
+      "sourceRefs": [{"sourceNamespace": "nt-tes", "nativeId": "discovery:1", "phase": "event"}],
+      "kind": "capability", "payload": {"state": "partial", "platform": "darwin-arm64", "configured": true,
+        "supportedFields": ["toolCallId", "arguments"], "receivedFields": ["toolCallId"],
+        "primarySources": [{"eventClass": "tool_call", "sourceNamespace": "plugin"}],
+        "aliases": [{"sourceNamespace": "otlp", "nativeId": "span:1", "primaryNativeId": "call:1", "eventClass": "tool_call"}],
+        "usageSemantics": "cumulative", "reason": "Result not exposed"}
+    },
+    {
+      "schemaVersion": "1", "observationId": "snapshot:1", "harnessId": "codex", "harnessVersion": "1.0.0",
+      "collectorVersion": "1.0.0", "deviceId": "device:1", "sessionId": "session:1", "toolCallId": "call:1",
+      "occurredAt": "2026-10-14T12:00:00Z", "occurredAtNs": "1791979200000000001", "sequence": "9007199254740993",
+      "capabilitiesVersion": "1", "missingFields": [], "truncated": false,
+      "sourceRefs": [{"sourceNamespace": "hook", "nativeId": "call:1", "phase": "completed"}],
+      "kind": "repo_snapshot", "payload": {"head": "abc123", "branch": "feature", "worktreeId": "wt:1",
+        "dirtyFingerprint": "sha256:dirty", "files": [{"path": "src/code.ts", "status": "modified"}], "truncated": false}
+    },
+    {
+      "schemaVersion": "1", "observationId": "command:1", "harnessId": "wukong", "harnessVersion": "1.0.0",
+      "collectorVersion": "1.0.0", "deviceId": "device:1", "sessionId": "session:1",
+      "occurredAt": "2026-10-14T12:00:00Z", "capabilitiesVersion": "1", "missingFields": [], "truncated": false,
+      "sourceRefs": [{"sourceNamespace": "transcript", "nativeId": "event:1", "phase": "event"}],
+      "kind": "command_context", "payload": {"resolvedCommand": "vitest run", "scriptChain": ["pnpm test"], "modulePaths": ["shared"], "reason": null}
+    },
+    {
+      "schemaVersion": "1", "observationId": "report:1", "harnessId": "copilot", "harnessVersion": "1.0.0",
+      "collectorVersion": "1.0.0", "deviceId": "device:1", "sessionId": "session:1", "toolCallId": "call:1",
+      "occurredAt": "2026-10-14T12:00:00Z", "capabilitiesVersion": "1", "missingFields": [], "truncated": false,
+      "sourceRefs": [{"sourceNamespace": "report", "nativeId": "report:1", "phase": "completed"}],
+      "kind": "local_report", "payload": {"runner": "vitest", "cases": 0, "passed": 0, "failed": 0, "durationMs": 12,
+        "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "executionId": "call:1", "association": "explicit"}
+    }
+  ],
+  "invalid": [
+    {"reason": "execution without session", "event": {
+      "schemaVersion": "1", "observationId": "command:bad", "harnessId": "codex", "harnessVersion": "1",
+      "collectorVersion": "1", "deviceId": "d:1", "occurredAt": "2026-10-14T12:00:00Z", "capabilitiesVersion": "1",
+      "missingFields": [], "truncated": false, "sourceRefs": [{"sourceNamespace": "hook", "nativeId": "call:1", "phase": "event"}],
+      "kind": "command_context", "payload": {"resolvedCommand": null, "scriptChain": [], "modulePaths": [], "reason": "Unknown command"}
+    }},
+    {"reason": "empty provenance", "event": {
+      "schemaVersion": "1", "observationId": "health:bad", "harnessId": "codex", "harnessVersion": "1",
+      "collectorVersion": "1", "deviceId": "d:1", "occurredAt": "2026-10-14T12:00:00Z", "capabilitiesVersion": "1",
+      "missingFields": [], "truncated": false, "sourceRefs": [], "kind": "hook_health",
+      "payload": {"state": "healthy", "lastEventAt": null, "ack": null, "reason": null}
+    }},
+    {"reason": "wrong kind payload", "event": {
+      "schemaVersion": "1", "observationId": "health:bad", "harnessId": "codex", "harnessVersion": "1",
+      "collectorVersion": "1", "deviceId": "d:1", "occurredAt": "2026-10-14T12:00:00Z", "capabilitiesVersion": "1",
+      "missingFields": [], "truncated": false, "sourceRefs": [{"sourceNamespace": "hook", "nativeId": "call:1", "phase": "event"}],
+      "kind": "hook_health", "payload": {"resolvedCommand": null, "scriptChain": [], "modulePaths": [], "reason": null}
+    }},
+    {"reason": "invalid calendar date", "event": {
+      "schemaVersion": "1", "observationId": "health:bad", "harnessId": "codex", "harnessVersion": "1",
+      "collectorVersion": "1", "deviceId": "d:1", "occurredAt": "2026-02-30T12:00:00Z", "capabilitiesVersion": "1",
+      "missingFields": [], "truncated": false, "sourceRefs": [{"sourceNamespace": "hook", "nativeId": "call:1", "phase": "event"}],
+      "kind": "hook_health", "payload": {"state": "configured", "lastEventAt": null, "ack": null, "reason": null}
+    }},
+    {"reason": "unknown field", "event": {
+      "schemaVersion": "1", "observationId": "health:bad", "harnessId": "codex", "harnessVersion": "1",
+      "collectorVersion": "1", "deviceId": "d:1", "occurredAt": "2026-10-14T12:00:00Z", "capabilitiesVersion": "1",
+      "missingFields": [], "truncated": false, "sourceRefs": [{"sourceNamespace": "hook", "nativeId": "call:1", "phase": "event"}],
+      "kind": "hook_health", "payload": {"state": "configured", "lastEventAt": null, "ack": null, "reason": null}, "shell": "arbitrary command"
+    }},
+    {"reason": "numeric nanoseconds", "event": {
+      "schemaVersion": "1", "observationId": "health:bad", "harnessId": "codex", "harnessVersion": "1",
+      "collectorVersion": "1", "deviceId": "d:1", "occurredAt": "2026-10-14T12:00:00Z", "occurredAtNs": 1791979200000000000,
+      "capabilitiesVersion": "1", "missingFields": [], "truncated": false,
+      "sourceRefs": [{"sourceNamespace": "hook", "nativeId": "call:1", "phase": "event"}],
+      "kind": "hook_health", "payload": {"state": "configured", "lastEventAt": null, "ack": null, "reason": null}
+    }}
+  ]
+}

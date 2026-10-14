@@ -38,6 +38,13 @@ export type JsonValue =
 export interface AgentActivityEntry {
   [key: string]: JsonValue | undefined;
 
+  /** Additive serialized observation metadata; existing native tool events remain primary. */
+  'ntconsult.analytics.schema_version'?: string;
+  'ntconsult.analytics.observation_id'?: string;
+  'ntconsult.analytics.kind'?: 'capability' | 'repo_snapshot' | 'command_context' | 'local_report' | 'hook_health';
+  'ntconsult.analytics.observation'?: string;
+  'ntconsult.analytics.generated_by'?: 'collector' | 'analytics';
+
   time_unix_nano: string;
   observed_time_unix_nano?: string;
   'event.id': string;

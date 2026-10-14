@@ -3,23 +3,103 @@
   "displayName": "Hermes Agent",
   "deployMode": "directory-plugin",
   "detection": {
-    "paths": ["$HERMES_HOME"],
-    "commands": ["hermes"]
+    "paths": [
+      "$HERMES_HOME"
+    ],
+    "commands": [
+      "hermes"
+    ]
   },
   "directoryPlugin": {
     "sourceDir": "$PILOT_DIR/assets/plugins/hermes-agent/loongsuite-pilot",
     "targetDir": "$HERMES_HOME/plugins/loongsuite-pilot",
     "activation": {
       "command": "$HERMES_CLI",
-      "probeArgs": ["plugins", "enable", "--help"],
-      "enableArgs": ["plugins", "enable", "loongsuite-pilot"],
-      "optionalEnableArgs": ["--no-allow-tool-override"],
-      "disableArgs": ["plugins", "disable", "loongsuite-pilot"]
+      "probeArgs": [
+        "plugins",
+        "enable",
+        "--help"
+      ],
+      "enableArgs": [
+        "plugins",
+        "enable",
+        "loongsuite-pilot"
+      ],
+      "optionalEnableArgs": [
+        "--no-allow-tool-override"
+      ],
+      "disableArgs": [
+        "plugins",
+        "disable",
+        "loongsuite-pilot"
+      ]
     }
   },
   "input": {
     "type": "session-file-polling",
     "logDir": "$PILOT_DATA/logs/hermes-agent",
     "filePattern": "hermes-agent-*.jsonl"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-directory-plugin-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "hermes-agent-log",
+        "role": "primary"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "hermes-agent.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "hermes-agent.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "hermes-agent.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "hermes-agent.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

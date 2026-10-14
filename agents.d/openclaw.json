@@ -3,8 +3,12 @@
   "displayName": "OpenClaw",
   "deployMode": "plugin-inject",
   "detection": {
-    "paths": ["~/.openclaw"],
-    "commands": ["openclaw"]
+    "paths": [
+      "~/.openclaw"
+    ],
+    "commands": [
+      "openclaw"
+    ]
   },
   "pluginInject": {
     "configPaths": [
@@ -24,5 +28,68 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/openclaw"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-extension-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "openclaw-plugin-log",
+        "role": "primary"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "openclaw.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "openclaw.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "openclaw.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "openclaw.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Native session lifecycle hooks are excluded from activity",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

@@ -3,12 +3,18 @@
   "displayName": "GitHub Copilot",
   "deployMode": "hook",
   "detection": {
-    "paths": ["$COPILOT_HOME"],
+    "paths": [
+      "$COPILOT_HOME"
+    ],
     "commands": []
   },
   "hook": {
     "settingsPath": "$COPILOT_HOME/hooks/loongsuite-pilot.json",
-    "events": ["SessionStart", "UserPromptSubmit", "Stop"],
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "Stop"
+    ],
     "hookCommand": "$PILOT_DATA/hooks/copilot-loongsuite-pilot-hook.sh",
     "format": "flat",
     "matcher": "",
@@ -16,5 +22,75 @@
   },
   "input": {
     "type": "session-file-polling"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-hook-transcript-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "copilot",
+        "role": "primary"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "copilot.native-session-events",
+        "secondary": [
+          "copilot.hook-wakeup"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "copilot.native-session-events",
+        "secondary": [
+          "copilot.hook-wakeup"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "copilot.native-session-events",
+        "secondary": [
+          "copilot.hook-wakeup"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "copilot.session_usage",
+        "secondary": [
+          "copilot.message-usage"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "cumulative"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

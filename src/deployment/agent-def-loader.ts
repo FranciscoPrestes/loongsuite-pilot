@@ -5,6 +5,7 @@ import type { AgentDefinition } from '../types/index.js';
 import { isReservedPiSdkAgentId, isValidPiSdkAgentId } from '../pi-sdk/pi-sdk-agent-identity.js';
 import { resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { loadCapabilityManifest } from '../analytics/capabilities.js';
 import {
   resolvePiCodingAgentDir, resolveGrokHome, resolveDshHome, resolveCopilotHome,
 } from './env-agent-dirs.js';
@@ -143,6 +144,15 @@ export class AgentDefLoader {
         || pluginInject.pluginSpec !== `${normalizedDataDir}/plugins/pi-coding-agent/agents/${id}.mjs`
       ) {
         logger.warn('invalid PI SDK Agent definition', { file: filePath });
+        return false;
+      }
+    }
+    // Legacy local deployment definitions remain accepted. Once an analytics
+    // declaration is supplied, fail closed rather than publishing false coverage.
+    if (obj.analytics !== undefined) {
+      try { loadCapabilityManifest(obj as unknown as AgentDefinition); }
+      catch (err) {
+        logger.warn('invalid analytics capability declaration', { file: filePath, error: String(err) });
         return false;
       }
     }

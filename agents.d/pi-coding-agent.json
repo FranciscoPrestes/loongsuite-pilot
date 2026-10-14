@@ -3,11 +3,17 @@
   "displayName": "Pi Coding Agent",
   "deployMode": "plugin-inject",
   "detection": {
-    "paths": ["$PI_CODING_AGENT_DIR"],
-    "commands": ["pi"]
+    "paths": [
+      "$PI_CODING_AGENT_DIR"
+    ],
+    "commands": [
+      "pi"
+    ]
   },
   "pluginInject": {
-    "configPaths": ["$PI_CODING_AGENT_DIR/settings.json"],
+    "configPaths": [
+      "$PI_CODING_AGENT_DIR/settings.json"
+    ],
     "pluginSpec": "$PILOT_DATA/plugins/pi-coding-agent/index.mjs",
     "pluginId": "loongsuite-pilot-pi-coding-agent",
     "configKey": "extensions",
@@ -16,5 +22,67 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/pi-coding-agent"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-extension-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "pi-coding-agent-log",
+        "role": "primary"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "pi-coding-agent.extension.native-agent-id",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "pi-coding-agent.extension.native-agent-id",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "pi-coding-agent.extension.native-agent-id",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "pi-coding-agent.extension.native-agent-id",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }
