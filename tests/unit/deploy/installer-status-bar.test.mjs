@@ -13,7 +13,7 @@ const ps = readFileSync(resolve('deploy/installer-opensource.ps1'), 'utf8');
 const shellPrelude = shell.slice(0, shell.indexOf('# Validate current user'));
 const shellWriter = shell.slice(shell.indexOf('write_config() {'), shell.indexOf('install_loongsuite_pilot_command() {'));
 const psPrelude = ps.slice(0, ps.indexOf('# Resolve package URL'));
-const psWriter = ps.slice(ps.indexOf('function Write-Config {'), ps.indexOf('# QoderWork-family runtime wrapper:'));
+const psWriter = ps.slice(ps.indexOf('function Write-Config {'), ps.indexOf('function Get-PilotRuntimeOverride {'));
 const psJs = psWriter.match(/-e @'\r?\n([\s\S]*?)\r?\n'@ \$cfgTmp/)?.[1];
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 const hasPowerShell = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']).status === 0;
