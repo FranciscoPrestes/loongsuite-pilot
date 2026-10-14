@@ -317,6 +317,7 @@ export interface HarnessAnalyticsDeclaration {
 export type DeploySkipReason =
   /** detect() found no agent on this machine — nothing was instrumented. */
   | 'not-detected'
+  | 'unsupported_version'
   /** Integration already present (includes detection-only agents, which never write). */
   | 'up-to-date'
   /** Turned off by the config.agents gate, so it was undeployed instead. */

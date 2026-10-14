@@ -132,6 +132,13 @@ export class WorkerManifestSupervisor {
     return !!pid && this.isAlive(pid);
   }
 
+  /** A live PID is process evidence only; event health is evaluated separately. */
+  async inspectProcess(installDir: string, options: WorkerManifestOptions = {}): Promise<{ configured: boolean; processAlive: boolean; observedEventAt: null }> {
+    const location = await this.findManifest(installDir);
+    const configured = !!location && !!await this.readManifest(location.manifestPath);
+    return { configured, processAlive: configured && await this.isWorkerRunning(installDir, options), observedEventAt: null };
+  }
+
   private async findManifest(installDir: string): Promise<ManifestLocation | undefined> {
     const direct = path.join(installDir, 'worker.manifest.json');
     if (await fileExists(direct)) {

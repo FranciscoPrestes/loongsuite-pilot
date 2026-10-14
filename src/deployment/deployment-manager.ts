@@ -1,4 +1,6 @@
 import * as path from 'node:path';
+import { InstrumentationHealth, inspectInstalledVersion, type VersionProbeRunner } from './instrumentation-health.js';
+import type { CapabilityStatus } from './desired-state-reconciler.js';
 import type {
   AgentDefinition,
   DeployResult,
@@ -31,9 +33,12 @@ export interface DeploymentManagerOptions {
   dataDir: string;
   pilotDir: string;
   builtinAgentsDir?: string;
+  versionProbeRunner?: VersionProbeRunner;
 }
 
 export class DeploymentManager {
+  private readonly versionProbeRunner?: VersionProbeRunner;
+  private readonly instrumentationEvents = new Map<string, number>();
   private readonly dataDir: string;
   private readonly pilotDir: string;
   private readonly hookStrategy: HookStrategy;
@@ -49,6 +54,7 @@ export class DeploymentManager {
   private operationTail: Promise<void> = Promise.resolve();
 
   constructor(opts: DeploymentManagerOptions) {
+    this.versionProbeRunner = opts.versionProbeRunner;
     this.dataDir = opts.dataDir;
     this.pilotDir = opts.pilotDir;
     this.stateFilePath = path.join(opts.dataDir, 'deployed-agents.json');
@@ -264,8 +270,26 @@ export class DeploymentManager {
     }
   }
 
+  /** C8 calls only after a validated event from the current instrumentation. */
+  recordInstrumentationEvent(agentId: string, receivedAt: number): void {
+    if (Number.isFinite(receivedAt) && receivedAt <= Date.now()) this.instrumentationEvents.set(agentId, receivedAt);
+  }
+
+  async inspectInstrumentation(def: AgentDefinition): Promise<CapabilityStatus> {
+    return new InstrumentationHealth({
+      detected: d => this.isAgentDetected(d),
+      configured: async d => !(await this.needsRedeploy(d)),
+      enabled: async d => !(await this.isInstrumentationExplicitlyDisabled(d)),
+      versionProbeRunner: this.versionProbeRunner,
+      configuredAt: d => this.state[d.id] ? Date.parse(this.state[d.id].deployedAt) : null,
+      lastEventAt: d => this.instrumentationEvents.get(d.id) ?? null,
+    }).inspect(def);
+  }
+
   private async deployAgent(def: AgentDefinition): Promise<DeployResult> {
     if (await this.isInstrumentationExplicitlyDisabled(def)) return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true, reason: 'disabled' };
+    const version = await inspectInstalledVersion(def, this.versionProbeRunner);
+    if (!version.compatible) return { success: false, agentId: def.id, deployMode: def.deployMode, skipped: true, reason: 'unsupported_version', error: version.reason };
     const record = this.state[def.id];
     def = applyPersistedDeployTargets(def, record);
     const strategy = this.getStrategy(def);

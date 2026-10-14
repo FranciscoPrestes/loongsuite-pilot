@@ -26,6 +26,8 @@ import {
 } from '../utils/restart-breadcrumb.js';
 import { NODE_SQLITE_PROBE } from '../utils/node-sqlite.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
+import { AnalyticsBundleStore, type AnalyticsBundleOptions, type VerifiedAnalyticsBundle } from './analytics-bundle-store.js';
+import type { SignedAnalyticsManifest } from '../deployment/manifest-signature.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
 
@@ -102,6 +104,8 @@ export interface VersionManifest {
   package_url: string;
   released_at?: string;
   sha256?: string;
+  /** Signed analytics-only archive; never routed through npm/postinstall. */
+  analyticsBundle?: SignedAnalyticsManifest;
 }
 
 export interface CanaryManifest extends VersionManifest {
@@ -203,6 +207,7 @@ interface CollectorRuntimeRecord {
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 export class Updater {
+  private readonly analyticsBundles: AnalyticsBundleStore | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private checking = false;
@@ -215,11 +220,33 @@ export class Updater {
   constructor(
     private config: AutoUpdateConfig,
     baseDir?: string,
+    analytics?: AnalyticsBundleOptions,
   ) {
     this.paths = baseDir ? buildPaths(baseDir) : defaultPaths();
+    this.analyticsBundles = analytics ? new AnalyticsBundleStore(this.paths.dataDir, analytics) : null;
     this.configPath = resolveHome(
       process.env.AGENT_DATA_COLLECTION_CONFIG ?? DEFAULT_CONFIG_PATH,
     );
+  }
+
+  async installAnalyticsBundle(envelope: SignedAnalyticsManifest, archive: string): Promise<void> {
+    if (!this.analyticsBundles) throw new Error('Analytics updater not configured');
+    await this.analyticsBundles.install(envelope, archive);
+  }
+
+  async resolveAnalyticsBundle(): Promise<VerifiedAnalyticsBundle | null> {
+    return this.analyticsBundles ? this.analyticsBundles.resolve() : null;
+  }
+
+  private async downloadAnalyticsBundle(target: VersionManifest): Promise<void> {
+    if (!this.analyticsBundles || !target.analyticsBundle) throw new Error('Analytics updater not configured');
+    if (target.version !== target.analyticsBundle.payload.version || target.sha256 !== target.analyticsBundle.payload.archiveSha256) throw new Error('Analytics release identity mismatch');
+    const tmp = await fs.mkdtemp(path.join(this.paths.cacheDir, 'analytics-download-'));
+    try {
+      const archive = path.join(tmp, 'bundle.tgz');
+      await this.downloadFile(target.package_url, archive);
+      await this.installAnalyticsBundle(target.analyticsBundle, archive);
+    } finally { await fs.rm(tmp, { recursive: true, force: true }); }
   }
 
   setMetrics(metrics: UpdaterMetrics): void {
@@ -281,6 +308,10 @@ export class Updater {
       await this.ensureInstallId();
       const { manifest: target, channel, hotfixVersion } = this.resolveTargetVersion(latestManifest);
 
+      if (Object.hasOwn(target, 'analyticsBundle')) {
+        await this.downloadAnalyticsBundle(target);
+        return;
+      }
       const local = await this.readLocalVersion();
       if (!this.needsUpdate(local, target, channel)) {
         logger.debug('already up to date', {
@@ -545,6 +576,7 @@ export class Updater {
     packageUrl: string,
     manifest: VersionManifest,
   ): Promise<void> {
+    if (Object.hasOwn(manifest, 'analyticsBundle')) throw new Error('Analytics bundle cannot use legacy installer');
     const { cacheDir, versionsDir } = this.paths;
     // The tarball is unpacked with tar.exe, which cannot address a non-ASCII path
     // (see utils/win-archive.ts), so under C:\Users\<CJK name> the download staging
