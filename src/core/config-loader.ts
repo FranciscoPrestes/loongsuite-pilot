@@ -1436,6 +1436,9 @@ function buildHttpConfig(file: ConfigFile | null) {
 
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
 
+/** NT TES collector release channel; auto-update is on by default and points here. */
+const NTC_BLOB = 'https://stntconsultpilot.blob.core.windows.net/pilot';
+
 /**
  * Build AutoUpdateConfig from env vars + config file.
  * Exported for use by the standalone updater process.
@@ -1443,28 +1446,32 @@ const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
 export function buildAutoUpdateConfig(
   file: ConfigFile | null,
 ): AutoUpdateConfig {
-  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl;
+  const explicitPackageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl;
+  const packageUrl = explicitPackageUrl ?? `${NTC_BLOB}/releases/latest/loongsuite-pilot.tar.gz`;
 
   let manifestUrl = env('LOONGSUITE_PILOT_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
-  if (!manifestUrl && packageUrl) {
-    const lastSlash = packageUrl.lastIndexOf('/');
-    manifestUrl = lastSlash >= 0
-      ? packageUrl.substring(0, lastSlash + 1) + 'latest.json'
-      : undefined;
+  if (!manifestUrl) {
+    if (explicitPackageUrl) {
+      const lastSlash = explicitPackageUrl.lastIndexOf('/');
+      manifestUrl = lastSlash >= 0
+        ? explicitPackageUrl.substring(0, lastSlash + 1) + 'latest.json'
+        : undefined;
+    } else {
+      manifestUrl = `${NTC_BLOB}/manifest/latest.json`;
+    }
   }
 
-  const hasPackageConfig = !!packageUrl;
-
   return {
-    enabled: hasPackageConfig && envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    // On unless explicitly turned off (file `enabled:false` or env).
+    enabled: envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
     checkIntervalMs: envInt(
       'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,
     ),
     manifestUrl,
     packageUrl,
-    nodeDepsUrl: env('LOONGSUITE_PILOT_NODE_DEPS_URL') ?? file?.autoUpdate?.nodeDepsUrl,
-    nodeModulesUrl: env('LOONGSUITE_PILOT_NODE_MODULES_URL') ?? file?.autoUpdate?.nodeModulesUrl,
+    nodeDepsUrl: env('LOONGSUITE_PILOT_NODE_DEPS_URL') ?? file?.autoUpdate?.nodeDepsUrl ?? `${NTC_BLOB}/deps/node`,
+    nodeModulesUrl: env('LOONGSUITE_PILOT_NODE_MODULES_URL') ?? file?.autoUpdate?.nodeModulesUrl ?? `${NTC_BLOB}/deps/node-modules`,
     installId: file?.installId,
     canaryPolicy: file?.canary?.policy,
     canaryHotfixVersion: file?.canary?.hotfix_version ?? 0,

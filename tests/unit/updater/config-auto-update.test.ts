@@ -22,11 +22,31 @@ describe('buildAutoUpdateConfig', () => {
     vi.unstubAllEnvs();
   });
 
-  it('disabled when no packageUrl configured', () => {
+  const BLOB = 'https://stntconsultpilot.blob.core.windows.net/pilot';
+
+  it('enabled by default, pointing at the NTConsult blob, when nothing is configured', () => {
     const config = buildAutoUpdateConfig(null);
+    expect(config.enabled).toBe(true);
+    expect(config.manifestUrl).toBe(`${BLOB}/manifest/latest.json`);
+    expect(config.packageUrl).toBe(`${BLOB}/releases/latest/loongsuite-pilot.tar.gz`);
+    expect(config.nodeDepsUrl).toBe(`${BLOB}/deps/node`);
+    expect(config.nodeModulesUrl).toBe(`${BLOB}/deps/node-modules`);
+  });
+
+  it('enabled by default for a config file without an autoUpdate section', () => {
+    const config = buildAutoUpdateConfig({});
+    expect(config.enabled).toBe(true);
+    expect(config.manifestUrl).toBe(`${BLOB}/manifest/latest.json`);
+  });
+
+  it('explicit enabled:false in the file still opts out', () => {
+    const config = buildAutoUpdateConfig({ autoUpdate: { enabled: false } });
     expect(config.enabled).toBe(false);
-    expect(config.packageUrl).toBeUndefined();
-    expect(config.manifestUrl).toBeUndefined();
+  });
+
+  it('env LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false opts out without any URL', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', 'false');
+    expect(buildAutoUpdateConfig(null).enabled).toBe(false);
   });
 
   it('derives manifest URL from package URL', () => {
@@ -100,11 +120,12 @@ describe('buildAutoUpdateConfig', () => {
     expect(config.canaryHotfixVersion).toBe(3);
   });
 
-  it('stays disabled with manifestUrl alone (installer must also write packageUrl)', () => {
+  it('manifestUrl alone keeps the custom manifest and fills the package URL default', () => {
     const config = buildAutoUpdateConfig({
       autoUpdate: { manifestUrl: 'https://pilot.example/manifest/latest.json' },
     });
-    expect(config.enabled).toBe(false);
+    expect(config.enabled).toBe(true);
+    expect(config.manifestUrl).toBe('https://pilot.example/manifest/latest.json');
   });
 
   it('enables with packageUrl + manifestUrl and keeps our manifest', () => {
