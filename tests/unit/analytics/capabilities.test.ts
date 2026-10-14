@@ -77,7 +77,7 @@ describe('governed harness capabilities', () => {
   });
 
   it('creates the physical adapter IDs declared by each manifest', () => {
-    const deps = { stateStore: new StateStore('/unused-fixture-state.json'), dataDir: '/fixture/pilot', homeDir: '/fixture/home' };
+    const deps = { stateStore: new StateStore('/unused-fixture-state.json'), dataDir: '/fixture/pilot', homeDir: '/fixture/home', platform: 'darwin' as const };
     for (const definition of definitions) {
       const manifest = loadCapabilityManifest(definition);
       const expected = manifest.adapters.filter(adapter => adapter.role === 'primary' || adapter.role === 'supplement').map(adapter => adapter.id);

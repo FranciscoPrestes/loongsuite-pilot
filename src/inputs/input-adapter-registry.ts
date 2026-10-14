@@ -2,7 +2,7 @@ import { QoderCnSqliteInput } from './qoder-cn-sqlite/qoder-cn-sqlite-input.js';
 import { QoderCnInput } from './qoder-cn/qoder-cn-input.js';
 import { QoderCnTraceInput } from './qoder-cn-trace/qoder-cn-trace-input.js';
 import { QoderWorkInput } from './qoder-work/qoder-work-input.js';
-import { QoderWorkLogInput } from './qoder-work-log/qoder-work-log-input.js';
+import { QoderWorkLogInput, resolveQoderWorkRoot } from './qoder-work-log/qoder-work-log-input.js';
 import { QoderWorkTraceInput as QoderWorkCNTraceInput } from './qoder-work-log/qoder-work-trace-input.js';
 import { QoderWorkSqliteInput } from './qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { QoderWorkTraceInput } from './qoder-work-trace/qoder-work-trace-input.js';
@@ -95,6 +95,8 @@ export interface InputAdapterDependencies {
   dataDir: string;
   homeDir: string;
   platform?: NodeJS.Platform;
+  /** Optional environment snapshot for platform-native source root resolution. */
+  env?: NodeJS.ProcessEnv;
   isEnabled?: (adapterId: string) => boolean;
   agentEnabled?: (harnessId: string) => boolean;
   /** Exact per-constructor overrides preserve multimodal processors and native paths. */
@@ -106,9 +108,9 @@ function defaultOptions(id: InputAdapterId, deps: InputAdapterDependencies): Rec
   const logDir = path.join(deps.dataDir, 'logs', logAgent,
     /^(?:qoder|qwen-work-cn|cursor)/.test(logAgent) ? 'history' : '');
   const cn = id.startsWith('qoder-work-cn');
-  const qoderRoot = (deps.platform ?? process.platform) === 'darwin'
-    ? path.join(deps.homeDir, 'Library', 'Application Support', cn ? 'QoderWork CN' : 'QoderWork')
-    : path.join(deps.homeDir, '.config', cn ? 'QoderWork CN' : 'QoderWork');
+  const qoderRoot = resolveQoderWorkRoot(cn ? 'cn' : 'standard', {
+    platform: deps.platform, homeDir: deps.homeDir, env: deps.env,
+  });
   return {
     stateStore: deps.stateStore, dataDir: deps.dataDir, logDir,
     ...(id.startsWith('qoder-work-') ? { dataRoot: qoderRoot, ...(cn ? { agentType: ClientType.QoderWorkCN } : {}) } : {}),
@@ -125,6 +127,8 @@ function defaultOptions(id: InputAdapterId, deps: InputAdapterDependencies): Rec
 
 export function createInputAdapters(definition: AgentDefinition, dependencies: InputAdapterDependencies): BaseInput[] {
   const manifest = loadCapabilityManifest(definition);
+  if (!manifest.platforms.some(platform => platform === (dependencies.platform ?? process.platform))
+    || dependencies.agentEnabled?.(definition.id) === false) return [];
   const enabled = dependencies.isEnabled ?? (() => true);
   if (manifest.lifecycle === 'retired' || manifest.lifecycle === 'unavailable') return [];
   return manifest.adapters.filter(binding => binding.role !== 'retired' && binding.role !== 'shared'
