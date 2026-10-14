@@ -290,8 +290,36 @@ describe('repo snapshot', () => {
     for (const forbidden of ['config', 'diff', 'log', 'show', 'ls-files']) {
       expect(READONLY_GIT_SUBCOMMANDS.has(forbidden)).toBe(false);
     }
-    // Every invocation forces off repo-configured code execution (fsmonitor hook).
+    // Every invocation forces off repo-configured code execution (fsmonitor hook)
+    // and prevents index writes / hook runs.
     expect(GIT_SAFE_CONFIG).toContain('core.fsmonitor=false');
     expect(GIT_SAFE_CONFIG).toContain('core.untrackedCache=false');
+    expect(GIT_SAFE_CONFIG).toContain('--no-optional-locks');
+    expect(GIT_SAFE_CONFIG).toContain('core.hooksPath=');
+  });
+
+  it('a snapshot never runs target-repo hooks nor writes its index (#5 residual)', async () => {
+    const repo = path.join(dir, 'repo');
+    initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a');
+    commitAll(repo, 'init');
+    fs.writeFileSync(path.join(repo, 'dirty.txt'), 'dirty'); // real dirty state
+
+    // Plant a post-index-change hook that records execution. `git status` writes
+    // the refreshed index by default and git runs this hook on that write — the
+    // residual code-execution vector. The snapshot must neither run it nor
+    // modify .git/index.
+    const marker = path.join(dir, 'hook-ran');
+    const hook = path.join(repo, '.git', 'hooks', 'post-index-change');
+    fs.writeFileSync(hook, `#!/bin/sh\necho ran >> "${marker}"\n`);
+    fs.chmodSync(hook, 0o755);
+
+    const index = path.join(repo, '.git', 'index');
+    const before = fs.statSync(index).mtimeMs;
+
+    await snapshotRepository(repo, signal());
+
+    expect(fs.existsSync(marker)).toBe(false); // hook must NOT execute
+    expect(fs.statSync(index).mtimeMs).toBe(before); // index must NOT be written
   });
 });

@@ -35,19 +35,30 @@ export const MAX_SNAPSHOT_FILES = 100;
  * Only the read-only git subcommands actually used here are permitted, invoked
  * with argument arrays built here (never shell interpolation). `diff`/`log`/
  * `show`/`config` are deliberately excluded: they can trigger textconv or
- * external-diff filters from the target repo's config. This allowlist is the
- * guard that keeps snapshotRepository from ever mutating or executing code in a
- * repository.
+ * external-diff filters from the target repo's config. This allowlist prevents
+ * code execution and repository mutation by forbidding any command that could
+ * run a filter, hook trigger, or write. Note `status` alone would refresh/write
+ * the target's index; that is prevented by `--no-optional-locks` below, not by
+ * the allowlist.
  */
 export const READONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set(['rev-parse', 'status', 'symbolic-ref']);
 
 /**
- * Hardened config for every git invocation. A target repository's local config
- * must never run code during a read-only snapshot: `core.fsmonitor` would
- * otherwise spawn a daemon/hook from `.git/config`, and `core.untrackedCache`
- * can interact with it. These flags force both off regardless of repo config.
+ * Hardened flags for every git invocation. Together these guarantee a target
+ * repository can NEVER run code and the snapshot NEVER writes the target's
+ * index:
+ * - `--no-optional-locks` stops `git status` from writing the refreshed index,
+ *   so the target repo's `post-index-change` hook (invoked on index write) never
+ *   fires AND `.git/index` stays byte-identical. This is the root fix.
+ * - `core.hooksPath=` points hook lookup at an empty location so no
+ *   repo-installed hook (e.g. `post-index-change`) can run even if an index
+ *   write occurred (defense in depth).
+ * - `core.fsmonitor=false` / `core.untrackedCache=false` disable the repo's
+ *   fsmonitor daemon/hook; `core.pager=cat` avoids a pager.
  */
 export const GIT_SAFE_CONFIG = [
+  '--no-optional-locks',
+  '-c', 'core.hooksPath=',
   '-c', 'core.fsmonitor=false',
   '-c', 'core.untrackedCache=false',
   '-c', 'core.pager=cat',
