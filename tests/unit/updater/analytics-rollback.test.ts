@@ -13,7 +13,9 @@ let root: string;
 let enabled = true;
 let healthy = true;
 let desired = '1.0.0';
-const options = () => ({ collectorVersion: '1.2.0', trustedKeys: { schemaVersion: 1 as const, revision: 1, keys: { fixture: pair.publicKey.export({ format: 'pem', type: 'spki' }).toString() } }, authorization: async () => ({ enabled, desiredBundle: desired, cohort: 'test' }), inspect: async () => healthy });
+let cohort: string | null = 'test';
+let allowedRollbackBundles: string[] = [];
+const options = () => ({ collectorVersion: '1.2.0', trustedKeys: { schemaVersion: 1 as const, revision: 1, keys: { fixture: pair.publicKey.export({ format: 'pem', type: 'spki' }).toString() } }, authorization: async () => ({ enabled, desiredBundle: desired, cohort, allowedRollbackBundles }), inspect: async () => healthy });
 const updater = () => new Updater({ enabled: true, checkIntervalMs: 60000, manifestUrl: 'https://invalid.test/latest' }, root, options());
 async function fixture(version: string) {
   const dir = path.join(root, 'fixture-' + version); await fs.mkdir(dir);
@@ -24,7 +26,7 @@ async function fixture(version: string) {
   const bytes = canonicalManifestBytes(payload);
   return { archive, envelope: { payload, signature: sign(null, bytes, pair.privateKey).toString('base64') } };
 }
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'analytics-c3-')); enabled = healthy = true; desired = '1.0.0'; });
+beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'analytics-c3-')); enabled = healthy = true; desired = '1.0.0'; cohort = 'test'; allowedRollbackBundles = []; });
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await fs.rm(root, { recursive: true, force: true }); });
 describe('analytics updater transaction', () => {
   it('rollback_preserves_queue_and_user_hooks', async () => {
@@ -159,6 +161,83 @@ describe('analytics updater transaction', () => {
     const instance = new Updater({ enabled: true, checkIntervalMs: 60000 }, root, { ...options(), authorization: async () => ({ enabled: true, desiredBundle: '1.0.0', cohort: null }) });
     await instance.installAnalyticsBundle(f.envelope, f.archive);
     expect((await instance.resolveAnalyticsBundle())?.version).toBe('1.0.0');
+  });
+
+  it('withdraws consumption on desired-version or cohort change', async () => {
+    const f = await fixture('1.0.0'); await updater().installAnalyticsBundle(f.envelope, f.archive);
+    desired = '1.1.0'; expect(await updater().resolveAnalyticsBundle()).toBeNull();
+    desired = '1.0.0'; cohort = 'other'; expect(await updater().resolveAnalyticsBundle()).toBeNull();
+    allowedRollbackBundles = ['1.0.0']; expect(await updater().resolveAnalyticsBundle()).toBeNull();
+  });
+  it('requires current explicit compatible rollback permission after failed upgrade', async () => {
+    const first = await fixture('1.0.0'); const second = await fixture('1.1.0');
+    await updater().installAnalyticsBundle(first.envelope, first.archive);
+    desired = '1.1.0'; healthy = false;
+    await expect(updater().installAnalyticsBundle(second.envelope, second.archive)).rejects.toThrow();
+    expect(await updater().resolveAnalyticsBundle()).toBeNull();
+    allowedRollbackBundles = ['1.0.0'];
+    expect((await updater().resolveAnalyticsBundle())?.version).toBe('1.0.0');
+    allowedRollbackBundles = []; expect(await updater().resolveAnalyticsBundle()).toBeNull();
+  });
+  it('reauthorizes identical assets with fresh evidence after cohort reassignment', async () => {
+    const f = await fixture('1.0.0'); await updater().installAnalyticsBundle(f.envelope, f.archive);
+    cohort = 'new-cohort'; healthy = false;
+    await expect(updater().installAnalyticsBundle(f.envelope, f.archive)).rejects.toThrow();
+    expect(await updater().resolveAnalyticsBundle()).toBeNull();
+    healthy = true; await updater().installAnalyticsBundle(f.envelope, f.archive);
+    expect((await updater().resolveAnalyticsBundle())?.version).toBe('1.0.0');
+  });
+
+  it.each(['invalid_signature', 'unknown_key', 'incompatible', 'disabled'])('preflights %s before any archive fetch', async reason => {
+    const f = await fixture('1.0.0');
+    if (reason === 'invalid_signature') f.envelope.signature = '';
+    if (reason === 'unknown_key') f.envelope.payload.keyId = 'untrusted';
+    if (reason === 'incompatible') f.envelope.payload.collectorRange = '>=9.0.0';
+    if (reason !== 'invalid_signature') f.envelope.signature = sign(null, canonicalManifestBytes(f.envelope.payload), pair.privateKey).toString('base64');
+    if (reason === 'disabled') enabled = false;
+    let archiveFetches = 0;
+    const release = { version: '1.0.0', git_commit: 'fixture', package_url: 'https://invalid.test/bundle', sha256: f.envelope.payload.archiveSha256, analyticsBundle: f.envelope };
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (url.endsWith('latest')) return new Response(JSON.stringify(release));
+      archiveFetches++; return new Response(await fs.readFile(f.archive));
+    });
+    const instance = new Updater({ enabled: true, checkIntervalMs: 60000, installId: 'fixture-id', manifestUrl: 'https://invalid.test/latest' }, root, options());
+    await instance.check();
+    expect(archiveFetches).toBe(0);
+    expect(await instance.resolveAnalyticsBundle()).toBeNull();
+  });
+  it('aborts chunked archive transfer at 32MiB and cleans partial download', async () => {
+    const f = await fixture('1.0.0'); let chunks = 0; let cancelled = false; let signal: AbortSignal | undefined;
+    const release = { version: '1.0.0', git_commit: 'fixture', package_url: 'https://invalid.test/bundle', sha256: f.envelope.payload.archiveSha256, analyticsBundle: f.envelope };
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      if (url.endsWith('latest')) return new Response(JSON.stringify(release));
+      signal = init.signal as AbortSignal;
+      return new Response(new ReadableStream<Uint8Array>({ pull(controller) { if (chunks === 40) { controller.close(); return; } chunks++; controller.enqueue(new Uint8Array(1024 * 1024)); }, cancel() { cancelled = true; } }, { highWaterMark: 0 }));
+    });
+    const instance = new Updater({ enabled: true, checkIntervalMs: 60000, installId: 'fixture-id', manifestUrl: 'https://invalid.test/latest' }, root, options());
+    await instance.check();
+    expect(chunks).toBeLessThanOrEqual(35); expect(cancelled).toBe(true); expect(signal?.aborted).toBe(true);
+    expect((await fs.readdir(root)).filter(v => v.startsWith('analytics-download-'))).toEqual([]);
+    expect(await instance.resolveAnalyticsBundle()).toBeNull();
+  });
+
+  it('rechecks resolver authority after asynchronous verification', async () => {
+    const f = await fixture('1.0.0'); await updater().installAnalyticsBundle(f.envelope, f.archive);
+    let reads = 0;
+    const instance = new Updater({ enabled: true, checkIntervalMs: 60000 }, root, { ...options(), authorization: async () => ({ enabled: ++reads === 1, desiredBundle: '1.0.0', cohort: 'test' }) });
+    expect(await instance.resolveAnalyticsBundle()).toBeNull(); expect(reads).toBe(2);
+  });
+  it('legacy state without authority requires fresh activation and bounds rollback permission', async () => {
+    const f = await fixture('1.0.0'); await updater().installAnalyticsBundle(f.envelope, f.archive);
+    const stateFile = path.join(root, 'analytics', 'bundle-state.json');
+    const state = JSON.parse(await fs.readFile(stateFile, 'utf8')); delete state.authority;
+    await fs.writeFile(stateFile, JSON.stringify(state));
+    expect(await updater().resolveAnalyticsBundle()).toBeNull();
+    healthy = false; await expect(updater().installAnalyticsBundle(f.envelope, f.archive)).rejects.toThrow();
+    healthy = true; await updater().installAnalyticsBundle(f.envelope, f.archive);
+    expect((await updater().resolveAnalyticsBundle())?.version).toBe('1.0.0');
+    allowedRollbackBundles = Array(101).fill('1.0.0'); await expect(updater().resolveAnalyticsBundle()).rejects.toThrow();
+    allowedRollbackBundles = ['../other']; await expect(updater().resolveAnalyticsBundle()).rejects.toThrow();
   });
 
 });

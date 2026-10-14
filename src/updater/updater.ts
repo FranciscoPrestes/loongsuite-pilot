@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createWriteStream, readdirSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
@@ -240,13 +240,39 @@ export class Updater {
 
   private async downloadAnalyticsBundle(target: VersionManifest): Promise<void> {
     if (!this.analyticsBundles || !target.analyticsBundle) throw new Error('Analytics updater not configured');
+    await this.analyticsBundles.preflight(target.analyticsBundle);
     if (target.version !== target.analyticsBundle.payload.version || target.sha256 !== target.analyticsBundle.payload.archiveSha256) throw new Error('Analytics release identity mismatch');
     const tmp = await fs.mkdtemp(path.join(this.paths.cacheDir, 'analytics-download-'));
     try {
       const archive = path.join(tmp, 'bundle.tgz');
-      await this.downloadFile(target.package_url, archive);
+      await this.downloadAnalyticsArchive(target.package_url, archive);
       await this.installAnalyticsBundle(target.analyticsBundle, archive);
     } finally { await fs.rm(tmp, { recursive: true, force: true }); }
+  }
+
+  private async downloadAnalyticsArchive(url: string, destination: string): Promise<void> {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), DOWNLOAD_TIMEOUT_MS);
+    const limit = 32 * 1024 * 1024;
+    try {
+      const response = await fetch(url, { signal: abort.signal });
+      if (!response.ok || !response.body) throw new Error('Analytics archive download failed');
+      const length = response.headers.get('content-length');
+      if (length && Number(length) > limit) {
+        await response.body.cancel();
+        throw new Error('Analytics archive exceeds limit');
+      }
+      let bytes = 0;
+      const bound = new Transform({ transform(chunk, _encoding, callback) {
+        bytes += chunk.length;
+        callback(bytes > limit ? new Error('Analytics archive exceeds limit') : null, bytes > limit ? undefined : chunk);
+      } });
+      await pipeline(Readable.fromWeb(response.body as any), bound, createWriteStream(destination), { signal: abort.signal });
+    } catch (error) {
+      abort.abort();
+      await fs.rm(destination, { force: true });
+      throw error;
+    } finally { clearTimeout(timer); }
   }
 
   setMetrics(metrics: UpdaterMetrics): void {

@@ -1,13 +1,12 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { withTarGzReader } from '../utils/win-archive.js';
 import { z } from 'zod';
 import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
 import { canonicalManifestBytes, DEFAULT_ANALYTICS_KEYS, trustedKeyMap, validateAnalyticsManifest, verifySignedManifest, type AnalyticsManifest, type SignedAnalyticsManifest, type TrustedAnalyticsKeys } from '../deployment/manifest-signature.js';
 
-export interface AnalyticsBundleAuthorization { enabled: boolean; desiredBundle: string; cohort: string | null }
+export interface AnalyticsBundleAuthorization { enabled: boolean; desiredBundle: string; cohort: string | null; allowedRollbackBundles?: readonly string[] }
 export interface VerifiedAnalyticsBundle { version: string; directory: string; assets: Readonly<Record<string, string>> }
 export interface AnalyticsBundleOptions {
   collectorVersion: string;
@@ -17,13 +16,15 @@ export interface AnalyticsBundleOptions {
   /** True means instrumentation evidence was observed, not just process/install success. */
   inspect: (bundle: VerifiedAnalyticsBundle, manifest: AnalyticsManifest, signal: AbortSignal) => Promise<boolean>;
 }
+const bundleVersion = z.string().regex(/^\d+\.\d+\.\d+(?:-ntc\.\d+)?$/).max(80);
+const activationAuthoritySchema = z.object({ desiredBundle: bundleVersion, cohort: z.string().min(1).max(500).nullable() }).strict();
+const authorizationSchema = activationAuthoritySchema.extend({ enabled: z.boolean(), allowedRollbackBundles: z.array(bundleVersion).max(100).default([]) }).strict();
 const pointer = z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+(?:-ntc\.[0-9]+)?_[a-f0-9-]{36}$/).nullable();
-const stableStateSchema = z.object({ schemaVersion: z.literal(1), current: pointer, previous: pointer, lastGood: pointer, pending: z.literal(false) }).strict();
-const stateSchema = z.object({ schemaVersion: z.literal(1), current: pointer, previous: pointer, lastGood: pointer, pending: z.boolean(), rollback: stableStateSchema.optional() }).strict().refine(v => v.pending === Boolean(v.rollback), 'Pending state requires rollback record');
+const stableStateSchema = z.object({ schemaVersion: z.literal(1), current: pointer, previous: pointer, lastGood: pointer, authority: activationAuthoritySchema.nullable().default(null), pending: z.literal(false) }).strict();
+const stateSchema = z.object({ schemaVersion: z.literal(1), current: pointer, previous: pointer, lastGood: pointer, authority: activationAuthoritySchema.nullable().default(null), pending: z.boolean(), rollback: stableStateSchema.optional() }).strict().refine(v => v.pending === Boolean(v.rollback), 'Pending state requires rollback record');
 type BundleState = z.infer<typeof stateSchema>;
-const emptyState: BundleState = { schemaVersion: 1, current: null, previous: null, lastGood: null, pending: false };
+const emptyState: BundleState = { schemaVersion: 1, current: null, previous: null, lastGood: null, authority: null, pending: false };
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
-const exec = promisify(execFile);
 
 /** Collector-owned immutable assets only. No queue, hook settings or user files are restored. */
 export class AnalyticsBundleStore {
@@ -86,8 +87,16 @@ export class AnalyticsBundleStore {
     await this.tail;
     return this.locked(async () => {
       const state = await this.recover();
-      if (!(await this.options.authorization()).enabled || !state.current) return null;
-      return this.verifyDirectory(state.current);
+      if (!state.current || !state.authority) return null;
+      const authorized = (policy: z.infer<typeof authorizationSchema>, version: string) => policy.enabled
+        && policy.cohort === state.authority!.cohort && state.authority!.desiredBundle === version
+        && (policy.desiredBundle === version || (state.current === state.lastGood && policy.allowedRollbackBundles.includes(version)));
+      const before = authorizationSchema.parse(await this.options.authorization());
+      if (!authorized(before, state.authority.desiredBundle)) return null;
+      const bundle = await this.verifyDirectory(state.current);
+      // Recheck after asynchronous signature/filesystem work, immediately before publication.
+      const current = authorizationSchema.parse(await this.options.authorization());
+      return authorized(current, bundle.version) ? bundle : null;
     });
   }
   install(envelope: SignedAnalyticsManifest, archive: string): Promise<void> {
@@ -105,13 +114,18 @@ export class AnalyticsBundleStore {
       ]);
     } finally { if (timer) clearTimeout(timer); }
   }
+  private async authorize(manifest: AnalyticsManifest): Promise<z.infer<typeof authorizationSchema>> {
+    const policy = authorizationSchema.parse(await this.options.authorization());
+    if (!policy.enabled || policy.desiredBundle !== manifest.version) throw new Error('Analytics bundle activation not authorized');
+    return policy;
+  }
+  /** No transport side effect may precede this authentication/compatibility gate. */
+  async preflight(envelope: SignedAnalyticsManifest): Promise<void> {
+    await this.authorize(await this.verifiedManifest(envelope));
+  }
   private async installOnce(envelope: SignedAnalyticsManifest, archive: string): Promise<void> {
     const manifest = await this.verifiedManifest(envelope);
-    const authorize = async () => {
-      const policy = await this.options.authorization();
-      if (!policy.enabled || policy.desiredBundle !== manifest.version || (policy.cohort !== null && (typeof policy.cohort !== 'string' || !policy.cohort))) throw new Error('Analytics bundle activation not authorized');
-      return policy;
-    };
+    const authorize = () => this.authorize(manifest);
     const policy = await authorize();
     if ((await fs.stat(archive)).size > 32 * 1024 * 1024) throw new Error('Analytics archive exceeds limit');
     const bytes = await fs.readFile(archive);
@@ -120,7 +134,7 @@ export class AnalyticsBundleStore {
     if (old.current) {
       const active = await this.verifyDirectory(old.current);
       const installed = JSON.parse(await fs.readFile(path.join(active.directory, 'manifest.json'), 'utf8')) as SignedAnalyticsManifest;
-      if (canonicalManifestBytes(installed.payload).equals(canonicalManifestBytes(manifest))) return;
+      if (canonicalManifestBytes(installed.payload).equals(canonicalManifestBytes(manifest)) && old.authority?.desiredBundle === policy.desiredBundle && old.authority.cohort === policy.cohort) { await authorize(); return; }
     }
     const name = manifest.version + '_' + randomUUID();
     const directory = path.join(this.root, 'versions', name);
@@ -130,32 +144,34 @@ export class AnalyticsBundleStore {
       await fs.writeFile(localArchive, bytes, { mode: 0o600 });
       // Reject links and non-file entries BEFORE extraction. Only exact signed paths
       // may be extracted, which prevents archive traversal and unlisted executables.
-      const { stdout: names } = await exec('tar', ['-tzf', localArchive], { timeout: 30000, maxBuffer: 65536 });
-      const entries = names.trim().split('\n');
-      if (entries.length !== Object.keys(manifest.assets).length || new Set(entries).size !== entries.length || entries.some(v => !Object.hasOwn(manifest.assets, v))) throw new Error('Unexpected archive assets');
-      const { stdout: details } = await exec('tar', ['-tvzf', localArchive], { timeout: 30000, maxBuffer: 65536 });
-      if (details.trim().split('\n').some(v => !v.startsWith('-'))) throw new Error('Archive links or special files rejected');
-      let inflatedBytes = 0;
-      for (const asset of entries) {
-        // Stream one named regular file to a bounded buffer; never let tar write
-        // paths or materialize an arbitrarily large compressed payload on disk.
-        const { stdout } = await exec('tar', ['-xOf', localArchive, asset], { timeout: 30000, maxBuffer: 2 * 1024 * 1024, encoding: 'buffer' });
-        inflatedBytes += stdout.length;
-        if (inflatedBytes > 32 * 1024 * 1024) throw new Error('Inflated analytics bundle exceeds limit');
-        const destination = path.join(directory, asset);
-        await fs.mkdir(path.dirname(destination), { recursive: true });
-        await fs.writeFile(destination, stdout, { mode: 0o600, flag: 'wx' });
-      }
+      await withTarGzReader(localArchive, async reader => {
+        const names = await reader.list();
+        const entries = names.trim().split('\n');
+        if (entries.length !== Object.keys(manifest.assets).length || new Set(entries).size !== entries.length || entries.some(v => !Object.hasOwn(manifest.assets, v))) throw new Error('Unexpected archive assets');
+        const details = await reader.details();
+        if (details.trim().split('\n').some(v => !v.startsWith('-'))) throw new Error('Archive links or special files rejected');
+        let inflatedBytes = 0;
+        for (const asset of entries) {
+          // Stream one named regular file to a bounded buffer; never let tar write
+          // paths or materialize an arbitrarily large compressed payload on disk.
+          const stdout = await reader.readFile(asset, 2 * 1024 * 1024);
+          inflatedBytes += stdout.length;
+          if (inflatedBytes > 32 * 1024 * 1024) throw new Error('Inflated analytics bundle exceeds limit');
+          const destination = path.join(directory, asset);
+          await fs.mkdir(path.dirname(destination), { recursive: true });
+          await fs.writeFile(destination, stdout, { mode: 0o600, flag: 'wx' });
+        }
+      });
       await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(envelope), { mode: 0o600 });
       const bundle = await this.verifyDirectory(name);
       const fresh = await authorize();
       if (fresh.cohort !== policy.cohort) throw new Error('Analytics cohort changed during installation');
-      await this.writeState({ schemaVersion: 1, current: name, previous: old.current, lastGood: old.lastGood, pending: true, rollback: stableStateSchema.parse(old) });
+      await this.writeState({ schemaVersion: 1, current: name, previous: old.current, lastGood: old.lastGood, authority: { desiredBundle: policy.desiredBundle, cohort: policy.cohort }, pending: true, rollback: stableStateSchema.parse(old) });
       if (!await this.inspect(bundle, manifest)) throw new Error('Analytics instrumentation evidence missing');
       const finalPolicy = await authorize();
       if (finalPolicy.cohort !== policy.cohort) throw new Error('Analytics cohort changed during verification');
       await this.verifyDirectory(name);
-      await this.writeState({ schemaVersion: 1, current: name, previous: old.current, lastGood: name, pending: false });
+      await this.writeState({ schemaVersion: 1, current: name, previous: old.current, lastGood: name, authority: { desiredBundle: policy.desiredBundle, cohort: policy.cohort }, pending: false });
     } catch (error) {
       await this.writeState(old);
       await fs.rm(directory, { recursive: true, force: true });
