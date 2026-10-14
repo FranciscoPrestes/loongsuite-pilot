@@ -11,13 +11,23 @@ import {job,observation,observationsFor} from './fixtures.js';
 // True durability boundary: production renames through this exact module. The
 // wrapper only fails writes whose destination is the loss manifest.
 const renameFailure = vi.hoisted(() => ({ suffix: '' }));
+// Spill-write race injector: creates a real spill marker right after the Nth
+// readdir of the spill dir (i.e. after a fold's listing snapshot).
+const spillRace = vi.hoisted(() => ({ dir: '', calls: 0, injectAt: 0, file: '', content: {} as Record<string, unknown> }));
 vi.mock('node:fs', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs')>();
   const failingRename = (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]): void => {
     if (renameFailure.suffix && String(to).endsWith(renameFailure.suffix)) throw new Error('disk full');
     actual.renameSync(from, to);
   };
-  return { ...actual, renameSync: failingRename, default: { ...actual.default, renameSync: failingRename } };
+  const readdirSync = ((p: never, opts?: never) => {
+    const result = (actual.readdirSync as unknown as (path: unknown, options?: unknown) => unknown)(p, opts);
+    if (spillRace.dir && String(p) === spillRace.dir && ++spillRace.calls === spillRace.injectAt) {
+      actual.writeFileSync(spillRace.file, JSON.stringify(spillRace.content));
+    }
+    return result;
+  }) as typeof actual.readdirSync;
+  return { ...actual, renameSync: failingRename, readdirSync, default: { ...actual.default, renameSync: failingRename, readdirSync } };
 });
 let dir:string;
 beforeEach(async()=>{dir=await fs.mkdtemp(path.join(os.tmpdir(),'c4-queue-'));});
@@ -127,5 +137,30 @@ describe('durable enrichment queue',()=>{
   // Contention outlives one 80ms acquisition window but not the bounded enqueue budget.
   expect(await store().enqueue(job({id:'retry-job',dedupeKey:'retry-event'}))).toBe('created');
   expect((await store().losses()).find(l=>l.reason==='busy')).toBeUndefined();});
+ it('never delivers an expired pending job: the claim path discards it with an expired loss',async()=>{
+  let clock=now;
+  const a=store({now:()=>clock});
+  await a.enqueue(job({occurredAt:new Date(clock-6*86400000).toISOString()}));
+  clock+=2*86400000;
+  expect(await a.claim(clock,2000)).toBeNull();
+  expect((await a.losses()).find(l=>l.reason==='expired')).toMatchObject({count:1,unreported:false});
+  expect(await a.claim(clock,2000)).toBeNull();});
+ it('keeps a spill marker written during a fold for the next fold and counts it exactly once',async()=>{
+  const a=store();await a.enqueue(job());
+  const {acquireSingleInstanceLock}=await import('../../../src/utils/single-instance-lock.js');
+  const held=acquireSingleInstanceLock(path.join(dir,'enrichment','queue.lock'));
+  await expect(a.enqueue(job({id:'busy-old',dedupeKey:'busy-old'}))).rejects.toThrow('busy');
+  held.lock!.release();
+  const spillDir=path.join(dir,'enrichment','spill');
+  // A concurrent lock-free spill write lands right after the fold's listing snapshot.
+  spillRace.dir=spillDir;spillRace.calls=0;spillRace.injectAt=1;
+  spillRace.file=path.join(spillDir,`${Date.now()}-injected.json`);
+  spillRace.content={reason:'busy',occurredAt:job().occurredAt};
+  try{await a.maintain();}finally{spillRace.dir='';}
+  expect(await fs.readdir(spillDir)).toEqual([path.basename(spillRace.file)]);
+  expect((await a.losses()).find(l=>l.reason==='busy')).toMatchObject({count:1});
+  await a.maintain();
+  expect(await fs.readdir(spillDir)).toEqual([]);
+  expect((await a.losses()).find(l=>l.reason==='busy')).toMatchObject({count:2,unreported:false});});
 
 });

@@ -5,18 +5,25 @@ import { JobStore } from './job-store.js';
 export interface OwnedProcess { kill(signal?:NodeJS.Signals):unknown }
 export interface JobContext { ownProcess(child:OwnedProcess):void }
 export type EnrichmentHandler=(job:LocalJob,signal:AbortSignal,context:JobContext)=>Promise<Observation>;
-export interface SchedulerOptions { policy:()=>EffectiveInstrumentationPolicy;timeoutMs?:number;onError?:(reason:string)=>void }
+export interface SchedulerOptions { policy:()=>EffectiveInstrumentationPolicy;timeoutMs?:number;maintainEveryMs?:number;onError?:(reason:string)=>void }
 /** Only trusted compiled handlers. No command strings or code from central policy. */
 export class EnrichmentScheduler {
- readonly config:{timeoutMs:number};private handlers=new Map<ObservationKind,EnrichmentHandler>();
+ readonly config:{timeoutMs:number;maintainEveryMs:number};private handlers=new Map<ObservationKind,EnrichmentHandler>();
  private timer:ReturnType<typeof setInterval>|null=null;private pending:Promise<void>|null=null;private active:AbortController|null=null;private stopping=false;
- constructor(private readonly store:JobStore,private readonly options:SchedulerOptions){this.config={timeoutMs:options.timeoutMs??2000};if(this.config.timeoutMs<=0||this.config.timeoutMs>2000)throw new Error('invalid worker timeout');}
+ private lastMaintainAt=0;
+ constructor(private readonly store:JobStore,private readonly options:SchedulerOptions){this.config={timeoutMs:options.timeoutMs??2000,maintainEveryMs:options.maintainEveryMs??30000};if(this.config.timeoutMs<=0||this.config.timeoutMs>2000)throw new Error('invalid worker timeout');if(!Number.isFinite(this.config.maintainEveryMs)||this.config.maintainEveryMs<0)throw new Error('invalid maintenance cadence');}
  register(kind:ObservationKind,handler:EnrichmentHandler):void{this.handlers.set(kind,handler);}
  start():void{if(this.timer)return;this.stopping=false;this.timer=setInterval(()=>{void this.tick();},250);this.timer.unref?.();void this.tick();}
  async stop():Promise<void>{this.stopping=true;if(this.timer)clearInterval(this.timer);this.timer=null;this.active?.abort();await this.pending;}
  tick():Promise<void>{if(this.pending)return this.pending;this.pending=this.tickOnce().catch(()=>{try{this.options.onError?.('enrichment_queue_unavailable');}catch{/* observer cannot stop capture */}}).finally(()=>{this.pending=null;});return this.pending;}
  private async tickOnce():Promise<void>{
   if(this.stopping||!this.options.policy().enrichmentEnabled)return;
+  // Steady-state maintenance cadence: expiry sweep, busy-spill fold and quota
+  // reclaim run continuously off the enqueue path; the store keeps its scans
+  // outside the shared lock. A maintenance failure never blocks claiming.
+  const at=Date.now();
+  if(at-this.lastMaintainAt>=this.config.maintainEveryMs){this.lastMaintainAt=at;
+   try{await this.store.maintain();}catch{try{this.options.onError?.('enrichment_queue_unavailable');}catch{/* observer cannot stop capture */}}}
   const job=await this.store.claim(Date.now(),this.config.timeoutMs+1000,[...this.handlers.keys()]);if(!job)return;
   const controller=new AbortController();this.active=controller;
   try{const result=await this.run(job,controller.signal);if(!this.stopping&&!controller.signal.aborted&&this.options.policy().enrichmentEnabled)await this.store.complete(job.id,result,job.leaseToken!);}

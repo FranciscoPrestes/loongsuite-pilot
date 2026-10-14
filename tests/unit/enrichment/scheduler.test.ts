@@ -41,5 +41,28 @@ describe('bounded scheduler',()=>{
    expect(await completed()).toBe(20);
    expect((await store.losses()).find(l=>l.reason==='busy')).toBeUndefined();
   }finally{await scheduler.stop();}});
+ it('maintains the spool in steady state: expiry sweep and busy spill fold run without restart',async()=>{
+  let clock=Date.parse('2026-10-14T10:00:00Z');
+  const store=new JobStore(dir,{policy,now:()=>clock});
+  await store.enqueue(job({occurredAt:new Date(clock-6*86400000).toISOString()}));
+  const {acquireSingleInstanceLock}=await import('../../../src/utils/single-instance-lock.js');
+  const hold=()=>acquireSingleInstanceLock(path.join(dir,'enrichment','queue.lock'));
+  const held=hold();
+  await expect(store.enqueue(job({id:'busy-1',dedupeKey:'busy-1'}))).rejects.toThrow('busy');
+  held.lock!.release();
+  const scheduler=new EnrichmentScheduler(store,{policy,maintainEveryMs:5});
+  await scheduler.tick(); // maintain #1 folds the busy spill recorded before this tick
+  expect((await store.losses()).find(l=>l.reason==='busy')).toMatchObject({count:1,unreported:false});
+  clock+=2*86400000; // the pending job crosses maxAgeDays
+  const held2=hold();
+  await expect(store.enqueue(job({id:'busy-2',dedupeKey:'busy-2',occurredAt:new Date(clock-6*86400000).toISOString()}))).rejects.toThrow('busy');
+  held2.lock!.release();
+  await new Promise(r=>setTimeout(r,10));
+  await scheduler.tick(); // cadence elapsed: expiry sweep + second spill fold
+  const losses=await store.losses();
+  expect(losses.find(l=>l.reason==='busy')).toMatchObject({count:2,unreported:false});
+  expect(losses.find(l=>l.reason==='expired')).toMatchObject({count:1,unreported:false});
+  expect(await store.claim(clock,2000)).toBeNull(); // expired spool discarded, never delivered
+  expect((await fs.readdir(path.join(dir,'enrichment','spill'))).length).toBe(0);});
 
 });

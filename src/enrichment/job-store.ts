@@ -57,6 +57,10 @@ const LOCK_BUDGET_MS = 80;
 const ENQUEUE_LOCK_BUDGET_MS = 240;
 /** Orphaned index/marker files younger than this may belong to a concurrent in-flight write. */
 const ORPHAN_GRACE_MS = 60000;
+/** Per-lock-hold bound for expiry discards; batches release the lock between runs. */
+const EXPIRY_DELETE_BATCH = 64;
+/** Soft cap for pending busy-spill markers; folding bounds the dir, never dropping records. */
+const MAX_SPILL = 256;
 
 /**
  * Private atomic per-job journals. Result and lease transitions are one
@@ -242,10 +246,13 @@ export class JobStore {
    * Lock-free frontier scan over the marker index. Sorted by wake time, so the
    * claimable candidates sit at the head. Stale markers self-heal here (O(1)
    * journal reads); the lease commit itself happens under the shared lock.
+   * Age-expired jobs are collected for discard-with-loss, never delivered.
    */
-  private scanPending(now: number, kinds: readonly ObservationKind[] | undefined, exclusions: Exclusions): string[] {
-    if (!fs.existsSync(this.pendingDir)) return [];
+  private scanPending(now: number, kinds: readonly ObservationKind[] | undefined, exclusions: Exclusions): { candidates: string[]; expired: string[] } {
     const candidates: string[] = [];
+    const expired: string[] = [];
+    if (!fs.existsSync(this.pendingDir)) return { candidates, expired };
+    const maxAgeMs = this.config.maxAgeDays * 86400000;
     for (const name of fs.readdirSync(this.pendingDir).sort()) {
       const match = PENDING_NAME.exec(name);
       if (!match) continue;
@@ -263,12 +270,17 @@ export class JobStore {
         try { fs.unlinkSync(file); } catch { /* gone */ }
         this.writeMarker(record);
       }
+      // D5: an expired job is discarded with an 'expired' loss, never delivered.
+      if ((record.state === 'pending' || record.state === 'leased') && Date.parse(record.job.occurredAt) < now - maxAgeMs) {
+        expired.push(key);
+        continue;
+      }
       if ((kinds && !kinds.includes(record.job.kind)) || this.excluded(record.job, exclusions)
         || record.job.notBefore > now || record.state === 'complete' || record.state === 'dead'
         || (record.state === 'leased' && (record.leaseUntil ?? 0) > now)) continue;
       candidates.push(key);
     }
-    return candidates;
+    return { candidates, expired };
   }
 
   private readRecordTolerant(key: string): JournalRecord | null {
@@ -428,9 +440,15 @@ export class JobStore {
   }
 
   /** Durable record for a job that contention kept out of the spool; folded into the loss manifest. */
-  private spill(job: LocalJob): void {
+  private async spill(job: LocalJob): Promise<void> {
     try {
       fs.mkdirSync(this.spillDir, { recursive: true, mode: 0o700 });
+      // Bounded spill dir: at the soft cap, fold inline when the lock is briefly
+      // reachable. A record is never dropped to enforce the cap — the steady-state
+      // maintenance fold bounds the dir instead, counting each marker exactly once.
+      if (fs.readdirSync(this.spillDir).length >= MAX_SPILL) {
+        try { await this.locked(() => this.foldSpillsLocked(), LOCK_BUDGET_MS); } catch { /* still contended */ }
+      }
       this.writeDerived(path.join(this.spillDir, `${Date.now()}-${randomUUID()}.json`), { reason: 'busy', occurredAt: job.occurredAt });
     } catch { /* the rethrown busy error remains the truthful signal */ }
   }
@@ -438,17 +456,20 @@ export class JobStore {
   /** Durable loss record before spill markers are removed (D5 ordering). */
   private foldSpillsLocked(): void {
     if (!fs.existsSync(this.spillDir)) return;
+    const counted: string[] = [];
     const entries: { occurredAt: string }[] = [];
     for (const name of fs.readdirSync(this.spillDir)) {
       const file = path.join(this.spillDir, name);
-      try { entries.push(spillSchema.parse(this.readBounded(file)) as { occurredAt: string }); }
+      try { entries.push(spillSchema.parse(this.readBounded(file)) as { occurredAt: string }); counted.push(name); }
       catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') this.quarantine(file);
       }
     }
     if (!entries.length) return;
     this.loss('busy', entries);
-    for (const name of fs.readdirSync(this.spillDir)) { try { fs.unlinkSync(path.join(this.spillDir, name)); } catch { /* gone */ } }
+    // Delete exactly the markers counted above. A marker written after the
+    // listing snapshot survives to the next fold and is counted exactly once.
+    for (const name of counted) { try { fs.unlinkSync(path.join(this.spillDir, name)); } catch { /* gone */ } }
   }
 
   private sweepTmpLocked(): void {
@@ -465,19 +486,27 @@ export class JobStore {
    */
   async maintain(now = this.now()): Promise<void> {
     await this.ready();
+    const maxAgeMs = this.config.maxAgeDays * 86400000;
     const expired = this.records()
-      .filter(r => Date.parse(r.job.occurredAt) < now - this.config.maxAgeDays * 86400000)
+      .filter(r => Date.parse(r.job.occurredAt) < now - maxAgeMs)
       .map(r => r.key);
+    // Bounded lock holds: expired spool is discarded in batches that release the
+    // shared lock between runs; the full scan above stays outside it.
+    for (let i = 0; i < expired.length; i += EXPIRY_DELETE_BATCH) {
+      const batch = expired.slice(i, i + EXPIRY_DELETE_BATCH);
+      await this.locked(() => {
+        const doomed: JournalRecord[] = [];
+        for (const key of batch) {
+          const r = this.readRecord(key);
+          if (r && Date.parse(r.job.occurredAt) < now - maxAgeMs) doomed.push(r);
+        }
+        if (doomed.length) {
+          this.loss('expired', doomed.map(r => r.job));
+          for (const r of doomed) this.deleteRecordLocked(r);
+        }
+      });
+    }
     await this.locked(() => {
-      const doomed: JournalRecord[] = [];
-      for (const key of expired) {
-        const r = this.readRecord(key);
-        if (r && Date.parse(r.job.occurredAt) < now - this.config.maxAgeDays * 86400000) doomed.push(r);
-      }
-      if (doomed.length) {
-        this.loss('expired', doomed.map(r => r.job));
-        for (const r of doomed) this.deleteRecordLocked(r);
-      }
       this.foldSpillsLocked();
       this.sweepTmpLocked();
     });
@@ -514,7 +543,7 @@ export class JobStore {
       }, ENQUEUE_LOCK_BUDGET_MS);
     } catch (e) {
       // Bounded busy budget exhausted under contention: never drop silently.
-      if (e instanceof Error && e.message === 'queue busy') this.spill(job);
+      if (e instanceof Error && e.message === 'queue busy') await this.spill(job);
       throw e;
     }
   }
@@ -526,7 +555,24 @@ export class JobStore {
     let exclusions: Exclusions;
     // Corrupt tombstone state fails closed: the worker idles until C7 reinstalls it.
     try { exclusions = this.exclusions(); } catch { return null; }
-    for (const key of this.scanPending(now, kinds, exclusions)) {
+    const { candidates, expired } = this.scanPending(now, kinds, exclusions);
+    // Defense-in-depth D5: expired jobs are discarded with a loss in bounded
+    // locked batches — never delivered, even before a maintenance tick runs.
+    for (let i = 0; i < expired.length; i += EXPIRY_DELETE_BATCH) {
+      const batch = expired.slice(i, i + EXPIRY_DELETE_BATCH);
+      await this.locked(() => {
+        const doomed: JournalRecord[] = [];
+        for (const key of batch) {
+          const r = this.readRecord(key);
+          if (r && (r.state === 'pending' || r.state === 'leased') && Date.parse(r.job.occurredAt) < now - this.config.maxAgeDays * 86400000) doomed.push(r);
+        }
+        if (doomed.length) {
+          this.loss('expired', doomed.map(r => r.job));
+          for (const r of doomed) this.deleteRecordLocked(r);
+        }
+      });
+    }
+    for (const key of candidates) {
       const job = await this.locked(() => {
         const r = this.readRecord(key);
         if (!r || (kinds && !kinds.includes(r.job.kind)) || this.excluded(r.job) || r.job.notBefore > now
