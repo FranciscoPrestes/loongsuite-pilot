@@ -176,4 +176,87 @@ describe('execution correlation', () => {
     expect(unknown.terminal).toBe(true);
     expect(unknown.exitCode).toBeNull();
   });
+
+  it('repeated_async_polls_join_the_original_execution', () => {
+    // Realistic Claude BashOutput flow: spawn call/result pair, then >= 2 poll
+    // call/result pairs on the same process handle (the shape the Claude hook
+    // adapter actually emits).
+    const start = correlateExecution(entry({ callId: 'call-spawn', execId: 'bg-task-7' }));
+    const spawnAck = correlateExecution(entry({
+      event: 'tool.result',
+      callId: 'call-spawn',
+      execId: 'bg-task-7',
+      phase: 'spawned',
+      result: 'Command running in background with ID: bg-task-7',
+    }));
+    expect(spawnAck.executionId).toBe(start.executionId);
+    expect(spawnAck.terminal).toBe(false);
+
+    const poll1 = correlateExecution(entry({ callId: 'call-poll-1', execId: 'bg-task-7' }));
+    const poll1Result = correlateExecution(entry({
+      event: 'tool.result',
+      callId: 'call-poll-1',
+      execId: 'bg-task-7',
+      result: 'still running',
+    }));
+    expect(poll1.executionId).toBe(start.executionId);
+    expect(poll1Result.executionId).toBe(start.executionId);
+    // A poll call completing is NOT the execution's final result.
+    expect(poll1Result.terminal).toBe(false);
+
+    const poll2 = correlateExecution(entry({ callId: 'call-poll-2', execId: 'bg-task-7' }));
+    const final = correlateExecution(entry({
+      event: 'tool.result',
+      callId: 'call-poll-2',
+      execId: 'bg-task-7',
+      result: { output: 'done', exit_code: 0 },
+    }));
+    expect(poll2.executionId).toBe(start.executionId);
+    expect(final.executionId).toBe(start.executionId);
+    expect(final.terminal).toBe(true);
+    expect(final.exitCode).toBe(0);
+  });
+
+  it('parent_link_is_session_scoped', () => {
+    const parent = correlateExecution(entry({ sessionId: 'session-a', callId: 'agent-call-3', execId: 'agent-call-3' }));
+    // A session-b child with a same-named parent call id must NOT join
+    // session-a's execution (same isolation as same_handle_other_session_not_joined).
+    const foreignChild = correlateExecution(entry({
+      sessionId: 'session-b',
+      callId: 'sub-foreign',
+      execId: 'sub-foreign-h',
+      parentCallId: 'agent-call-3',
+    }));
+    expect(foreignChild.parentExecutionId).toBeNull();
+
+    const sameSessionChild = correlateExecution(entry({
+      sessionId: 'session-a',
+      callId: 'sub-local',
+      execId: 'sub-local-h',
+      parentCallId: 'agent-call-3',
+    }));
+    expect(sameSessionChild.parentExecutionId).toBe(parent.executionId);
+  });
+
+  it('unobserved_parent_is_inconclusive_not_fabricated', () => {
+    // The parent's handle differs from its call id (the Claude Agent case) and
+    // the parent has NOT been observed: the child must be inconclusive, never
+    // carry a fabricated derived id.
+    const orphan = correlateExecution(entry({
+      callId: 'sub-early',
+      execId: 'sub-early-h',
+      parentCallId: 'agent-call-5',
+    }));
+    expect(orphan.parentExecutionId).toBeNull();
+
+    // Once the parent IS observed, the child links to the REAL parent execution
+    // even though the parent's handle differs from its call id.
+    const parent = correlateExecution(entry({ callId: 'agent-call-6', execId: 'agent-handle-6' }));
+    const child = correlateExecution(entry({
+      callId: 'sub-late',
+      execId: 'sub-late-h',
+      parentCallId: 'agent-call-6',
+    }));
+    expect(child.parentExecutionId).toBe(parent.executionId);
+  });
 });

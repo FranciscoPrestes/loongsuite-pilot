@@ -55,14 +55,17 @@ function escapeRegExp(value: string): string {
 }
 
 /**
- * Explicit association requires hard identity: the report embeds the execution
- * id, or the report file name carries it as a delimited token. The candidate
- * must match exactly; a report stamped with another execution (a stale leftover
- * from an earlier run) is never re-linked. Returns false for anything weaker.
+ * Explicit association requires hard identity. The report's own embedded
+ * execution id is the authoritative identity claim: when present it must match
+ * the candidate exactly — a contradicting file name can never override it (that
+ * would attribute a foreign run's counts to the candidate execution). With no
+ * embedded id, the file name may carry the execution id as a delimited token.
+ * A report stamped with another execution (a stale leftover from an earlier
+ * run) is never re-linked. Returns false for anything weaker.
  */
 function hasExplicitLink(linkedExecutionId: string | null, filePath: string, candidate: string | null): boolean {
   if (!candidate || candidate.length === 0 || candidate.length > 500) return false;
-  if (linkedExecutionId && linkedExecutionId === candidate) return true;
+  if (linkedExecutionId) return linkedExecutionId === candidate;
   const base = path.basename(filePath, path.extname(filePath));
   return new RegExp(`(^|[^A-Za-z0-9])${escapeRegExp(candidate)}([^A-Za-z0-9]|$)`).test(base);
 }

@@ -51,10 +51,10 @@ describe('local verification report reading', () => {
       'junit-old.xml',
       junit({}, '<property name="executionId" value="call-old"/>'),
     );
-    const oldReport = await readLocalReport(oldPath, dir, 'call-new', signal());
+    const oldReport = (await readLocalReport(oldPath, dir, 'call-new', signal()))!;
     expect(oldReport).not.toBeNull();
-    expect(oldReport!.executionId).toBeNull();
-    expect(oldReport!.association).toBe('unresolved');
+    expect(oldReport.executionId).toBeNull();
+    expect(oldReport.association).toBe('unresolved');
 
     // mtime alone does NOT prove linkage: a fresh report without any embedded
     // execution identity stays unresolved even for the current execution.
@@ -70,11 +70,11 @@ describe('local verification report reading', () => {
     const zeroPath = write('zero.xml', junit({
       tests: '0', failures: '0', errors: '0', skipped: '0', time: '0',
     }, ''));
-    const zero = await readLocalReport(zeroPath, dir, null, signal());
+    const zero = (await readLocalReport(zeroPath, dir, null, signal()))!;
     expect(zero).not.toBeNull();
-    expect(zero!.cases).toBe(0);
-    expect(zero!.passed).toBe(0);
-    expect(zero!.failed).toBe(0);
+    expect(zero.cases).toBe(0);
+    expect(zero.passed).toBe(0);
+    expect(zero.failed).toBe(0);
 
     const jsonZero = await readLocalReport(
       write('zero.json', JSON.stringify({ runner: 'vitest', cases: 0, passed: 0, failed: 0 })),
@@ -193,6 +193,20 @@ describe('local verification report reading', () => {
     expect(json!.passed).toBe(4);
     expect(json!.failed).toBe(1);
     expect(json!.durationMs).toBe(2400);
+  });
+
+  it('embedded_id_conflict_is_never_associated', async () => {
+    // The report embeds another execution's id while the FILE NAME carries the
+    // candidate: the embedded identity claim is authoritative, so the conflict
+    // stays unresolved — never attributed to the filename's execution.
+    const conflictPath = write(
+      'junit-call-new.xml',
+      junit({}, '<property name="executionId" value="call-old"/>'),
+    );
+    const conflict = await readLocalReport(conflictPath, dir, 'call-new', signal());
+    expect(conflict).not.toBeNull();
+    expect(conflict!.association).toBe('unresolved');
+    expect(conflict!.executionId).toBeNull();
   });
 
   it('supplements_reference_the_original_call_without_a_second_call', async () => {
