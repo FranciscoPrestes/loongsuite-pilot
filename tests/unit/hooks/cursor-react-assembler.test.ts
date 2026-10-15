@@ -1850,3 +1850,52 @@ describe('Cursor react assembler', () => {
     expect(s2ToolParts).toHaveLength(0);
   });
 });
+
+describe('Cursor tool execution handles', () => {
+  it('stamps gen_ai.tool.call.exec.id on tool call and result records', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-exec',
+        generation_id: 'turn-exec',
+        model: 'gpt-5.4',
+        prompt: 'run it',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-exec',
+        generation_id: 'turn-exec',
+        tool_name: 'shell',
+        tool_use_id: 'tool-exec-1',
+        tool_input: 'npm test',
+      },
+      {
+        _journal_ts: iso(400),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-exec',
+        generation_id: 'turn-exec',
+        tool_name: 'shell',
+        tool_use_id: 'tool-exec-1',
+        tool_output: 'done',
+        duration_ms: 300,
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'stop',
+        conversation_id: 'conv-exec',
+        generation_id: 'turn-exec',
+      },
+    ], { stopConversationId: 'conv-exec' });
+
+    const call = records.find((r: Record<string, unknown>) =>
+      r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'tool-exec-1');
+    const result = records.find((r: Record<string, unknown>) =>
+      r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'tool-exec-1');
+    expect(call).toBeDefined();
+    expect(result).toBeDefined();
+    expect(call?.['gen_ai.tool.call.exec.id']).toBe('tool-exec-1');
+    expect(result?.['gen_ai.tool.call.exec.id']).toBe('tool-exec-1');
+  });
+});

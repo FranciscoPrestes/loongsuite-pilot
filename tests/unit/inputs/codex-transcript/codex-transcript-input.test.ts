@@ -4923,3 +4923,41 @@ describe('workspace privacy during Codex subagent fusion', () => {
     } finally { await input.stop(); }
   });
 });
+
+describe('codex tool execution handles', () => {
+  it('stamps gen_ai.tool.call.exec.id on tool call and result entries', () => {
+    const turn = {
+      sessionId: 'sess-exec',
+      transcriptTurnId: 'turn-exec',
+      provider: 'openai',
+      model: 'gpt-5.5',
+      status: 'completed',
+      startedAtMs: 1_000,
+      terminalAtMs: 5_000,
+      promptReady: true,
+      prompt: 'run the command',
+      inputMessages: [],
+      unmatchedTokenUsages: [],
+      steps: [{
+        startedAtMs: 1_000,
+        responseAtMs: 1_500,
+        hasResponseEvidence: true,
+        completedAtMs: 5_000,
+        reasoning: [],
+        tools: [{
+          callId: 'call-exec-1',
+          name: 'exec_command',
+          input: { cmd: 'npm test' },
+          startedAtMs: 2_000,
+          output: { output: 'ok', exit_code: 0 },
+          completedAtMs: 2_500,
+        }],
+      }],
+    } as unknown as Parameters<typeof buildCodexTranscriptSegment>[0];
+    const { entries } = buildCodexTranscriptSegment(turn, { includePrompt: true });
+    const call = entries.find(entry => entry['event.name'] === 'tool.call');
+    const result = entries.find(entry => entry['event.name'] === 'tool.result');
+    expect(call?.['gen_ai.tool.call.exec.id']).toBe('call-exec-1');
+    expect(result?.['gen_ai.tool.call.exec.id']).toBe('call-exec-1');
+  });
+});
