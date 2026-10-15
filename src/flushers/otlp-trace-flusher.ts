@@ -19,9 +19,10 @@ import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
+import { ANALYTICS_ANNOTATION_KEYS } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { SpanEnricherRunner } from './span-enricher.js';
-import { replayFailedSpans } from './otlp-failed-replayer.js';
+import { replayFailedSpans, type FailedSpanRecord, type ReplayOptions } from './otlp-failed-replayer.js';
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -589,6 +590,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private stopping = false;
   private replayAbort = new AbortController();
   private readonly pendingFailedWrites = new Set<Promise<void>>();
+  private replayExclusionFilter: ReplayOptions['isExcluded'];
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
@@ -913,6 +915,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
     await this.replayRun;
   }
 
+  /**
+   * Fence the failed-log replay with server-recorded exclusions synchronized to
+   * the device: covered records are removed from the managed spool only and
+   * never resent. The originals outside the spool are untouched.
+   */
+  setReplayExclusionFilter(filter: ((record: FailedSpanRecord) => boolean) | undefined): void {
+    this.replayExclusionFilter = filter;
+  }
+
   private async runReplay(): Promise<void> {
     const runStart = Date.now();
     if (runStart < this.authBackoff.nextAt) return;
@@ -925,6 +936,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           undefined,
           () => this.stopping,
           this.replayAbort.signal,
+          { isExcluded: this.replayExclusionFilter },
         );
         if (r.authFailed) authFailed = true;
         if (r.systemicReject) {
@@ -1363,6 +1375,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          // Reserved analytics annotations survive the OTLP conversion
+          // verbatim (schema version, refs, missingFields, truncation).
+          ...ANALYTICS_ANNOTATION_KEYS,
           ...agentSpecificKeys,
           ...customKeys,
           ...prefixKeys,
@@ -2086,6 +2101,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
   ): void {
     if (SENSITIVE_RESOURCE_KEY_RE.test(key)) {
       logger.warn(`resource attribute key "${key}" looks sensitive and will be ignored`);
+      return;
+    }
+    // Analytics annotations stay auxiliary span-level metadata: they are never
+    // promoted into the resource projection, and client identity stays auxiliary.
+    if (key.startsWith('ntconsult.analytics.')) {
+      logger.warn(`resource attribute key "${key}" is an analytics annotation and will be ignored`);
       return;
     }
 

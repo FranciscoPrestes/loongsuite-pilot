@@ -107,3 +107,15 @@ export function sanitizeSnippetText(text: string): string {
   snippetPlan ??= loadMaskPlan(SNIPPET_MASK_CONFIG);
   return maskString(text, snippetPlan);
 }
+
+/**
+ * Sanitize an enriched payload (e.g. a whole analytics observation) before it
+ * is persisted or exported. Deep-masks every string leaf with the full
+ * sensitive + PII plan; bounding is the caller's job. Structural identity that
+ * masking would rewrite (ids, versions, refs) must make the caller fail closed
+ * instead of emitting a corrupted record.
+ */
+export function sanitizeEnrichedPayload<T>(value: T): T {
+  snippetPlan ??= loadMaskPlan(SNIPPET_MASK_CONFIG);
+  return maskJsonSafeValue(value as JsonSafeValue, snippetPlan, {}) as T;
+}

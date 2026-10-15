@@ -33,8 +33,19 @@ export interface ReplayResult {
   authFailed: boolean;
   /** True when the run stopped after MAX_CONSECUTIVE_REJECTIONS single-span rejections in a row. */
   systemicReject: boolean;
+  /** Records dropped without sending because a synchronized exclusion covers them. */
+  excluded?: number;
 }
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+export interface ReplayOptions {
+  /**
+   * Server-recorded exclusions synchronized to the device. Excluded records are
+   * removed from the managed spool only and never resent (the originals outside
+   * the spool are untouched).
+   */
+  isExcluded?: (record: FailedSpanRecord) => boolean;
+}
 
 interface Item { line: string; rec: FailedSpanRecord }
 
@@ -230,6 +241,7 @@ export async function replayFailedSpans(
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
   shouldStop?: () => boolean,
   abort?: AbortSignal,
+  options?: ReplayOptions,
 ): Promise<ReplayResult> {
   let consecutiveRejections = 0;
   const result: ReplayResult = { sent: 0, rejected: 0, kept: 0, authFailed: false, systemicReject: false };
@@ -270,7 +282,18 @@ export async function replayFailedSpans(
     result.rejected += bad.length;
 
     let changed = bad.length > 0;
-    const pending = batchesBySize(parsed);
+    // Synchronized exclusions drop their records from the managed spool only,
+    // without any send, before any batch is built.
+    const included: Item[] = [];
+    for (const item of parsed) {
+      if (options?.isExcluded?.(item.rec)) {
+        result.excluded = (result.excluded ?? 0) + 1;
+        changed = true;
+        continue;
+      }
+      included.push(item);
+    }
+    const pending = batchesBySize(included);
     while (pending.length > 0) {
       const batch = pending.shift()!;
       const status = shouldStop?.() ? null : await post(target, fetchImpl, batch, abort);
