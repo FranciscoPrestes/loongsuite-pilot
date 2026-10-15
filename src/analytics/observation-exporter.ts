@@ -1,7 +1,9 @@
-import { createHash } from 'node:crypto';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import { validateObservation, type Observation } from './observation.js';
+import {
+  FileObservationSpool,
+  sha256hex,
+  type ObservationSpool,
+} from './observation-spool.js';
 import { maskAgentActivityEntry, sanitizeEnrichedPayload } from '../mask/entry-masker.js';
 import {
   ANALYTICS_ANNOTATION_KEYS,
@@ -13,6 +15,10 @@ import {
 
 export { ANALYTICS_ANNOTATION_KEYS };
 export type { AnalyticsAnnotationKey };
+// The managed spool lives in its own module; re-exported here for the public
+// exporter surface (FileObservationSpool was part of the round-0 contract).
+export { FileObservationSpool, MAX_SPOOL_BYTES, sha256hex } from './observation-spool.js';
+export type { ObservationSpool } from './observation-spool.js';
 
 /**
  * Sanitized observation exporter — offline replay and central-secret isolation.
@@ -38,14 +44,6 @@ export interface ObservationEnvelope {
 /** Authenticated ingest transport supplied by the deployment (never a model endpoint). */
 export interface ObservationTransport {
   send(serialized: string): Promise<{ status: number }>;
-}
-
-/** Managed spool for offline replay. Only this spool is ever removed by exclusions. */
-export interface ObservationSpool {
-  persist(serialized: string): Promise<void>;
-  pending(): Promise<string[]>;
-  remove(serialized: string): Promise<void>;
-  recordFailure(reason: string, observationId: string | null): Promise<void>;
 }
 
 export interface ExclusionMatchContext {
@@ -116,14 +114,6 @@ const EXPORT_MASK_CONFIG: MaskConfig = {
   types: [...SUPPORTED_MASK_TYPES],
   replacementMode: 'placeholder',
 };
-
-function sha256hex(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-/** Append-only removal mark line for the managed spool records file. */
-const REMOVE_MARK_PREFIX = '{"__remove":"';
-const REMOVE_MARK_PATTERN = /^\{"__remove":"([0-9a-f]{64})"\}$/;
 
 function structuralView(observation: Observation): Record<string, unknown> {
   return {
@@ -214,71 +204,6 @@ export function readObservationEnvelope(entry: AgentActivityEntry): ObservationE
     };
   } catch {
     return null;
-  }
-}
-
-/**
- * The full managed-spool file set of an exporter run (failures never block).
- * The records file is APPEND-ONLY: a removal is a mark line, never a
- * read-modify-write rewrite, so a concurrent persist can never be lost to a
- * stale snapshot. Marks only cancel records that precede them.
- */
-export class FileObservationSpool implements ObservationSpool {
-  private readonly recordsPath: string;
-  private readonly failuresPath: string;
-
-  constructor(dir: string) {
-    this.recordsPath = path.join(dir, 'observations.jsonl');
-    this.failuresPath = path.join(dir, 'failures.jsonl');
-  }
-
-  private async ready(): Promise<void> {
-    await fs.mkdir(path.dirname(this.recordsPath), { recursive: true, mode: 0o700 });
-  }
-
-  async persist(serialized: string): Promise<void> {
-    await this.ready();
-    const stat = await fs.lstat(this.recordsPath).catch(() => null);
-    if (stat && (!stat.isFile() || stat.isSymbolicLink())) throw new Error('unsafe spool record');
-    if ((stat?.size ?? 0) + Buffer.byteLength(serialized) > 8 * 1024 * 1024) throw new Error('spool full');
-    await fs.appendFile(this.recordsPath, serialized + '\n', { mode: 0o600 });
-  }
-
-  /** Pending records with removal marks applied (order preserved). */
-  async pending(): Promise<string[]> {
-    let raw: string;
-    try {
-      raw = await fs.readFile(this.recordsPath, 'utf8');
-    } catch {
-      return [];
-    }
-    const records: Array<{ line: string; digest: string; cancelled: boolean }> = [];
-    for (const line of raw.split('\n')) {
-      if (line.trim() === '') continue;
-      if (line.startsWith(REMOVE_MARK_PREFIX)) {
-        const mark = REMOVE_MARK_PATTERN.exec(line);
-        if (!mark) continue; // a torn mark line is dropped, never read as a record
-        const target = records.find((r) => !r.cancelled && r.digest === mark[1]);
-        if (target) target.cancelled = true;
-        continue;
-      }
-      records.push({ line, digest: sha256hex(line), cancelled: false });
-    }
-    return records.filter((r) => !r.cancelled).map((r) => r.line);
-  }
-
-  /** Append-only removal mark; the target is the first unmatched earlier record. */
-  async remove(serialized: string): Promise<void> {
-    await this.ready();
-    await fs.appendFile(this.recordsPath, `${REMOVE_MARK_PREFIX}${sha256hex(serialized)}"}\n`, { mode: 0o600 });
-  }
-
-  async recordFailure(reason: string, observationId: string | null): Promise<void> {
-    try {
-      await this.ready();
-      await fs.appendFile(this.failuresPath,
-        JSON.stringify({ reason, observationId, at: new Date().toISOString() }) + '\n', { mode: 0o600 });
-    } catch { /* failure records never block anything */ }
   }
 }
 

@@ -19,6 +19,7 @@ const fsHooks = vi.hoisted(() => ({
   armed: false,
   rewrites: [] as string[],
   concurrentLine: '',
+  writeGate: null as null | (() => Promise<void>),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -28,6 +29,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     default: actual,
     writeFile: (async (...args: unknown[]) => {
       fsHooks.rewrites.push('writeFile');
+      if (fsHooks.writeGate) {
+        const gate = fsHooks.writeGate;
+        fsHooks.writeGate = null;
+        await gate();
+      }
       return (actual.writeFile as (...a: unknown[]) => unknown)(...args);
     }) as typeof actual.writeFile,
     rename: (async (...args: unknown[]) => {
@@ -105,6 +111,7 @@ describe('observation exporter hardening (fix round 1)', () => {
     fsHooks.armed = false;
     fsHooks.concurrentLine = '';
     fsHooks.rewrites = [];
+    fsHooks.writeGate = null;
   });
 
   afterEach(async () => {
@@ -209,5 +216,50 @@ describe('observation exporter hardening (fix round 1)', () => {
     // A removal mark never cancels a later re-persist of the same record.
     await spool.persist(p1);
     expect(await spool.pending()).toEqual([p2, p3, concurrent, p1]);
+  });
+
+  /** ~205 KB line: 40 of them fill just under the 8 MiB spool cap. */
+  function deadRecord(index: number): string {
+    return JSON.stringify({ 'event.id': `dead-${index}`, pad: 'x'.repeat(204_900) });
+  }
+
+  async function fillThenCancel(spool: FileObservationSpool): Promise<void> {
+    const records: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const record = deadRecord(i);
+      records.push(record);
+      await spool.persist(record);
+    }
+    for (const record of records) await spool.remove(record);
+    expect(await spool.pending()).toEqual([]);
+  }
+
+  it('dead_bytes_never_exhaust_the_spool_cap', async () => {
+    const spool = new FileObservationSpool(spoolDir);
+    await fillThenCancel(spool);
+    const live = deadRecord(99);
+    // The cap governs LIVE bytes: dead records and consumed marks must not
+    // permanently block the next persist (offline resilience).
+    await spool.persist(live);
+    expect(await spool.pending()).toEqual([live]);
+    // Compaction reclaims the dead bytes instead of leaving them forever.
+    const size = (await fs.stat(path.join(spoolDir, 'observations.jsonl'))).size;
+    expect(size).toBeLessThan(1_000_000);
+  });
+
+  it('a_concurrent_persist_during_compaction_survives', async () => {
+    const spool = new FileObservationSpool(spoolDir);
+    await fillThenCancel(spool);
+    const concurrent = JSON.stringify({ 'event.id': 'concurrent-compaction' });
+    const recordsPath = path.join(spoolDir, 'observations.jsonl');
+    // A concurrent append lands exactly inside the compaction window (between
+    // the compaction snapshot and its commit) and must survive it.
+    fsHooks.writeGate = async () => {
+      await fs.appendFile(recordsPath, concurrent + '\n');
+    };
+    await spool.persist(deadRecord(99));
+    const pending = await spool.pending();
+    expect(pending).toContain(concurrent);
+    expect(pending).toContain(deadRecord(99));
   });
 });
