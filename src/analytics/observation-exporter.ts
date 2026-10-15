@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateObservation, type Observation } from './observation.js';
@@ -48,8 +48,28 @@ export interface ObservationSpool {
   recordFailure(reason: string, observationId: string | null): Promise<void>;
 }
 
+export interface ExclusionMatchContext {
+  /**
+   * The true workspace path of the exported entry (`workspace.path` /
+   * `workspace.current_root`, the same scope key the C4 JobStore tombstones
+   * digest). `Observation.workspaceId` is not produced by any collector
+   * pipeline and must not be used as a substitute.
+   */
+  workspacePath?: string;
+}
+
 export interface ExclusionFence {
-  isExcluded(observation: Observation): boolean;
+  /**
+   * Scope-aware exclusion check. A scoped tombstone (session/workspace) whose
+   * scope cannot be resolved for the observation FAILS CLOSED: unprovable
+   * non-exclusion must never resend excluded data.
+   */
+  isExcluded(observation: Observation, context?: ExclusionMatchContext): boolean;
+}
+
+export interface ExclusionFenceOptions {
+  /** Recorded when more tombstones arrive than can be tracked (limits reached). */
+  recordLimit?: (info: { limit: number; received: number }) => void;
 }
 
 export interface ObservationExporterOptions {
@@ -101,6 +121,10 @@ function sha256hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+/** Append-only removal mark line for the managed spool records file. */
+const REMOVE_MARK_PREFIX = '{"__remove":"';
+const REMOVE_MARK_PATTERN = /^\{"__remove":"([0-9a-f]{64})"\}$/;
+
 function structuralView(observation: Observation): Record<string, unknown> {
   return {
     schemaVersion: observation.schemaVersion,
@@ -112,6 +136,13 @@ function structuralView(observation: Observation): Record<string, unknown> {
     collectorVersion: observation.collectorVersion,
     capabilitiesVersion: observation.capabilitiesVersion,
     deviceId: observation.deviceId,
+    // Identity/correlation fields: a mask rewrite here corrupts fence matching
+    // or execution correlation, so they are as structural as the ids above.
+    sessionId: observation.sessionId,
+    workspaceId: observation.workspaceId,
+    turnId: observation.turnId,
+    parentCallId: observation.parentCallId,
+    toolCallId: observation.toolCallId,
     truncated: observation.truncated,
     missingFields: observation.missingFields,
     sourceRefs: observation.sourceRefs,
@@ -186,7 +217,12 @@ export function readObservationEnvelope(entry: AgentActivityEntry): ObservationE
   }
 }
 
-/** The full managed-spool file set of an exporter run (failures never block). */
+/**
+ * The full managed-spool file set of an exporter run (failures never block).
+ * The records file is APPEND-ONLY: a removal is a mark line, never a
+ * read-modify-write rewrite, so a concurrent persist can never be lost to a
+ * stale snapshot. Marks only cancel records that precede them.
+ */
 export class FileObservationSpool implements ObservationSpool {
   private readonly recordsPath: string;
   private readonly failuresPath: string;
@@ -208,23 +244,33 @@ export class FileObservationSpool implements ObservationSpool {
     await fs.appendFile(this.recordsPath, serialized + '\n', { mode: 0o600 });
   }
 
+  /** Pending records with removal marks applied (order preserved). */
   async pending(): Promise<string[]> {
+    let raw: string;
     try {
-      const raw = await fs.readFile(this.recordsPath, 'utf8');
-      return raw.split('\n').filter((line) => line.trim() !== '');
+      raw = await fs.readFile(this.recordsPath, 'utf8');
     } catch {
       return [];
     }
+    const records: Array<{ line: string; digest: string; cancelled: boolean }> = [];
+    for (const line of raw.split('\n')) {
+      if (line.trim() === '') continue;
+      if (line.startsWith(REMOVE_MARK_PREFIX)) {
+        const mark = REMOVE_MARK_PATTERN.exec(line);
+        if (!mark) continue; // a torn mark line is dropped, never read as a record
+        const target = records.find((r) => !r.cancelled && r.digest === mark[1]);
+        if (target) target.cancelled = true;
+        continue;
+      }
+      records.push({ line, digest: sha256hex(line), cancelled: false });
+    }
+    return records.filter((r) => !r.cancelled).map((r) => r.line);
   }
 
+  /** Append-only removal mark; the target is the first unmatched earlier record. */
   async remove(serialized: string): Promise<void> {
-    const remaining = await this.pending();
-    const index = remaining.indexOf(serialized);
-    if (index < 0) return;
-    remaining.splice(index, 1);
-    const tmp = `${this.recordsPath}.${process.pid}.${randomUUID()}.tmp`;
-    await fs.writeFile(tmp, remaining.length > 0 ? remaining.join('\n') + '\n' : '', { mode: 0o600 });
-    await fs.rename(tmp, this.recordsPath);
+    await this.ready();
+    await fs.appendFile(this.recordsPath, `${REMOVE_MARK_PREFIX}${sha256hex(serialized)}"}\n`, { mode: 0o600 });
   }
 
   async recordFailure(reason: string, observationId: string | null): Promise<void> {
@@ -236,30 +282,56 @@ export class FileObservationSpool implements ObservationSpool {
   }
 }
 
+/** More tombstones than the fence can track: fail closed and record the limit. */
+export const MAX_EXCLUSION_TOMBSTONES = 10_000;
+
 /**
  * Exclusion fence over server-recorded tombstones synchronized to the device.
- * Matching mirrors the C4 JobStore (device + optional session/workspace scope)
- * and additionally accepts an exact observation-id tombstone.
+ * Matching mirrors the C4 JobStore (device + optional session/workspace scope,
+ * digest keys) and additionally accepts an exact observation-id tombstone. The
+ * workspace scope matches the REAL workspace path (`ExclusionMatchContext`);
+ * when a scoped tombstone's scope cannot be resolved for the observation the
+ * fence fails closed, so excluded data is never resent. More tombstones than
+ * `MAX_EXCLUSION_TOMBSTONES` is recorded and fails closed as well.
  */
-export function createExclusionFence(tombstones: readonly ObservationTombstone[]): ExclusionFence {
-  const stored = tombstones.slice(0, 10_000).map((t) => ({
+export function createExclusionFence(
+  tombstones: readonly ObservationTombstone[],
+  options?: ExclusionFenceOptions,
+): ExclusionFence {
+  if (tombstones.length > MAX_EXCLUSION_TOMBSTONES) {
+    options?.recordLimit?.({ limit: MAX_EXCLUSION_TOMBSTONES, received: tombstones.length });
+    return { isExcluded: () => true };
+  }
+  const stored = tombstones.map((t) => ({
     id: sha256hex(t.id),
     deviceId: sha256hex(t.deviceId),
     sessionId: t.sessionId ? sha256hex(t.sessionId) : undefined,
     workspacePath: t.workspacePath ? sha256hex(t.workspacePath) : undefined,
   }));
   return {
-    isExcluded(observation: Observation): boolean {
+    isExcluded(observation: Observation, context?: ExclusionMatchContext): boolean {
       const observationId = sha256hex(observation.observationId);
       const deviceId = sha256hex(observation.deviceId);
+      const sessionResolved = observation.sessionId !== undefined;
       const sessionId = sha256hex(observation.sessionId ?? '');
-      const workspacePath = sha256hex(observation.workspaceId ?? '');
+      const workspace = context?.workspacePath ?? observation.workspaceId;
+      const workspaceResolved = workspace !== undefined;
+      const workspacePath = sha256hex(workspace ?? '');
       return stored.some((t) => t.id === observationId
         || (t.deviceId === deviceId
-          && (!t.sessionId || t.sessionId === sessionId)
-          && (!t.workspacePath || t.workspacePath === workspacePath)));
+          && (!t.sessionId || t.sessionId === sessionId || !sessionResolved)
+          && (!t.workspacePath || t.workspacePath === workspacePath || !workspaceResolved)));
     },
   };
+}
+
+/**
+ * The real workspace scope of an exported entry — the same source the C4
+ * `jobFromEntry` uses for `workspacePath`. Never inferred from text or time.
+ */
+export function resolveWorkspacePath(entry: AgentActivityEntry): string | undefined {
+  const value = entry['workspace.path'] ?? entry['workspace.current_root'];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 /**
@@ -271,10 +343,11 @@ export async function synchronizeExclusions(
   revision: string,
   tombstones: readonly ObservationTombstone[],
   targets: { store?: TombstoneSyncTarget; policy?: ExclusionSyncTarget },
+  options?: ExclusionFenceOptions,
 ): Promise<ExclusionFence> {
   await targets.store?.synchronizeTombstones(revision, tombstones);
   targets.policy?.markExclusionsSynchronized(revision);
-  return createExclusionFence(tombstones);
+  return createExclusionFence(tombstones, options);
 }
 
 export class ObservationExporter {
@@ -314,7 +387,7 @@ export class ObservationExporter {
         await this.options.spool.recordFailure(outcome.failed, envelope.observationId);
         return outcome;
       }
-      if (this.options.exclusions?.isExcluded(maskedEnvelope.observation)) {
+      if (this.options.exclusions?.isExcluded(maskedEnvelope.observation, { workspacePath: resolveWorkspacePath(masked) })) {
         outcome.excluded = true;
         return outcome;
       }
@@ -364,10 +437,11 @@ export class ObservationExporter {
     for (const serialized of queue) {
       let observationId: string | null = null;
       try {
-        const envelope = readObservationEnvelope(JSON.parse(serialized) as AgentActivityEntry);
+        const entry = JSON.parse(serialized) as AgentActivityEntry;
+        const envelope = readObservationEnvelope(entry);
         if (!envelope) throw new Error('unparseable spool record');
         observationId = envelope.observationId;
-        if (this.options.exclusions?.isExcluded(envelope.observation)) {
+        if (this.options.exclusions?.isExcluded(envelope.observation, { workspacePath: resolveWorkspacePath(entry) })) {
           await this.options.spool.remove(serialized);
           outcome.excluded += 1;
           continue;
