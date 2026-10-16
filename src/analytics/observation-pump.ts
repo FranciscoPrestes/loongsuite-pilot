@@ -29,6 +29,9 @@ export interface DrainOutcome {
 }
 export interface LossSummary { expired: number; quota: number; busy: number; total: number }
 
+/** Failures that retrying can never fix: they are recorded by the exporter and the result is released. */
+const PERMANENT_FAILURE = /^(rejected:|redaction|envelope_too_large|missing_envelope)/;
+
 /** Minimal auxiliary carrier for a store result: identity comes from the observation, never from payload text. */
 export function carrierFor(o: Observation, workspacePath: string | undefined, userId: string): AgentActivityEntry {
   return {
@@ -86,7 +89,11 @@ export class ObservationPump {
         if (result.exported) outcome.exported += 1;
         else if (result.spooled) outcome.spooled += 1;
         else if (result.excluded) outcome.excluded += 1;
-        else outcome.failed += 1;
+        else {
+          outcome.failed += 1;
+          // A transient local failure (e.g. the spool could not persist) keeps the result in the store for the next tick.
+          if (!PERMANENT_FAILURE.test(result.failed ?? '')) continue;
+        }
       } catch (error) {
         // Redaction that would rewrite identity: fail closed, record, and stop retrying this result.
         outcome.failed += 1;

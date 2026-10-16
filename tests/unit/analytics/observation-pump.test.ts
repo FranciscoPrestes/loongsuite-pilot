@@ -50,6 +50,20 @@ describe('observation pump', () => {
     expect(store.acknowledge).toHaveBeenCalledWith([bad.observation.observationId]);
   });
 
+  it('keeps a result in the store when neither the transport nor the spool could take it, and releases permanent rejections', async () => {
+    const full = { ...spool(), persist: async () => { throw new Error('spool full'); } };
+    const store = fakeStore([entry()]);
+    const pump = new ObservationPump({ store, spool: full, policy: () => policy(), credential: () => 'fp', transport: { send: async () => { throw new Error('offline'); } } });
+    pump.bindCredential();
+    expect(await pump.drain()).toMatchObject({ exported: 0, spooled: 0, failed: 1 });
+    expect(store.acknowledge).not.toHaveBeenCalled(); // retried next tick, never lost
+    const rejected = fakeStore([entry()]);
+    const pump2 = new ObservationPump({ store: rejected, spool: spool(), policy: () => policy(), credential: () => 'fp', transport: { send: async () => ({ status: 422 }) } });
+    pump2.bindCredential();
+    expect(await pump2.drain()).toMatchObject({ failed: 1 });
+    expect(rejected.acknowledge).toHaveBeenCalledTimes(1); // permanent: recorded by the exporter, then released
+  });
+
   it('summarises every loss reason including busy spills', async () => {
     const store = fakeStore([], [
       { reason: 'expired', count: 2, from: 'a', to: 'b', unreported: false }, { reason: 'busy', count: 5, from: 'a', to: 'b', unreported: false }, { reason: 'quota', count: 1, from: 'a', to: 'b', unreported: false }]);
