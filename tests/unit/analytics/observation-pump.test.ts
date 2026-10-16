@@ -104,3 +104,17 @@ describe('window overlap (exclusion fence)', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('delivered ledger readiness', () => {
+  it('waits for the persisted ids to load before the first duplicate check', async () => {
+    const e = entry(); const send = vi.fn(async () => ({ status: 200 }));
+    let loaded = false;
+    const ledger = { ready: () => new Promise<void>(resolve => setTimeout(() => { loaded = true; resolve(); }, 30)),
+      has: (id: string) => loaded && id === e.observation.observationId, add: () => undefined, flush: async () => undefined };
+    const store = fakeStore([e]);
+    const pump = new ObservationPump({ store, spool: spool(), policy: () => policy(), credential: () => 'fp', transport: { send }, ledger });
+    pump.bindCredential();
+    expect(await pump.drain()).toMatchObject({ exported: 0, duplicates: 1 });
+    expect(send).not.toHaveBeenCalled();
+  });
+});

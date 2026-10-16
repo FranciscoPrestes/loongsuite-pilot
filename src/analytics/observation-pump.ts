@@ -54,7 +54,10 @@ export function carrierFor(o: Observation, workspacePath: string | undefined, us
   return {
     time_unix_nano: String(BigInt(at) * 1_000_000n), 'event.id': o.observationId, 'user.id': userId,
     'event.name': 'other', 'gen_ai.session.id': o.sessionId ?? `device:${o.deviceId}`, 'gen_ai.agent.type': COLLECTOR_AGENT_TYPE,
-    'gen_ai.provider.name': 'ntconsult-collector', ...(workspacePath ? { 'workspace.path': workspacePath } : {}),
+    'gen_ai.provider.name': 'ntconsult-collector',
+    // Content-free structural marker: without it the OTLP converter ignores an `other` event and drops the annotations.
+    'gen_ai.input.messages_delta': [],
+    ...(workspacePath ? { 'workspace.path': workspacePath } : {}),
   };
 }
 

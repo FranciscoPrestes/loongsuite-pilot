@@ -52,6 +52,18 @@ describe('delivered-id ledger', () => {
   });
 });
 
+describe('ledger content validation', () => {
+  it('loads only non-empty string ids and rejects numbers, objects, null and empty strings', async () => {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify([1, { x: 2 }, null, '', ['nested'], true, 'ok-id']));
+    const a = fileLedger(file); await a.ready!();
+    for (const bad of ['1', '[object Object]', 'null', '', 'nested', 'true']) expect(a.has(bad), bad).toBe(false);
+    expect(a.has('ok-id')).toBe(true);
+    a.add('another'); await a.flush();
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual(['ok-id', 'another']);
+  });
+});
+
 describe('failed-log event time', () => {
   it('uses the span start time, and falls back (undefined) when absent, blank, zero or garbage', () => {
     expect(recordEventMs({ startTimeUnixNano: '1792000000000000000' })).toBe(1_792_000_000_000);
