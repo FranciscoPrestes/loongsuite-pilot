@@ -81,3 +81,26 @@ describe('observation pump', () => {
     expect(await pump.lossSummary()).toEqual({ expired: 2, quota: 1, busy: 5, total: 8 });
   });
 });
+
+describe('window overlap (exclusion fence)', () => {
+  it('uses [from, to) with an inclusive lower edge and covers the whole source..capture interval', async () => {
+    const { windowHit } = await import('../../../src/analytics/runtime.js');
+    const w = [{ fromMs: 1000, toMs: 2000 }];
+    expect(windowHit(w, 1000, 1000)).toBe(true);   // exactly at from: excluded
+    expect(windowHit(w, 2000, 2000)).toBe(false);  // exactly at to: outside
+    expect(windowHit(w, 999, 999)).toBe(false);
+    expect(windowHit(w, 500, 5000)).toBe(true);    // parked: source before, capture after
+    expect(windowHit(w, 5000, 500)).toBe(true);    // order independent
+    expect(windowHit(w, 100, 999)).toBe(false);
+  });
+
+  it('never re-exports an acknowledged id even if the same source is captured again with other content', async () => {
+    const e = entry(); const store = fakeStore([e]); const send = vi.fn(async () => ({ status: 200 }));
+    const pump = new ObservationPump({ store, spool: spool(), policy: () => policy(), credential: () => 'fp', transport: { send } });
+    pump.bindCredential();
+    await pump.drain();
+    store.replayEntries.mockResolvedValue([{ ...e, observation: { ...e.observation, occurredAt: new Date(Date.now() + 5000).toISOString() } }]);
+    expect(await pump.drain()).toMatchObject({ exported: 0, duplicates: 1 });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});

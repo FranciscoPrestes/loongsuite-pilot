@@ -64,6 +64,18 @@ describe('collector bundle verification (policy x C3 resolver)', () => {
     expect(rt.client.effective(true).enrichmentEnabled).toBe(false);
   });
 
+  it('a resolver error withdraws the previously verified bundle instead of keeping it', async () => {
+    await install('1.0.0');
+    const rt = createCollectorPolicyRuntime(config(), dir, '1.2.0', trustedKeys)!;
+    await rt.client.refresh();
+    expect(rt.verifier.version()).toBe('1.0.0');
+    await fs.writeFile(path.join(dir, 'analytics', 'bundle-state.json'), '{corrupt');
+    revision += 1;
+    await rt.client.refresh();
+    expect(rt.verifier.version()).toBeNull();
+    expect(rt.client.effective(true).reason).toBe('bundle_incompatible');
+  });
+
   it('is off without a configured portal credential', () => {
     expect(createCollectorPolicyRuntime({ dataDir: dir }, dir, '1.0.0')).toBeUndefined();
   });

@@ -78,4 +78,31 @@ describe('hook_health publication (D4 ACK)', () => {
     await expect(publishCollectionHealth([status()])).resolves.toBeUndefined();
     configureHealthPublisher(null);
   });
+
+  it('volume: unchanged state is announced once, then only on change or a long heartbeat (no per-minute flood)', async () => {
+    let clock = now.getTime(); const sent: unknown[] = [];
+    const harnesses = Array.from({ length: 22 }, (_, i) => status({ harnessId: 'h' + i, detected: i < 3 }));
+    const publisher = createHealthPublisher({ ...ctx(), now: () => new Date(clock) }, async e => { sent.push(e); });
+    for (let minute = 0; minute < 24 * 60; minute += 1) { clock = now.getTime() + minute * 60_000; await publisher.publishCollectionHealth(harnesses); }
+    // 22 first announcements + heartbeats only for the 3 installed harnesses: 96/day each. Was ~31,700.
+    expect(sent.length).toBeLessThanOrEqual(22 + 3 * 96);
+    expect(sent.length).toBeGreaterThanOrEqual(22);
+    const before = sent.length;
+    clock += 30_000; // off a heartbeat boundary
+    await publisher.publishCollectionHealth([{ ...harnesses[0]!, state: 'error', repairResult: 'failed' }, ...harnesses.slice(1)]);
+    expect(sent.length).toBe(before + 1); // a state change goes out immediately
+  });
+
+  it('a failed send is retried next cycle and one bad status cannot abort the batch', async () => {
+    let fail = true; const sent: unknown[] = [];
+    const publisher = createHealthPublisher(ctx(), async e => { if (fail) throw new Error('offline'); sent.push(e); });
+    await publisher.publishCollectionHealth([status()]);
+    fail = false;
+    await publisher.publishCollectionHealth([status()]);
+    expect(sent).toHaveLength(1);
+    const batch = buildHealthObservations([status({ installedVersion: '' }), status({ harnessId: 'codex', reason: 'x'.repeat(100_000) })], ctx(), false);
+    expect(batch).toHaveLength(2);
+    expect(batch[0]!.harnessVersion).toBe('unknown');
+    expect(JSON.stringify(batch[1]).length).toBeLessThan(2000);
+  });
 });

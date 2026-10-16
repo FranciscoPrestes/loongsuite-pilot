@@ -685,7 +685,7 @@ export class JobStore {
   async replayBatch(limit = 100): Promise<Observation[]> { return (await this.replayEntries(limit)).map(e => e.observation); }
 
   /** Replay view plus the real workspace each result belongs to, so the transport fence matches the true scope. */
-  async replayEntries(limit = 100): Promise<{ observation: Observation; workspacePath: string }[]> {
+  async replayEntries(limit = 100): Promise<{ observation: Observation; workspacePath: string; signalAt: string }[]> {
     await this.maintain();
     const p = this.options.policy();
     if (!p.replayEnabled || !p.deletionRevision || this.synchronizedRevision !== p.deletionRevision) return [];
@@ -695,7 +695,7 @@ export class JobStore {
     return this.records()
       .filter(r => r.state === 'complete' && r.result && !this.excluded(r.job, exclusions))
       .slice(0, Math.max(0, Math.min(100, limit)))
-      .map(r => ({ observation: r.result!, workspacePath: r.job.workspacePath }));
+      .map(r => ({ observation: r.result!, workspacePath: r.job.workspacePath, signalAt: r.job.occurredAt }));
   }
 
   /** Delivered (or durably spooled) results leave the journal; only completed records can be acknowledged. */

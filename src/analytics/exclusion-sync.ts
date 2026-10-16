@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
 const MAX_PAGES = 100;
-const MAX_TOMBSTONES = 20_000;
+// Equal to the fence cap: more than this fails the sync (replay stays closed, results stay held) instead of silently deleting everything.
+const MAX_TOMBSTONES = 10_000;
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const id = z.string().min(1).max(500);
 const pageSchema = z.object({

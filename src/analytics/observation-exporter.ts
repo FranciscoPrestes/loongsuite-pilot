@@ -54,6 +54,13 @@ export interface ExclusionMatchContext {
    * pipeline and must not be used as a substitute.
    */
   workspacePath?: string;
+  /** Source event time (ms) of the exported entry: may precede `observation.occurredAt` (capture time) by days. */
+  eventTimeMs?: number;
+}
+
+/** Entry time in ms, or undefined when absent/invalid. */
+export function resolveEventTimeMs(entry: AgentActivityEntry): number | undefined {
+  try { const ms = Number(BigInt(entry.time_unix_nano) / 1_000_000n); return Number.isSafeInteger(ms) ? ms : undefined; } catch { return undefined; }
 }
 
 export interface ExclusionFence {
@@ -312,7 +319,7 @@ export class ObservationExporter {
         await this.options.spool.recordFailure(outcome.failed, envelope.observationId);
         return outcome;
       }
-      if (this.options.exclusions?.isExcluded(maskedEnvelope.observation, { workspacePath: resolveWorkspacePath(masked) })) {
+      if (this.options.exclusions?.isExcluded(maskedEnvelope.observation, { workspacePath: resolveWorkspacePath(masked), eventTimeMs: resolveEventTimeMs(masked) })) {
         outcome.excluded = true;
         return outcome;
       }
@@ -366,7 +373,7 @@ export class ObservationExporter {
         const envelope = readObservationEnvelope(entry);
         if (!envelope) throw new Error('unparseable spool record');
         observationId = envelope.observationId;
-        if (this.options.exclusions?.isExcluded(envelope.observation, { workspacePath: resolveWorkspacePath(entry) })) {
+        if (this.options.exclusions?.isExcluded(envelope.observation, { workspacePath: resolveWorkspacePath(entry), eventTimeMs: resolveEventTimeMs(entry) })) {
           await this.options.spool.remove(serialized);
           outcome.excluded += 1;
           continue;

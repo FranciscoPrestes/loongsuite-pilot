@@ -12,6 +12,9 @@ import { registerEnrichmentHandlers } from './enrichment-handlers.js';
 import { fetchExclusions } from './exclusion-sync.js';
 import { createHealthPublisher, type CollectionHealthSummary, type HealthPublisher } from './health-publisher.js';
 import { FileObservationSpool, createExclusionFence, readObservationEnvelope, resolveWorkspacePath, synchronizeExclusions, type ExclusionFence } from './observation-exporter.js';
+import { readJsonFile, writeTextFileAtomic } from '../utils/fs-utils.js';
+import { resolveEventTimeMs } from './observation-exporter.js';
+import type { DeliveredLedger } from './observation-pump.js';
 import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { FailedSpanRecord } from '../flushers/otlp-failed-replayer.js';
 import { ObservationPump } from './observation-pump.js';
@@ -20,6 +23,25 @@ import { ValidatedEventRecorder } from './validated-event.js';
 const EVIDENCE_WINDOW_MS = 10 * 60_000;
 const MAX_EVIDENCE = 2000;
 const DEFAULT_INTERVAL_MS = 15_000;
+const LEDGER_MAX_IDS = 20_000;
+
+/** True when the closed interval [startMs, endMs] (source event .. capture) overlaps any [fromMs, toMs) exclusion window. */
+export function windowHit(windows: ReadonlyArray<{ fromMs: number; toMs: number }>, startMs: number, endMs: number): boolean {
+  const lo = Math.min(startMs, endMs); const hi = Math.max(startMs, endMs);
+  return windows.some(w => lo < w.toMs && hi >= w.fromMs);
+}
+
+/** File-backed delivered-id ledger (bounded FIFO). Read once, written atomically on flush. */
+export function fileLedger(file: string): DeliveredLedger {
+  const ids = new Set<string>(); let loaded = false; let dirty = false;
+  const load = (): Promise<void> => loaded ? Promise.resolve() : readJsonFile<string[]>(file).then(v => { (Array.isArray(v) ? v : []).forEach(i => ids.add(String(i))); loaded = true; });
+  void load().catch(() => undefined);
+  return {
+    has: id => ids.has(id),
+    add: id => { ids.add(id); dirty = true; while (ids.size > LEDGER_MAX_IDS) ids.delete(ids.values().next().value as string); },
+    flush: async () => { await load(); if (!dirty) return; dirty = false; await writeTextFileAtomic(file, JSON.stringify([...ids]), { mode: 0o600 }); },
+  };
+}
 const ID_SCOPE_SENTINEL = '\u0000id-scope';
 
 export interface AnalyticsRuntimeDeps {
@@ -78,6 +100,7 @@ export class AnalyticsRuntime {
     registerEnrichmentHandlers(deps.scheduler);
     this.pump = new ObservationPump({
       store: deps.store, policy: deps.policy, userId: deps.userId,
+      ledger: fileLedger(path.join(deps.dataDir, 'analytics', 'delivered-ids.json')),
       spool: new FileObservationSpool(path.join(deps.dataDir, 'analytics', 'spool')),
       credential: () => { const value = deps.credential(); return value ? createHash('sha256').update(value).digest('hex') : null; },
       transport: { send: async (serialized) => { await deps.send(JSON.parse(serialized) as AgentActivityEntry); return { status: 200 }; } },
@@ -103,7 +126,11 @@ export class AnalyticsRuntime {
   onStatuses(statuses: readonly CapabilityStatus[]): void {
     if (this.stopped) return;
     this.health = this.health.then(async () => {
-      const observed = observeCapabilities(this.deps.manifests, this.ring, this.deps.now?.() ?? new Date(), statuses);
+      // Window by the clock at read time: after idleness old events must not read as "known activity" (D4).
+      const now = this.deps.now?.() ?? new Date();
+      const cutoff = (now.getTime() - EVIDENCE_WINDOW_MS) * 1_000_000;
+      while (this.ring.length > 0 && Number(this.ring[0]!.time_unix_nano) < cutoff) this.ring.shift();
+      const observed = observeCapabilities(this.deps.manifests, this.ring, now, statuses);
       await this.publisher.publishCollectionHealth(observed);
     }).catch(() => undefined);
   }
@@ -125,7 +152,8 @@ export class AnalyticsRuntime {
         const attributes = record.attributes as AgentActivityEntry;
         const envelope = readObservationEnvelope(attributes);
         // An annotated record whose envelope cannot be read cannot be proven outside the fence.
-        return envelope === null || this.pump.fenceIsExcluded(envelope.observation, resolveWorkspacePath(attributes));
+        return envelope === null || this.pump.fenceIsExcluded(envelope.observation, resolveWorkspacePath(attributes),
+          Number.isFinite(Number(record.startTimeUnixNano)) ? Number(BigInt(record.startTimeUnixNano) / 1_000_000n) : undefined);
       },
     };
   }
@@ -173,8 +201,10 @@ export class AnalyticsRuntime {
         { store: this.deps.store, ...(this.deps.policyClient ? { policy: this.deps.policyClient } : {}) });
       const byId = createExclusionFence(fetched.ids.map(id => ({ id, deviceId: ID_SCOPE_SENTINEL })),
         { recordLimit: () => this.deps.onStatus?.('exclusion_limit_reached') });
+      // Window fence over the whole interval source event .. capture: a job parked for days is captured outside
+      // the window but its source event is inside it.
       this.pump.setFence({ isExcluded: (observation, context) => byId.isExcluded(observation, context)
-        || fetched.windows.some(w => { const at = Date.parse(observation.occurredAt); return !(at < w.fromMs) && at < w.toMs; }) });
+        || windowHit(fetched.windows, context?.eventTimeMs ?? Date.parse(observation.occurredAt), Date.parse(observation.occurredAt)) });
       this.pump.bindCredential();
       this.lastSynced = fetched.revision;
     } catch {

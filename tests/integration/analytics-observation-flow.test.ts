@@ -22,8 +22,8 @@ const fresh = (over = {}) => job({ occurredAt: new Date().toISOString(), ...over
 async function harness() {
   const store = new JobStore(dir, { policy: () => state.policy });
   const scheduler = new EnrichmentScheduler(store, { policy: () => state.policy });
-  const capturedAt = new Date(Date.now() + 1000); // fixed clock: a re-capture of the same source event is byte-identical
-  registerEnrichmentHandlers(scheduler, { snapshot: async () => payload, now: () => capturedAt });
+  let tick = 0; // the clock moves: a re-capture would carry DIFFERENT content under the same observationId
+  registerEnrichmentHandlers(scheduler, { snapshot: async () => ({ ...payload, head: 'h' + tick++ }), now: () => new Date(Date.now() + 1000 + tick) });
   const sent: AgentActivityEntry[] = [];
   const pump = new ObservationPump({
     store, spool: new FileObservationSpool(path.join(dir, 'spool')), policy: () => state.policy, credential: () => state.credential,
@@ -49,12 +49,13 @@ describe('analytics observation flow', () => {
     expect(Object.keys(factsBeforeReplay)).toEqual(['job-1']);
     // Delivered journals are acknowledged: a second drain resends nothing.
     expect(await pump.drain()).toMatchObject({ exported: 0 });
-    // Replay of the same source event (crash window / re-enqueue) keeps identity.
+    // A re-seen source event (crash window / re-enqueue) is re-captured but never re-exported: first export wins.
     await store.enqueue(fresh());
     await scheduler.tick();
-    await pump.drain();
-    expect(sent).toHaveLength(2);
+    expect(await pump.drain()).toMatchObject({ exported: 0, duplicates: 1 });
+    expect(sent).toHaveLength(1);
     expect(factsOf(sent)).toEqual(factsBeforeReplay);
+    expect(await store.replayEntries()).toEqual([]); // and the duplicate was released
   });
 
   it('handler_result_is_bound_to_the_job_identity_and_wire_carries_the_real_workspace', async () => {

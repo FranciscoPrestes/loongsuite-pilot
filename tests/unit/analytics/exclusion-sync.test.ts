@@ -37,4 +37,9 @@ describe('exclusion sync fetch', () => {
     await expect(fetchExclusions(opts(endless as never))).rejects.toThrow('page limit');
     expect(endless).toHaveBeenCalledTimes(100);
   });
+
+  it('fails the sync (replay stays closed) above the fence capacity instead of letting the fence delete everything', async () => {
+    const items = Array.from({ length: 50 }, (_, i) => ({ tombstoneId: 't' + i, evidenceIds: Array.from({ length: 250 }, (_, j) => `e${i}-${j}`) }));
+    await expect(fetchExclusions(opts(vi.fn().mockResolvedValue(page('r', items, null)) as never))).rejects.toThrow('too many');
+  });
 });

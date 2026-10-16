@@ -26,13 +26,14 @@ let WINDOW = { from: '2020-01-01T00:00:00Z', to: '2020-01-02T00:00:00Z' };
 const page = (revision: string, ids: string[], items?: Array<{ tombstoneId: string; evidenceIds: string[] }>) => ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true, error: null,
   data: { revision, items: (items ?? ids.map(i => ({ tombstoneId: 't-' + i, evidenceIds: [i] }))).map(i => ({ ...i, window: WINDOW })), nextCursor: null, hasMore: false } }) }) as Response;
 
-function setup(opts: { policy?: EffectiveInstrumentationPolicy; fetchImpl?: typeof fetch } = {}) {
+function setup(opts: { policy?: EffectiveInstrumentationPolicy; fetchImpl?: typeof fetch; now?: () => Date } = {}) {
   const state = { policy: opts.policy ?? base() };
   const store = new JobStore(dir, { policy: () => state.policy });
   const scheduler = new EnrichmentScheduler(store, { policy: () => state.policy });
   const sent: AgentActivityEntry[] = []; const statuses: string[] = [];
   const runtime = new AnalyticsRuntime({ dataDir: dir, collectorVersion: '1.2.0', deviceId: 'device-1', userId: 'u1', portalBaseUrl: 'https://portal.test',
     store, scheduler, policy: () => state.policy, credential: () => 'Bearer k', send: async e => { sent.push(e); }, manifests,
+    ...(opts.now ? { now: opts.now } : {}),
     fetch: opts.fetchImpl ?? (vi.fn().mockResolvedValue(page('7', [])) as never), onStatus: s => statuses.push(s) });
   return { state, store, scheduler, runtime, sent, statuses };
 }
@@ -122,7 +123,7 @@ describe('analytics runtime', () => {
     const record = (id: string) => {
       const o = observation(job({ id, occurredAt: new Date().toISOString() }));
       const entry = attachObservation(carrierFor(o, '/tmp/example', 'u'), o);
-      return JSON.stringify({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'obs', startTimeUnixNano: '1', endTimeUnixNano: '2', attributes: entry }) + '\n';
+      return JSON.stringify({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'obs', startTimeUnixNano: String(Date.now() * 1_000_000), endTimeUnixNano: String(Date.now() * 1_000_000 + 1), attributes: entry }) + '\n';
     };
     const file = path.join(failedDir, 'pilot__primary-2026-10-14.jsonl');
     await fs.writeFile(file, record('obs-excluded') + record('obs-ok'));
@@ -145,5 +146,47 @@ describe('analytics runtime', () => {
     expect(sentIds.join()).not.toContain('obs-excluded');
     expect(sentIds.join()).toContain('obs-ok');
     void store; void scheduler;
+  });
+
+  it('a job parked for days is fenced by its SOURCE event time, not only the capture time', async () => {
+    const parked = Date.now() - 3 * 86_400_000;
+    for (const [covers, expected] of [[true, []], [false, ['parked']]] as const) {
+      WINDOW = covers ? { from: new Date(parked - 3600_000).toISOString(), to: new Date(parked + 3600_000).toISOString() }
+        : { from: new Date(parked - 5 * 3600_000).toISOString(), to: new Date(parked - 4 * 3600_000).toISOString() }; // wholly before the interval
+      const { store, runtime, sent } = setup({ fetchImpl: vi.fn().mockResolvedValue(page('7', [], [{ tombstoneId: 'w', evidenceIds: ['ev_portal'] }])) as never });
+      const j = job({ id: 'parked', dedupeKey: 'parked', occurredAt: new Date(parked).toISOString() });
+      await store.enqueue(j);
+      const claimed = (await store.claim(Date.now(), 2000))!;
+      // Captured NOW although the source event is days old.
+      await store.complete(j.id, { ...observation(j), occurredAt: new Date().toISOString() }, claimed.leaseToken!);
+      await runtime.tick();
+      expect(sent.map(e => readObservationEnvelope(e)!.observationId), covers ? 'source event inside window' : 'window before the interval').toEqual(expected);
+    }
+    WINDOW = { from: '2020-01-01T00:00:00Z', to: '2020-01-02T00:00:00Z' };
+  });
+
+  it('does not report false partial after idleness: the evidence window is applied by the clock at read time', async () => {
+    let clock = new Date();
+    const { runtime } = setup({ now: () => clock });
+    runtime.onEntries([{ time_unix_nano: String((clock.getTime() - 60_000) * 1_000_000), 'event.id': 'e1', 'user.id': 'u', 'event.name': 'tool.call', 'gen_ai.session.id': 's',
+      'gen_ai.agent.type': 'claude-code', 'gen_ai.provider.name': 'p' } as AgentActivityEntry]);
+    const configured = { harnessId: 'claude-code', state: 'configured' as const, observedAt: 0, detected: true, repairResult: 'not_needed' as const };
+    runtime.onStatuses([configured]);
+    await new Promise(r => setTimeout(r, 20));
+    expect(runtime.healthSummary()!.harnesses[0]).toMatchObject({ state: 'healthy' });
+    clock = new Date(clock.getTime() + 3 * 3600_000); // idle for three hours, no new entry arrives to prune the ring
+    runtime.onStatuses([configured]);
+    await runtime.stop();
+    expect(runtime.healthSummary()!.harnesses[0]).toMatchObject({ state: 'configured', activity: 'unobserved' });
+  });
+
+  it('failed-log fence: an unreadable annotated envelope is excluded, a readable allowed one is not, base telemetry is untouched', () => {
+    const { runtime } = setup();
+    const fence = runtime.replayFence();
+    const rec = (attributes: Record<string, unknown>) => ({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'n', startTimeUnixNano: String(Date.now() * 1_000_000), endTimeUnixNano: '2', attributes });
+    expect(fence.isExcluded(rec({ 'ntconsult.analytics.kind': 'hook_health', 'ntconsult.analytics.observation': '{broken' }))).toBe(true);
+    expect(fence.isExcluded(rec({ 'event.id': 'plain' }))).toBe(false);
+    const o = observation(job({ id: 'ok-1', occurredAt: new Date().toISOString() }));
+    expect(fence.isExcluded(rec(attachObservation(carrierFor(o, '/tmp/example', 'u'), o) as never))).toBe(false);
   });
 });
