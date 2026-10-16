@@ -50,6 +50,7 @@ vi.mock('../../../src/status-bar/index.js', () => ({
     return {
       start: mockMetricsSummaryStart,
       stop: mockMetricsSummaryStop,
+      setAnalyticsHealth: vi.fn(),
     };
   }),
   StatusBarAppManager: vi.fn().mockImplementation(() => ({
@@ -368,6 +369,28 @@ describe('Orchestrator', () => {
         input.emit('entries', entries2);
         expect((await flushed).count).toBe(1); // base capture still flows with enrichment disabled
       } finally { await orch.stop(); }
+    });
+
+    it('wires the analytics runtime only with a device identity and portal, never touching the network in tests', async () => {
+      const offline = vi.fn().mockRejectedValue(new Error('offline'));
+      vi.stubGlobal('fetch', offline);
+      const jsonl = { jsonl: { enabled: true, outputDir: path.join(homeDir, 'rt-output'), rotateDaily: true, maxFileSizeMb: 100 } };
+      const withDevice = new Orchestrator(makeConfig({ dataDir: path.join(homeDir, 'rt-on'), flushers: jsonl,
+        instrumentation: { localEnabled: true, portalBaseUrl: 'https://portal.test', deviceId: 'device-1', authorization: 'Bearer fixture' } }));
+      const withoutDevice = new Orchestrator(makeConfig({ dataDir: path.join(homeDir, 'rt-off'), flushers: jsonl,
+        instrumentation: { localEnabled: true, portalBaseUrl: 'https://portal.test', authorization: 'Bearer fixture' } }));
+      try {
+        await withDevice.start();
+        expect(withDevice.getAnalyticsRuntime()).not.toBeNull();
+        await withoutDevice.start();
+        expect(withoutDevice.getAnalyticsRuntime()).toBeNull(); // no device identity: analytics stays off, base capture runs
+        expect(withoutDevice.getEnrichmentStore()).not.toBeNull();
+      } finally {
+        await withDevice.stop();
+        await withoutDevice.stop();
+        vi.unstubAllGlobals();
+      }
+      expect(withDevice.getAnalyticsRuntime()).toBeNull();
     });
 
     it('keeps command-only deployment discovery and starts the real sixty-second reconciler', async () => {

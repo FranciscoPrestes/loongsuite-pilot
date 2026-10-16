@@ -606,7 +606,9 @@ export class JobStore {
       if (r.state === 'complete') return;
       if (!this.options.policy().enrichmentEnabled || this.excluded(r.job)) throw new Error('enrichment disabled');
       if (observation.observationId !== id || observation.kind !== r.job.kind || observation.deviceId !== r.job.deviceId
-        || observation.sessionId !== r.job.sessionId || observation.occurredAt !== r.job.occurredAt
+        || observation.sessionId !== r.job.sessionId
+        // A snapshot carries its REAL capture time (never back-dated to the signal): it cannot predate the signal or lie in the future.
+        || Date.parse(observation.occurredAt) < Date.parse(r.job.occurredAt) || Date.parse(observation.occurredAt) > this.now() + 300000
         || observation.harnessId !== r.job.harnessId || observation.harnessVersion !== r.job.harnessVersion
         || observation.collectorVersion !== r.job.collectorVersion || observation.capabilitiesVersion !== r.job.capabilitiesVersion
         || (observation.toolCallId ?? null) !== r.job.nativeCallId || observation.turnId !== r.job.turnId
@@ -680,7 +682,10 @@ export class JobStore {
   invalidateReplay(): void { this.synchronizedRevision = null; }
 
   /** Read-only replay view; maintenance stays bounded and outside the shared lock. */
-  async replayBatch(limit = 100): Promise<Observation[]> {
+  async replayBatch(limit = 100): Promise<Observation[]> { return (await this.replayEntries(limit)).map(e => e.observation); }
+
+  /** Replay view plus the real workspace each result belongs to, so the transport fence matches the true scope. */
+  async replayEntries(limit = 100): Promise<{ observation: Observation; workspacePath: string }[]> {
     await this.maintain();
     const p = this.options.policy();
     if (!p.replayEnabled || !p.deletionRevision || this.synchronizedRevision !== p.deletionRevision) return [];
@@ -690,7 +695,21 @@ export class JobStore {
     return this.records()
       .filter(r => r.state === 'complete' && r.result && !this.excluded(r.job, exclusions))
       .slice(0, Math.max(0, Math.min(100, limit)))
-      .map(r => r.result!);
+      .map(r => ({ observation: r.result!, workspacePath: r.job.workspacePath }));
+  }
+
+  /** Delivered (or durably spooled) results leave the journal; only completed records can be acknowledged. */
+  async acknowledge(ids: readonly string[]): Promise<number> {
+    await this.ready();
+    return this.locked(() => {
+      let removed = 0;
+      for (const id of ids) {
+        const key = this.readIdIndex(id);
+        const record = key ? this.readRecord(key) : null;
+        if (record?.state === 'complete') { this.deleteRecordLocked(record); removed += 1; }
+      }
+      return removed;
+    });
   }
 
   private exclusions(): Exclusions {

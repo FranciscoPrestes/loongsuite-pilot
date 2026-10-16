@@ -24,7 +24,11 @@ export interface DesiredPolicyClientOptions {
   baseUrl: string; deviceId?: string; authorization: () => string | Promise<string>;
   fetch?: typeof fetch; now?: () => number; bundleCompatible?: (version: string) => boolean;
   cache?: { load: () => Promise<unknown>; save: (state: PolicyCache) => Promise<void> };
+  /** Runs after every refresh attempt (e.g. to re-verify the installed bundle); failures never affect the policy. */
+  afterRefresh?: () => Promise<void>;
 }
+/** What the C3 bundle store needs to authorize consuming a bundle; computed from raw policy state, not from effective(). */
+export interface BundleActivation { enabled: boolean; desiredBundle: string; cohort: string | null; allowedRollbackBundles: string[] }
 export interface PolicyCache { policy: InstrumentationPolicy | null; etag: string | null; lastHealthyAt: number | null;
   portalOrigin: string; credentialFingerprint: string; authorizationDenied: boolean }
 async function boundedPolicyBody(response: Response): Promise<unknown> {
@@ -74,7 +78,8 @@ export class DesiredPolicyClient {
   }
   refresh(): Promise<void> {
     if (this.refreshing) return this.refreshing;
-    this.refreshing = this.refreshOnce().finally(() => { this.refreshing = null; });
+    this.refreshing = this.refreshOnce().then(() => this.options.afterRefresh?.()).catch(() => undefined)
+      .finally(() => { this.refreshing = null; });
     return this.refreshing;
   }
   private async refreshOnce(): Promise<void> {
@@ -117,7 +122,9 @@ export class DesiredPolicyClient {
         return;
       }
       if (!response.ok || response.status !== 200) { this.reason = 'offline'; return; }
-      const body: unknown = await boundedPolicyBody(response);
+      const raw: unknown = await boundedPolicyBody(response);
+      // The portal wraps every response in its { success, data, error } envelope.
+      const body = raw && typeof raw === 'object' && 'success' in raw && 'data' in raw ? (raw as { data: unknown }).data : raw;
       if (Buffer.byteLength(JSON.stringify(body)) > 64 * 1024) throw new Error('policy too large');
       const next = instrumentationPolicySchema.parse(body);
       const revision = operationalRevision(next.revision);
@@ -145,15 +152,29 @@ export class DesiredPolicyClient {
     if (!this.policy || revision !== this.policy.deletionRevision) throw new Error('exclusion revision must match current policy');
     this.syncedDeletionRevision = revision;
   }
+  /** Every gate except bundle compatibility, which needs the (policy-dependent) verified bundle resolver. */
+  private baseReason(localEnabled: boolean): PolicyReason {
+    const policy = this.policy;
+    if (!localEnabled) return 'local_disabled';
+    if (this.authorizationDenied) return 'unauthorized';
+    if (!policy) return 'no_policy';
+    if (this.lastHealthyAt === null || this.now() - this.lastHealthyAt > POLICY_OFFLINE_MAX_AGE_MS || this.now() >= Date.parse(policy.expiresAt)) return 'policy_expired';
+    if (!policy.enabled || policy.killSwitch) return 'central_disabled';
+    return 'ready';
+  }
+  /**
+   * Bundle activation authority. `allowedRollbackBundles` is explicitly empty: the policy schema (and the
+   * portal contract) define no rollback list, so an older bundle is never authorized by this client.
+   */
+  activation(localEnabled: boolean): BundleActivation {
+    const policy = this.policy;
+    return { enabled: this.baseReason(localEnabled) === 'ready', desiredBundle: policy?.desiredBundleVersion ?? '0.0.0',
+      cohort: policy?.cohortId ?? null, allowedRollbackBundles: [] };
+  }
   effective(localEnabled: boolean): EffectiveInstrumentationPolicy {
     const policy = this.policy;
-    let reason: PolicyReason = 'ready';
-    if (!localEnabled) reason = 'local_disabled';
-    else if (this.authorizationDenied) reason = 'unauthorized';
-    else if (!policy) reason = 'no_policy';
-    else if (this.lastHealthyAt === null || this.now() - this.lastHealthyAt > POLICY_OFFLINE_MAX_AGE_MS || this.now() >= Date.parse(policy.expiresAt)) reason = 'policy_expired';
-    else if (!policy.enabled || policy.killSwitch) reason = 'central_disabled';
-    else if (this.options.bundleCompatible && !this.options.bundleCompatible(policy.desiredBundleVersion)) reason = 'bundle_incompatible';
+    let reason = this.baseReason(localEnabled);
+    if (reason === 'ready' && this.options.bundleCompatible && !this.options.bundleCompatible(policy!.desiredBundleVersion)) reason = 'bundle_incompatible';
     const enrichmentEnabled = reason === 'ready';
     return { enrichmentEnabled, replayEnabled: enrichmentEnabled && this.syncedDeletionRevision === policy?.deletionRevision,
       baseTelemetryEnabled: true, reason, desiredRevision: policy?.revision ?? null, deletionRevision: policy?.deletionRevision ?? null };

@@ -12,7 +12,8 @@ export class EnrichmentScheduler {
  private timer:ReturnType<typeof setInterval>|null=null;private pending:Promise<void>|null=null;private active:AbortController|null=null;private stopping=false;
  private lastMaintainAt=0;
  constructor(private readonly store:JobStore,private readonly options:SchedulerOptions){this.config={timeoutMs:options.timeoutMs??2000,maintainEveryMs:options.maintainEveryMs??30000};if(this.config.timeoutMs<=0||this.config.timeoutMs>2000)throw new Error('invalid worker timeout');if(!Number.isFinite(this.config.maintainEveryMs)||this.config.maintainEveryMs<0)throw new Error('invalid maintenance cadence');}
- register(kind:ObservationKind,handler:EnrichmentHandler):void{this.handlers.set(kind,handler);}
+ /** One owner per kind: a second registration is a wiring bug, never a silent replacement of a trusted handler. */
+ register(kind:ObservationKind,handler:EnrichmentHandler):void{if(this.handlers.has(kind))throw new Error(`handler already registered: ${kind}`);this.handlers.set(kind,handler);}
  start():void{if(this.timer)return;this.stopping=false;this.timer=setInterval(()=>{void this.tick();},250);this.timer.unref?.();void this.tick();}
  async stop():Promise<void>{this.stopping=true;if(this.timer)clearInterval(this.timer);this.timer=null;this.active?.abort();await this.pending;}
  tick():Promise<void>{if(this.pending)return this.pending;this.pending=this.tickOnce().catch(()=>{try{this.options.onError?.('enrichment_queue_unavailable');}catch{/* observer cannot stop capture */}}).finally(()=>{this.pending=null;});return this.pending;}

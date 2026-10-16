@@ -64,6 +64,9 @@ export const GIT_SAFE_CONFIG = [
   '-c', 'core.pager=cat',
 ];
 
+/** Total git time for one snapshot: all calls together stay inside the 2 s worker deadline. */
+export const SNAPSHOT_BUDGET_MS = 1800;
+
 /** Bounded stdout capture: enough for a very large dirty set, never unbounded. */
 const MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024;
 
@@ -106,16 +109,21 @@ async function runGitReadonly(
   cwd: string,
   gitArgs: readonly string[],
   signal?: AbortSignal,
-  opts: { allowMissing?: boolean } = {},
+  opts: { allowMissing?: boolean; deadline?: number } = {},
 ): Promise<string | undefined> {
   const sub = gitArgs[0];
+  // The whole snapshot shares one budget that fits inside the scheduler's 2 s deadline.
+  const remaining = opts.deadline === undefined ? 1500 : Math.min(1500, opts.deadline - Date.now());
+  if (remaining <= 0) throw new Error('snapshot budget exhausted');
   if (!sub || !READONLY_GIT_SUBCOMMANDS.has(sub)) {
     throw new Error(`read-only git violation: ${sub ?? '(none)'}`);
   }
   try {
     const { stdout } = await execFile('git', ['-C', cwd, ...GIT_SAFE_CONFIG, ...gitArgs], {
       shell: false,
-      timeout: 1500,
+      timeout: remaining,
+      // The scheduler SIGKILLs owned children at its deadline; a timed-out git must die the same way.
+      killSignal: 'SIGKILL',
       maxBuffer: MAX_GIT_OUTPUT_BYTES,
       encoding: 'utf8',
       ...(signal ? { signal } : {}),
@@ -211,14 +219,16 @@ async function resolveContainedPath(
 export async function snapshotRepository(
   workspacePath: string,
   signal: AbortSignal,
+  budgetMs = SNAPSHOT_BUDGET_MS,
 ): Promise<RepoSnapshotPayload> {
   if (signal.aborted) throw new Error('snapshot aborted');
+  const deadline = Date.now() + budgetMs;
   const realRoot = await fs.realpath(workspacePath);
   const stat = await fs.stat(realRoot);
   if (!stat.isDirectory()) throw new Error('workspace is not a directory');
 
   // Required: repo identity. Fails (throws) for a non-repo — never a silent fallback.
-  const gitDirRaw = await runGitReadonly(realRoot, ['rev-parse', '--absolute-git-dir'], signal);
+  const gitDirRaw = await runGitReadonly(realRoot, ['rev-parse', '--absolute-git-dir'], signal, { deadline });
   const gitDir = gitDirRaw?.trim();
   const worktreeId = computeWorktreeId(
     gitDir ? path.resolve(realRoot, gitDir) : realRoot,
@@ -226,22 +236,22 @@ export async function snapshotRepository(
 
   // `HEAD` / branch probes legitimately return "no value" on an empty or
   // detached repo (allowMissing), but any infrastructure failure still throws.
-  const headRaw = await runGitReadonly(realRoot, ['rev-parse', 'HEAD'], signal, { allowMissing: true });
+  const headRaw = await runGitReadonly(realRoot, ['rev-parse', 'HEAD'], signal, { allowMissing: true, deadline });
   const head = headRaw?.trim() || null;
 
   let branch: string | null = null;
-  const abbrev = await runGitReadonly(realRoot, ['rev-parse', '--abbrev-ref', 'HEAD'], signal, { allowMissing: true });
+  const abbrev = await runGitReadonly(realRoot, ['rev-parse', '--abbrev-ref', 'HEAD'], signal, { allowMissing: true, deadline });
   const abbrevTrimmed = abbrev?.trim();
   if (abbrevTrimmed && abbrevTrimmed !== 'HEAD') branch = abbrevTrimmed;
   else {
-    const symbolic = await runGitReadonly(realRoot, ['symbolic-ref', '--short', 'HEAD'], signal, { allowMissing: true });
+    const symbolic = await runGitReadonly(realRoot, ['symbolic-ref', '--short', 'HEAD'], signal, { allowMissing: true, deadline });
     branch = symbolic?.trim() || null;
   }
 
   // Required: dirty state. A failure here throws rather than reporting a clean
   // tree — "falta de informação nunca vira sucesso". Empty stdout (exit 0) is a
   // genuinely clean repo and only then yields files: [].
-  const statusRaw = (await runGitReadonly(realRoot, ['status', '--porcelain'], signal)) ?? '';
+  const statusRaw = (await runGitReadonly(realRoot, ['status', '--porcelain'], signal, { deadline })) ?? '';
   if (signal.aborted) throw new Error('snapshot aborted');
   const rawEntries = parsePorcelain(statusRaw);
 

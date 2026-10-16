@@ -127,6 +127,21 @@ describe('MetricsSummaryWriter', () => {
     expect(todayRange.totalSessions).toBe(1);
   });
 
+  it('publishes the analytics collection-health view in the existing summary and survives a failing provider', async () => {
+    const summaryPath = path.join(tmpDir, 'logs', 'metrics-summary.json');
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig());
+    await writer.refresh();
+    expect(JSON.parse(await fs.readFile(summaryPath, 'utf8')).analyticsHealth).toBeUndefined();
+    writer.setAnalyticsHealth(() => ({ policyReason: 'ready', harnesses: [{ harnessId: 'claude-code', state: 'partial' }] }));
+    await writer.refresh();
+    expect(JSON.parse(await fs.readFile(summaryPath, 'utf8')).analyticsHealth).toMatchObject({ policyReason: 'ready', harnesses: [{ state: 'partial' }] });
+    writer.setAnalyticsHealth(() => { throw new Error('provider down'); });
+    await writer.refresh();
+    const after = JSON.parse(await fs.readFile(summaryPath, 'utf8'));
+    expect(after.analyticsHealth).toBeUndefined();
+    expect(after.version).toBe(1);
+  });
+
   it('reads events from the configured JSONL output directory', async () => {
     const outputDir = path.join(tmpDir, 'custom-jsonl-output');
     await writeJsonlFile(outputDir, `codex-${today()}.jsonl`, [makeLlmResponse()]);

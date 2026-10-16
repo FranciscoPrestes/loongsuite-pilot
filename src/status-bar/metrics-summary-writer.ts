@@ -74,6 +74,8 @@ export interface MetricsSummary {
   };
   dailyTokens: DailyPoint[];
   dailySessions: DailyPoint[];
+  /** Additive local collection-health view (analytics); absent when analytics is not running. */
+  analyticsHealth?: unknown;
 }
 
 // ── Internal types ──
@@ -161,6 +163,7 @@ export class MetricsSummaryWriter {
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
   private refreshPromise: Promise<void> | null = null;
   private stopped = false;
+  private analyticsHealth: () => unknown = () => null;
 
   constructor(
     dataDir: string,
@@ -175,6 +178,9 @@ export class MetricsSummaryWriter {
     this.scanStatePath = path.join(dataDir, 'cache', 'metrics-scan-state.json');
     this.currentDayStatePath = path.join(dataDir, 'cache', 'metrics-current-day-state.json');
   }
+
+  /** Provider of the local collection-health summary served through the existing summary file. */
+  setAnalyticsHealth(provider: () => unknown): void { this.analyticsHealth = provider; }
 
   start(): void {
     this.stopped = false;
@@ -579,7 +585,15 @@ export class MetricsSummaryWriter {
       },
       dailyTokens,
       dailySessions,
+      ...this.healthField(),
     };
+  }
+
+  private healthField(): { analyticsHealth?: unknown } {
+    try {
+      const health = this.analyticsHealth();
+      return health ? { analyticsHealth: health } : {};
+    } catch { return {}; }
   }
 
   private buildRangeData(

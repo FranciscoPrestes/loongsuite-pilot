@@ -6,6 +6,7 @@ import { buildAutoUpdateConfig, type ConfigFile } from '../core/config-loader.js
 import { createLogger, initFileLogging, flushLogsSync } from '../utils/logger.js';
 import { readJsonFile, resolveHome, readInstalledVersion } from '../utils/fs-utils.js';
 import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
+import { createUpdaterAnalyticsOptions } from '../analytics/bundle-runtime.js';
 import { UPDATER_PROCESS_PATTERNS, writePidFileSync, removeOwnPidFileSync } from '../utils/pid-utils.js';
 
 const logger = createLogger('UpdaterMain');
@@ -80,7 +81,8 @@ async function main(): Promise<void> {
   });
   await metrics.start();
 
-  const updater = new Updater(config);
+  // Analytics bundles only activate behind a fresh central policy + a validated collector event (undefined = off).
+  const updater = new Updater(config, undefined, createUpdaterAnalyticsOptions(file, dataDir, version));
   updater.setMetrics(metrics);
 
   const shutdown = () => {

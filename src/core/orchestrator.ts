@@ -19,7 +19,11 @@ import { startInterceptorService, type InterceptorService } from '../interceptor
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { DesiredStateReconciler } from '../deployment/desired-state-reconciler.js';
-import { createRuntimePolicyClient } from '../analytics/instrumentation-runtime.js';
+import { createCollectorPolicyRuntime } from '../analytics/bundle-runtime.js';
+import { resolveRuntimeAuthorization } from '../analytics/instrumentation-runtime.js';
+import { AnalyticsRuntime } from '../analytics/runtime.js';
+import { tolerantManifests } from '../analytics/runtime.js';
+import type { CapabilityStatus } from '../deployment/desired-state-reconciler.js';
 import {
   areGrokBuildHookAssetsHealthy,
   restoreGrokBuildHookAssets,
@@ -180,6 +184,7 @@ export class Orchestrator extends EventEmitter {
   private enrichmentStore: JobStore | null = null;
   private enrichmentScheduler: EnrichmentScheduler | null = null;
   private enrichmentUnavailable = false;
+  private analyticsRuntime: AnalyticsRuntime | null = null;
   private desiredStateReconciler: DesiredStateReconciler | null = null;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
   private pipelineManager: PipelineManager | null = null;
@@ -206,6 +211,7 @@ export class Orchestrator extends EventEmitter {
   getEnrichmentScheduler(): EnrichmentScheduler | null { return this.enrichmentScheduler; }
   /** C7 synchronizes tombstones and consumes replayBatch; raw records are never exposed. */
   getEnrichmentStore(): JobStore | null { return this.enrichmentStore; }
+  getAnalyticsRuntime(): AnalyticsRuntime | null { return this.analyticsRuntime; }
   async enqueueEnrichment(job: LocalJob): Promise<'created'|'existing'|'disabled'|'unavailable'> {
     // Every enrichment failure is isolated: the harness and base capture never wait on it.
     try {
@@ -373,11 +379,13 @@ export class Orchestrator extends EventEmitter {
     // 6. Register inputs & build detection entries
     const detectionEntries = await this.registerAllInputs();
 
+    // Compatibility is the C3-verified bundle (resolver), never the bare installed collector version.
+    const policyRuntime = createCollectorPolicyRuntime(this.config, this.dataDir, version);
     this.desiredStateReconciler = new DesiredStateReconciler({
       definitions: this.deploymentManager.getDefinitions(), deployment: this.deploymentManager,
       intervalMs: 60_000, now: Date.now, agentEnabled: id => this.isAgentGatedEnabled(id),
       localEnabled: () => this.config.instrumentation?.localEnabled === true,
-      policyClient: createRuntimePolicyClient(this.config, readInstalledVersion(this.dataDir)),
+      policyClient: policyRuntime?.client,
       onStatuses: statuses => this.emit('instrumentation:status', statuses),
     });
     await this.desiredStateReconciler.start();
@@ -398,6 +406,21 @@ export class Orchestrator extends EventEmitter {
           }
         } catch { /* fail open: signal conversion never blocks base capture */ }
       });
+      const deviceId = this.config.instrumentation?.deviceId;
+      const portalBaseUrl = this.config.instrumentation?.portalBaseUrl;
+      if (deviceId && portalBaseUrl) {
+        const runtime = new AnalyticsRuntime({
+          dataDir: this.dataDir, collectorVersion: version, deviceId, userId: this.config.userId, portalBaseUrl,
+          store: this.enrichmentStore, scheduler: this.enrichmentScheduler, policy, ...(policyRuntime ? { policyClient: policyRuntime.client } : {}),
+          credential: () => resolveRuntimeAuthorization(this.config),
+          send: entry => this.flusher.sendBatch([entry]), manifests: tolerantManifests(this.deploymentManager.getDefinitions()),
+          onStatus: reason => this.emit('enrichment:status', { state: 'error', reason }),
+        });
+        this.analyticsRuntime = runtime;
+        this.inputManager.on('enrichment:signals', ({ entries }: { entries: AgentActivityEntry[] }) => runtime.onEntries(entries));
+        this.on('instrumentation:status', (statuses: CapabilityStatus[]) => this.analyticsRuntime?.onStatuses(statuses));
+        runtime.start();
+      }
       this.enrichmentScheduler.start();
     } catch (err) {
       this.enrichmentStore = null;
@@ -506,6 +529,7 @@ export class Orchestrator extends EventEmitter {
       this.config.statusBar,
       this.config.flushers.jsonl?.outputDir,
     );
+    this.metricsSummaryWriter.setAnalyticsHealth(() => this.analyticsRuntime?.healthSummary() ?? null);
     this.metricsSummaryWriter.start();
 
     // The local dashboard shares the collector lifecycle and is non-fatal when
@@ -627,6 +651,8 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    await this.analyticsRuntime?.stop();
+    this.analyticsRuntime = null;
     await this.enrichmentScheduler?.stop();
     this.enrichmentScheduler=null;
     this.enrichmentStore?.invalidateReplay();

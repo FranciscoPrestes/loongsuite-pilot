@@ -42,7 +42,7 @@ export function jobKey(job:LocalJob):string {
 }
 
 /** Signal-only adapter: no tool arguments/results, subprocesses or source file reads. */
-export function jobFromEntry(entry:import('../types/index.js').AgentActivityEntry,inputId:string,deviceId:string,collectorVersion:string):LocalJob|null {
+export function jobFromEntry(entry:import('../types/index.js').AgentActivityEntry,inputId:string,deviceId:string,collectorVersion:string,kind:ObservationKind='repo_snapshot'):LocalJob|null {
  try {
   const nativeId=entry['event.id'];const sessionId=entry['gen_ai.session.id'];
   const workspacePath=entry['workspace.path']??entry['workspace.current_root'];
@@ -51,7 +51,7 @@ export function jobFromEntry(entry:import('../types/index.js').AgentActivityEntr
   if(timestamp<0||timestamp>BigInt(Number.MAX_SAFE_INTEGER))return null;
   const nativeCallId=entry['gen_ai.tool.call.id']??null;
   const processNamespace=typeof entry['gen_ai.data_source.id']==='string'?entry['gen_ai.data_source.id']:inputId;
-  return prepareJob({id:digest(JSON.stringify([deviceId,inputId,nativeId,'repo_snapshot'])),dedupeKey:nativeId,kind:'repo_snapshot',
+  return prepareJob({id:digest(JSON.stringify([deviceId,inputId,nativeId,kind])),dedupeKey:nativeId,kind,
    sourceRefs:[{sourceNamespace:inputId,nativeId,phase:'event',...(entry.trace_id?{traceId:entry.trace_id}:{}),...(entry.span_id?{spanId:entry.span_id}:{})}],
    workspacePath,occurredAt:new Date(Number(timestamp)).toISOString(),deviceId,sessionId,nativeCallId,processNamespace,
    harnessId:entry['gen_ai.agent.type'],harnessVersion:typeof entry['gen_ai.agent.version']==='string'?entry['gen_ai.agent.version']:'unknown',
