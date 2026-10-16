@@ -53,7 +53,8 @@ export function carrierFor(o: Observation, workspacePath: string | undefined, us
   const at = Number.isFinite(signalMs) ? Math.min(signalMs, Date.parse(o.occurredAt)) : Date.parse(o.occurredAt);
   return {
     time_unix_nano: String(BigInt(at) * 1_000_000n), 'event.id': o.observationId, 'user.id': userId,
-    'event.name': 'other', 'gen_ai.session.id': o.sessionId ?? `device:${o.deviceId}`, 'gen_ai.agent.type': COLLECTOR_AGENT_TYPE,
+    'event.name': 'other', // Isolated session: carriers never join a real harness session; the real one stays in the envelope (observation.sessionId).
+    'gen_ai.session.id': `${COLLECTOR_AGENT_TYPE}:${o.deviceId}`, 'gen_ai.agent.type': COLLECTOR_AGENT_TYPE,
     'gen_ai.provider.name': 'ntconsult-collector',
     // Content-free structural marker: without it the OTLP converter ignores an `other` event and drops the annotations.
     'gen_ai.input.messages_delta': [],

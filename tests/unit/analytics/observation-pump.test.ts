@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ObservationPump, type ReplaySource } from '../../../src/analytics/observation-pump.js';
 import type { Observation } from '../../../src/analytics/observation.js';
 import type { EffectiveInstrumentationPolicy } from '../../../src/analytics/desired-policy-client.js';
+import { readObservationEnvelope } from '../../../src/analytics/observation-exporter.js';
 import { job, observation } from '../enrichment/fixtures.js';
 
 const policy = (over: Partial<EffectiveInstrumentationPolicy> = {}): EffectiveInstrumentationPolicy => ({ enrichmentEnabled: true, replayEnabled: true, baseTelemetryEnabled: true, reason: 'ready', desiredRevision: '1', deletionRevision: '1', ...over });
@@ -21,6 +22,11 @@ describe('observation pump', () => {
     await pump.drain();
     expect(sent[0]!['gen_ai.agent.type']).toBe('ntconsult-collector');
     expect(sent[0]!['gen_ai.agent.type']).not.toBe(entry().observation.harnessId);
+    // The carrier never joins the harness session; the real session survives inside the envelope.
+    const real = entry().observation.sessionId!;
+    expect(sent[0]!['gen_ai.session.id']).toBe(`ntconsult-collector:${entry().observation.deviceId}`);
+    expect(sent[0]!['gen_ai.session.id']).not.toBe(real);
+    expect(readObservationEnvelope(sent[0] as never)!.observation.sessionId).toBe(real);
   });
 
   it('sends nothing before exclusions were synchronized and the credential bound', async () => {
