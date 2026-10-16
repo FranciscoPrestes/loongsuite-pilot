@@ -15,7 +15,7 @@ export interface ReplaySource {
   invalidateReplay(): void;
 }
 /** Persistent record of delivered observation ids, so a re-seen source event is never re-exported with new content. */
-export interface DeliveredLedger { has(id: string): boolean; add(id: string): void; flush(): Promise<void> }
+export interface DeliveredLedger { ready?(): Promise<void>; has(id: string): boolean; add(id: string): void; flush(): Promise<void> }
 export function memoryLedger(): DeliveredLedger {
   const ids = new Set<string>();
   return { has: id => ids.has(id), add: id => { ids.add(id); }, flush: async () => undefined };
@@ -105,6 +105,7 @@ export class ObservationPump {
     const outcome = this.block('replay_disabled'); outcome.blocked = null;
     const done: string[] = [];
     const ledger = this.options.ledger ?? (this.ledger ??= memoryLedger());
+    await ledger.ready?.(); // persisted ids must be loaded before the first duplicate check
     for (const { observation, workspacePath, signalAt } of await this.options.store.replayEntries(limit)) {
       if (ledger.has(observation.observationId)) { outcome.duplicates += 1; done.push(observation.observationId); continue; }
       try {

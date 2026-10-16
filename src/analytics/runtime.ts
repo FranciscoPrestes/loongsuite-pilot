@@ -31,12 +31,21 @@ export function windowHit(windows: ReadonlyArray<{ fromMs: number; toMs: number 
   return windows.some(w => lo < w.toMs && hi >= w.fromMs);
 }
 
+/** Source event time of a failed-log span; absent/blank/zero/garbage falls back to the observation's capture time. */
+export function recordEventMs(record: { startTimeUnixNano?: unknown }): number | undefined {
+  const raw = record.startTimeUnixNano;
+  if (typeof raw !== 'string' || !/^[1-9]\d*$/.test(raw)) return undefined;
+  const ms = Number(BigInt(raw) / 1_000_000n);
+  return Number.isSafeInteger(ms) ? ms : undefined;
+}
+
 /** File-backed delivered-id ledger (bounded FIFO). Read once, written atomically on flush. */
 export function fileLedger(file: string): DeliveredLedger {
   const ids = new Set<string>(); let loaded = false; let dirty = false;
-  const load = (): Promise<void> => loaded ? Promise.resolve() : readJsonFile<string[]>(file).then(v => { (Array.isArray(v) ? v : []).forEach(i => ids.add(String(i))); loaded = true; });
-  void load().catch(() => undefined);
+  const load = (): Promise<void> => loaded ? Promise.resolve() : readJsonFile<string[]>(file).then(v => { (Array.isArray(v) ? v : []).forEach(i => { if (typeof i === 'string' && i.length > 0) ids.add(i); }); loaded = true; });
+  const loading = load().catch(() => undefined);
   return {
+    ready: () => loading,
     has: id => ids.has(id),
     add: id => { ids.add(id); dirty = true; while (ids.size > LEDGER_MAX_IDS) ids.delete(ids.values().next().value as string); },
     flush: async () => { await load(); if (!dirty) return; dirty = false; await writeTextFileAtomic(file, JSON.stringify([...ids]), { mode: 0o600 }); },
@@ -153,7 +162,7 @@ export class AnalyticsRuntime {
         const envelope = readObservationEnvelope(attributes);
         // An annotated record whose envelope cannot be read cannot be proven outside the fence.
         return envelope === null || this.pump.fenceIsExcluded(envelope.observation, resolveWorkspacePath(attributes),
-          Number.isFinite(Number(record.startTimeUnixNano)) ? Number(BigInt(record.startTimeUnixNano) / 1_000_000n) : undefined);
+          recordEventMs(record));
       },
     };
   }

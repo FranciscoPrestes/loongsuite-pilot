@@ -189,4 +189,18 @@ describe('analytics runtime', () => {
     const o = observation(job({ id: 'ok-1', occurredAt: new Date().toISOString() }));
     expect(fence.isExcluded(rec(attachObservation(carrierFor(o, '/tmp/example', 'u'), o) as never))).toBe(false);
   });
+
+  it('failed-log record without a usable span start time falls back to the capture time instead of over-excluding', async () => {
+    const { runtime } = setup({ fetchImpl: vi.fn().mockResolvedValue(page('7', [], [{ tombstoneId: 'w', evidenceIds: [] }])) as never });
+    await runtime.tick(); // window 2020-01-01..02 is now synchronized
+    const fence = runtime.replayFence();
+    const o = observation(job({ id: 'late-1', occurredAt: new Date().toISOString() })); // captured now, far outside 2020
+    const attributes = attachObservation(carrierFor(o, '/tmp/example', 'u'), o) as never;
+    for (const start of [undefined, '', '0', 'garbage']) {
+      const record = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'n', endTimeUnixNano: '2', attributes, ...(start === undefined ? {} : { startTimeUnixNano: start }) } as never;
+      expect(fence.isExcluded(record), `start=${String(start)}`).toBe(false);
+    }
+    const inside = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'n', endTimeUnixNano: '2', attributes, startTimeUnixNano: String(Date.parse('2020-01-01T10:00:00Z') * 1_000_000) } as never;
+    expect(fence.isExcluded(inside)).toBe(true); // a real start time inside the window still fences it
+  });
 });
