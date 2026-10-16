@@ -29,6 +29,12 @@ export interface DrainOutcome {
 }
 export interface LossSummary { expired: number; quota: number; busy: number; total: number }
 
+/**
+ * Carriers are not harness activity: a harness id here would make every installed-but-unused harness look
+ * active in summaries and adoption. The real harness identity lives in the observation payload.
+ */
+export const COLLECTOR_AGENT_TYPE = 'ntconsult-collector';
+
 /** Failures that retrying can never fix: they are recorded by the exporter and the result is released. */
 const PERMANENT_FAILURE = /^(rejected:|redaction|envelope_too_large|missing_envelope)/;
 
@@ -36,7 +42,7 @@ const PERMANENT_FAILURE = /^(rejected:|redaction|envelope_too_large|missing_enve
 export function carrierFor(o: Observation, workspacePath: string | undefined, userId: string): AgentActivityEntry {
   return {
     time_unix_nano: String(BigInt(Date.parse(o.occurredAt)) * 1_000_000n), 'event.id': o.observationId, 'user.id': userId,
-    'event.name': 'other', 'gen_ai.session.id': o.sessionId ?? `device:${o.deviceId}`, 'gen_ai.agent.type': o.harnessId,
+    'event.name': 'other', 'gen_ai.session.id': o.sessionId ?? `device:${o.deviceId}`, 'gen_ai.agent.type': COLLECTOR_AGENT_TYPE,
     'gen_ai.provider.name': 'ntconsult-collector', ...(workspacePath ? { 'workspace.path': workspacePath } : {}),
   };
 }
@@ -56,7 +62,7 @@ export class ObservationPump {
     this.exporter = new ObservationExporter({
       transport: options.transport, spool: options.spool,
       exclusions: { isExcluded: (observation, context) => this.fence.isExcluded(observation, context) },
-      authorized: () => this.authorized(),
+      authorized: () => this.isAuthorized(),
     });
   }
 
@@ -64,8 +70,12 @@ export class ObservationPump {
   bindCredential(): void { this.bound = this.options.credential(); }
   isBound(): boolean { return this.bound != null; }
   setFence(fence: ExclusionFence): void { this.fence = fence; }
+  fenceIsExcluded(observation: Observation, workspacePath: string | undefined): boolean {
+    return this.fence.isExcluded(observation, { workspacePath });
+  }
 
-  private authorized(): boolean {
+  /** True only while exclusions are synchronized for the CURRENT credential and policy still allows replay. */
+  isAuthorized(): boolean {
     return this.bound != null && this.options.credential() === this.bound && this.options.policy().replayEnabled;
   }
 

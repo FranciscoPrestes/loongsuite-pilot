@@ -443,6 +443,8 @@ export class MetricsSummaryWriter {
   }
 
   private applyRecord(record: Record<string, string>, stats: DayStats): void {
+    // Collector-generated analytics carriers (health/replay) are not harness activity.
+    if (record['ntconsult.analytics.kind'] !== undefined) return;
     stats.events++;
 
     const eventName = record['event.name'] ?? '';

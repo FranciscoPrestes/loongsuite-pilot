@@ -6,7 +6,8 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const id = z.string().min(1).max(500);
 const pageSchema = z.object({
   revision: id,
-  items: z.array(z.object({ tombstoneId: id, evidenceIds: z.array(id).max(10_000) }).passthrough()).max(200),
+  items: z.array(z.object({ tombstoneId: id, evidenceIds: z.array(id).max(10_000),
+    window: z.object({ from: z.string().datetime({ offset: true }), to: z.string().datetime({ offset: true }) }).passthrough() }).passthrough()).max(200),
   nextCursor: z.string().nullable(), hasMore: z.boolean(),
 }).passthrough();
 const envelopeSchema = z.object({ success: z.literal(true), data: pageSchema }).passthrough();
@@ -20,14 +21,13 @@ export interface ExclusionFetchOptions {
  * revision were read (a revision change mid-read aborts: replay stays closed). Server tombstones are
  * id-scoped: the tombstone id and every excluded evidence id are returned as plain ids (the runtime
  * fences them by exact observation id; a device-scoped tombstone would silence the whole device).
- * Window-scoped exclusions (source namespace + time window) have no collector equivalent and are not
- * expressible here; the observation ids they list are, which is the only conservative mapping.
  */
-export async function fetchExclusions(options: ExclusionFetchOptions): Promise<{ revision: string; ids: string[] }> {
+export async function fetchExclusions(options: ExclusionFetchOptions): Promise<{ revision: string; ids: string[]; windows: Array<{ fromMs: number; toMs: number }> }> {
   const authorization = options.authorization();
   if (!authorization) throw new Error('exclusion sync requires a credential');
   const fetcher = options.fetch ?? fetch;
   const ids = new Set<string>();
+  const windows: Array<{ fromMs: number; toMs: number }> = [];
   let revision: string | null = null;
   let cursor: string | null = null;
   for (let page = 0; page < MAX_PAGES; page += 1) {
@@ -44,9 +44,12 @@ export async function fetchExclusions(options: ExclusionFetchOptions): Promise<{
     revision = body.revision;
     for (const item of body.items) {
       for (const identifier of [item.tombstoneId, ...item.evidenceIds]) ids.add(identifier);
-      if (ids.size > MAX_TOMBSTONES) throw new Error('too many tombstones');
+      // Portal evidence ids are portal-derived hashes (`ev_<fingerprint>`), not collector observation ids, and the
+      // namespace mapping is unproven, so every tombstone also fences its whole time window: over-exclusion, never a leak.
+      windows.push({ fromMs: Date.parse(item.window.from), toMs: Date.parse(item.window.to) });
+      if (ids.size > MAX_TOMBSTONES || windows.length > MAX_TOMBSTONES) throw new Error('too many tombstones');
     }
-    if (!body.hasMore) return { revision, ids: [...ids] };
+    if (!body.hasMore) return { revision, ids: [...ids], windows };
     if (!body.nextCursor) throw new Error('exclusion paging stalled');
     cursor = body.nextCursor;
   }

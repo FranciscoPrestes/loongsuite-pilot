@@ -107,7 +107,9 @@ export function observeCapabilities(
     if (status.state === 'unsupported_version' || status.state === 'error') return { ...common, activity };
     const recent = evidence.lastEventAt !== null && nowMs - evidence.lastEventAt <= HEALTHY_EVENT_WINDOW_MS;
     if (recent) return { ...common, state: 'healthy' as const, activity, reason: undefined };
-    const knownUse = status.processAlive === true || status.state === 'healthy' || status.state === 'partial';
+    // Known activity = a live process (when a probe supplies it), a previously healthy state, or valid events seen
+    // in the evidence window that have since gone quiet. An unused harness has none of these and stays unobserved.
+    const knownUse = status.processAlive === true || status.state === 'healthy' || status.state === 'partial' || evidence.lastEventAt !== null;
     if (knownUse) return { ...common, state: 'partial' as const, activity, reason: 'no_valid_event_during_activity' };
     return { ...common, activity };
   });

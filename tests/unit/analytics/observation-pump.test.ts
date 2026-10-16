@@ -13,6 +13,16 @@ const spool = () => { const records: string[] = []; const failures: string[] = [
 const entry = () => ({ observation: observation(job({ occurredAt: new Date().toISOString() })), workspacePath: '/tmp/ws' });
 
 describe('observation pump', () => {
+  it('sends carriers that are not harness activity (agent type is the collector, never the harness)', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const pump = new ObservationPump({ store: fakeStore([entry()]), spool: spool(), policy: () => policy(), credential: () => 'fp',
+      transport: { send: async s => { sent.push(JSON.parse(s)); return { status: 200 }; } } });
+    pump.bindCredential();
+    await pump.drain();
+    expect(sent[0]!['gen_ai.agent.type']).toBe('ntconsult-collector');
+    expect(sent[0]!['gen_ai.agent.type']).not.toBe(entry().observation.harnessId);
+  });
+
   it('sends nothing before exclusions were synchronized and the credential bound', async () => {
     const store = fakeStore([entry()]); const send = vi.fn(async () => ({ status: 200 }));
     const pump = new ObservationPump({ store, spool: spool(), policy: () => policy(), credential: () => 'fp', transport: { send } });

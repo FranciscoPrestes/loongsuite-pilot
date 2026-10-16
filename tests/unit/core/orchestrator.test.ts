@@ -382,6 +382,8 @@ describe('Orchestrator', () => {
       try {
         await withDevice.start();
         expect(withDevice.getAnalyticsRuntime()).not.toBeNull();
+        // The reconciler's startup status batch is published, not lost to a late listener.
+        expect(withDevice.getAnalyticsRuntime()!.healthSummary()).not.toBeNull();
         await withoutDevice.start();
         expect(withoutDevice.getAnalyticsRuntime()).toBeNull(); // no device identity: analytics stays off, base capture runs
         expect(withoutDevice.getEnrichmentStore()).not.toBeNull();

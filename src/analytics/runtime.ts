@@ -11,7 +11,9 @@ import { observeCapabilities } from './capability-observer.js';
 import { registerEnrichmentHandlers } from './enrichment-handlers.js';
 import { fetchExclusions } from './exclusion-sync.js';
 import { createHealthPublisher, type CollectionHealthSummary, type HealthPublisher } from './health-publisher.js';
-import { FileObservationSpool, createExclusionFence, synchronizeExclusions } from './observation-exporter.js';
+import { FileObservationSpool, createExclusionFence, readObservationEnvelope, resolveWorkspacePath, synchronizeExclusions, type ExclusionFence } from './observation-exporter.js';
+import type { BaseFlusher } from '../flushers/base-flusher.js';
+import type { FailedSpanRecord } from '../flushers/otlp-failed-replayer.js';
 import { ObservationPump } from './observation-pump.js';
 import { ValidatedEventRecorder } from './validated-event.js';
 
@@ -99,6 +101,7 @@ export class AnalyticsRuntime {
 
   /** Reconciler statuses -> D4 observation -> published health (serialized, fail-open). */
   onStatuses(statuses: readonly CapabilityStatus[]): void {
+    if (this.stopped) return;
     this.health = this.health.then(async () => {
       const observed = observeCapabilities(this.deps.manifests, this.ring, this.deps.now?.() ?? new Date(), statuses);
       await this.publisher.publishCollectionHealth(observed);
@@ -106,6 +109,26 @@ export class AnalyticsRuntime {
   }
 
   healthSummary(): CollectionHealthSummary | null { return this.publisher.summary(); }
+
+  /**
+   * The flusher's own failed-log replay is a second way out: it must obey the same fence. Analytics records
+   * are held (kept untouched) until exclusions are synchronized for the current credential, then fenced.
+   * Records without analytics annotations are base telemetry and never touched here.
+   */
+  replayFence(): { isExcluded: (record: FailedSpanRecord) => boolean; isHeld: (record: FailedSpanRecord) => boolean } {
+    const annotated = (record: FailedSpanRecord) => record.attributes?.['ntconsult.analytics.kind'] !== undefined
+      || record.attributes?.['ntconsult.analytics.observation'] !== undefined;
+    return {
+      isHeld: record => annotated(record) && !this.pump.isAuthorized(),
+      isExcluded: (record) => {
+        if (!annotated(record)) return false;
+        const attributes = record.attributes as AgentActivityEntry;
+        const envelope = readObservationEnvelope(attributes);
+        // An annotated record whose envelope cannot be read cannot be proven outside the fence.
+        return envelope === null || this.pump.fenceIsExcluded(envelope.observation, resolveWorkspacePath(attributes));
+      },
+    };
+  }
 
   start(): void {
     if (this.timer) return;
@@ -148,8 +171,10 @@ export class AnalyticsRuntime {
       // never match a real one: only the listed observation ids are excluded, not the whole device.
       await synchronizeExclusions(fetched.revision, [],
         { store: this.deps.store, ...(this.deps.policyClient ? { policy: this.deps.policyClient } : {}) });
-      this.pump.setFence(createExclusionFence(fetched.ids.map(id => ({ id, deviceId: ID_SCOPE_SENTINEL })),
-        { recordLimit: () => this.deps.onStatus?.('exclusion_limit_reached') }));
+      const byId = createExclusionFence(fetched.ids.map(id => ({ id, deviceId: ID_SCOPE_SENTINEL })),
+        { recordLimit: () => this.deps.onStatus?.('exclusion_limit_reached') });
+      this.pump.setFence({ isExcluded: (observation, context) => byId.isExcluded(observation, context)
+        || fetched.windows.some(w => { const at = Date.parse(observation.occurredAt); return !(at < w.fromMs) && at < w.toMs; }) });
       this.pump.bindCredential();
       this.lastSynced = fetched.revision;
     } catch {
@@ -157,4 +182,20 @@ export class AnalyticsRuntime {
       this.deps.onStatus?.('exclusion_sync_failed'); // replay stays closed until a full synchronization succeeds
     }
   }
+}
+
+/** Connect the runtime fence to every OTLP flusher that owns a failed-log replay. Returns how many were connected. */
+export function connectReplayFence(flusher: BaseFlusher, fence: ReturnType<AnalyticsRuntime['replayFence']>): number {
+  const candidates: BaseFlusher[] = typeof (flusher as { getFlushers?: () => BaseFlusher[] }).getFlushers === 'function'
+    ? (flusher as unknown as { getFlushers: () => BaseFlusher[] }).getFlushers() : [flusher];
+  let connected = 0;
+  for (const candidate of candidates) {
+    const target = candidate as Partial<{ setReplayExclusionFilter: (f: typeof fence.isExcluded) => void; setReplayHold: (f: typeof fence.isHeld) => void }>;
+    if (typeof target.setReplayExclusionFilter === 'function' && typeof target.setReplayHold === 'function') {
+      target.setReplayExclusionFilter(fence.isExcluded);
+      target.setReplayHold(fence.isHeld);
+      connected += 1;
+    }
+  }
+  return connected;
 }

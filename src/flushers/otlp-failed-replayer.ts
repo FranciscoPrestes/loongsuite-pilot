@@ -45,6 +45,11 @@ export interface ReplayOptions {
    * the spool are untouched).
    */
   isExcluded?: (record: FailedSpanRecord) => boolean;
+  /**
+   * Records that must stay in the spool, neither sent nor dropped (e.g. analytics records while the
+   * exclusion fence is not synchronized for the current credential). Checked after `isExcluded`.
+   */
+  isHeld?: (record: FailedSpanRecord) => boolean;
 }
 
 interface Item { line: string; rec: FailedSpanRecord }
@@ -285,7 +290,9 @@ export async function replayFailedSpans(
     // Synchronized exclusions drop their records from the managed spool only,
     // without any send, before any batch is built.
     const included: Item[] = [];
+    const held: string[] = [];
     for (const item of parsed) {
+      if (options?.isHeld?.(item.rec)) { held.push(item.line); continue; }
       if (options?.isExcluded?.(item.rec)) {
         result.excluded = (result.excluded ?? 0) + 1;
         changed = true;
@@ -314,7 +321,7 @@ export async function replayFailedSpans(
         consecutiveRejections++;
         if (consecutiveRejections >= MAX_CONSECUTIVE_REJECTIONS && pending.length > 0) {
           // The backend rejects everything: keep the rest instead of quarantining the backlog.
-          const rest = pending.flat().map((b) => b.line);
+          const rest = [...pending.flat().map((b) => b.line), ...held];
           await rewriteClaimed(claimedPath, rest);
           result.kept += rest.length;
           result.systemicReject = true;
@@ -322,13 +329,18 @@ export async function replayFailedSpans(
         }
       } else {
         if (status === 401 || status === 403) result.authFailed = true;
-        const rest = [batch, ...pending].flat().map((b) => b.line);
+        const rest = [...[batch, ...pending].flat().map((b) => b.line), ...held];
         if (changed) await rewriteClaimed(claimedPath, rest);
         result.kept += rest.length;
         return result;
       }
     }
-    await fs.rm(claimedPath, { force: true });
+    if (held.length > 0) {
+      await rewriteClaimed(claimedPath, held);
+      result.kept += held.length;
+    } else {
+      await fs.rm(claimedPath, { force: true });
+    }
   }
   return result;
 }

@@ -55,6 +55,14 @@ describe('capability observer (D4)', () => {
     expect(status.activity).toBe('observed');
   });
 
+  it('valid_events_that_went_quiet_are_partial_even_without_a_process_probe', () => {
+    // The reconciler never supplies processAlive: known activity is inferred from real events in the window.
+    const status = one([entry({ time_unix_nano: at(300_000) })], base());
+    expect(status.state).toBe('partial');
+    expect(status.reason).toBe('no_valid_event_during_activity');
+    expect(one([], base()).state).toBe('configured');
+  });
+
   it('rejects_invalid_future_foreign_and_collector_generated_events_as_evidence', () => {
     const bad = [entry({ 'event.id': '' }), entry({ 'gen_ai.session.id': '' }), entry({ time_unix_nano: at(-600_000) }),
       entry({ 'gen_ai.agent.type': 'codex' }), entry({ 'ntconsult.analytics.kind': 'hook_health' })];

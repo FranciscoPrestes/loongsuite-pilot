@@ -591,6 +591,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private replayAbort = new AbortController();
   private readonly pendingFailedWrites = new Set<Promise<void>>();
   private replayExclusionFilter: ReplayOptions['isExcluded'];
+  private replayHold: ReplayOptions['isHeld'];
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
@@ -924,6 +925,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.replayExclusionFilter = filter;
   }
 
+  /** Records the replay must keep untouched (neither sent nor dropped), e.g. while exclusions are unsynchronized. */
+  setReplayHold(filter: ((record: FailedSpanRecord) => boolean) | undefined): void {
+    this.replayHold = filter;
+  }
+
   private async runReplay(): Promise<void> {
     const runStart = Date.now();
     if (runStart < this.authBackoff.nextAt) return;
@@ -936,7 +942,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           undefined,
           () => this.stopping,
           this.replayAbort.signal,
-          { isExcluded: this.replayExclusionFilter },
+          { isExcluded: this.replayExclusionFilter, isHeld: this.replayHold },
         );
         if (r.authFailed) authFailed = true;
         if (r.systemicReject) {

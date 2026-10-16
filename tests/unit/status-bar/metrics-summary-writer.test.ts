@@ -127,6 +127,22 @@ describe('MetricsSummaryWriter', () => {
     expect(todayRange.totalSessions).toBe(1);
   });
 
+  it('does not count collector analytics carriers as harness activity', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    await writeJsonlFile(outputDir, `claude-code-${today()}.jsonl`, [
+      makeLlmResponse(),
+      makeLlmResponse({ 'event.id': 'carrier-1', 'event.name': 'other', 'gen_ai.agent.type': 'ntconsult-collector', 'gen_ai.session.id': 'device:dev-1',
+        'ntconsult.analytics.kind': 'hook_health', 'gen_ai.usage.total_tokens': '999' }),
+    ]);
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig());
+    await writer.refresh();
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalEvents).toBe(1);
+    expect(summary.ranges.today.totalSessions).toBe(1);
+    expect(summary.ranges.today.totalTokens).toBe(1200);
+    expect(JSON.stringify(summary.ranges.today)).not.toContain('ntconsult-collector');
+  });
+
   it('publishes the analytics collection-health view in the existing summary and survives a failing provider', async () => {
     const summaryPath = path.join(tmpDir, 'logs', 'metrics-summary.json');
     const writer = new MetricsSummaryWriter(tmpDir, makeConfig());

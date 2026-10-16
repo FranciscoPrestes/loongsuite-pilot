@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fetchExclusions } from '../../../src/analytics/exclusion-sync.js';
 
+const W = { from: '2026-10-01T00:00:00Z', to: '2026-10-02T00:00:00Z' };
 const page = (revision: string, items: Array<{ tombstoneId: string; evidenceIds: string[] }>, next: string | null) =>
-  ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: { revision, items, nextCursor: next, hasMore: next !== null }, error: null }) }) as Response;
+  ({ ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: { revision, items: items.map(i => ({ ...i, window: W })), nextCursor: next, hasMore: next !== null }, error: null }) }) as Response;
 const opts = (fetcher: typeof fetch, auth: string | null = 'Bearer k') => ({ baseUrl: 'https://portal.test', authorization: () => auth ?? undefined, fetch: fetcher });
 
 describe('exclusion sync fetch', () => {
@@ -15,6 +16,12 @@ describe('exclusion sync fetch', () => {
     expect(fetcher.mock.calls[1]![0]).toContain('cursor=c1');
     expect(fetcher.mock.calls[0]![1].headers.Authorization).toBe('Bearer k');
     expect(fetcher.mock.calls[0]![1].redirect).toBe('error');
+  });
+
+  it('fences the whole window of every tombstone because portal evidence ids are not collector ids', async () => {
+    const result = await fetchExclusions(opts(vi.fn().mockResolvedValue(page('r1', [{ tombstoneId: 'w1', evidenceIds: [] }, { tombstoneId: 't2', evidenceIds: ['o9'] }], null)) as never));
+    expect(result.windows).toEqual(Array(2).fill({ fromMs: Date.parse(W.from), toMs: Date.parse(W.to) }));
+    expect(result.ids.sort()).toEqual(['o9', 't2', 'w1']);
   });
 
   it('aborts when the revision changes mid-read, a page stalls or the credential is missing', async () => {

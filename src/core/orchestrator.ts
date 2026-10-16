@@ -22,7 +22,7 @@ import { DesiredStateReconciler } from '../deployment/desired-state-reconciler.j
 import { createCollectorPolicyRuntime } from '../analytics/bundle-runtime.js';
 import { resolveRuntimeAuthorization } from '../analytics/instrumentation-runtime.js';
 import { AnalyticsRuntime } from '../analytics/runtime.js';
-import { tolerantManifests } from '../analytics/runtime.js';
+import { connectReplayFence, tolerantManifests } from '../analytics/runtime.js';
 import type { CapabilityStatus } from '../deployment/desired-state-reconciler.js';
 import {
   areGrokBuildHookAssetsHealthy,
@@ -419,6 +419,9 @@ export class Orchestrator extends EventEmitter {
         this.analyticsRuntime = runtime;
         this.inputManager.on('enrichment:signals', ({ entries }: { entries: AgentActivityEntry[] }) => runtime.onEntries(entries));
         this.on('instrumentation:status', (statuses: CapabilityStatus[]) => this.analyticsRuntime?.onStatuses(statuses));
+        connectReplayFence(this.flusher, runtime.replayFence());
+        // The reconciler's startup batch fired before this listener existed: publish it now.
+        runtime.onStatuses(this.desiredStateReconciler.getStatuses());
         runtime.start();
       }
       this.enrichmentScheduler.start();
