@@ -129,6 +129,8 @@ export interface InstrumentationConfig {
   deviceId?: string;
   /** Existing machine Bearer credential; never included in status or logs. */
   authorization?: string;
+  /** Hours the last healthy policy keeps enrichment on while offline (1..72, default 24). */
+  healthyTtlHours?: number;
 }
 
 export interface AnalyticsConfig {

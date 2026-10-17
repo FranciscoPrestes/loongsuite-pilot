@@ -1492,7 +1492,8 @@ export function buildInstrumentationConfig(file: ConfigFile | null | undefined):
       typeof value.localEnabled !== 'boolean' || (value.deviceId !== undefined && (typeof value.deviceId !== 'string' || !value.deviceId.length || value.deviceId.length > 500)) ||
       (value.authorization !== undefined && (typeof value.authorization !== 'string' || !/^Bearer [^\r\n]+$/.test(value.authorization)))) return undefined;
     return { localEnabled: value.localEnabled, portalBaseUrl: origin.origin, ...(value.deviceId ? { deviceId: value.deviceId } : {}),
-      ...(value.authorization ? { authorization: value.authorization } : {}) };
+      ...(value.authorization ? { authorization: value.authorization } : {}),
+      ...(Number.isInteger(value.healthyTtlHours) && value.healthyTtlHours! >= 1 && value.healthyTtlHours! <= 72 ? { healthyTtlHours: value.healthyTtlHours } : {}) };
   } catch { return undefined; }
 }
 

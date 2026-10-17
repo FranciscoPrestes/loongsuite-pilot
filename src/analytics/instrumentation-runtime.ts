@@ -35,6 +35,7 @@ export function createRuntimePolicyClient(config: PolicyRuntimeConfig, bundleVer
   return new DesiredPolicyClient({ baseUrl: instrumentation.portalBaseUrl, deviceId: instrumentation.deviceId,
     authorization: () => credential, bundleCompatible: desired => current() !== null && desired === current(),
     ...(afterRefresh ? { afterRefresh } : {}),
+    ...(instrumentation.healthyTtlHours ? { healthyTtlMs: instrumentation.healthyTtlHours * 3600_000 } : {}),
     ...(config.dataDir ? { cache: { load: () => readJsonFile(path.join(resolveHome(config.dataDir), 'analytics-policy.json')),
       save: (state: import('./desired-policy-client.js').PolicyCache) => writeTextFileAtomic(path.join(resolveHome(config.dataDir), 'analytics-policy.json'), JSON.stringify(state) + '\n', { mode: 0o600 }) } } : {}) });
 }

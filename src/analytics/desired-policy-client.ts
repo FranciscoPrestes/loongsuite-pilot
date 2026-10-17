@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 export const POLICY_OFFLINE_MAX_AGE_MS = 72 * 3600_000;
+/** How long the last HEALTHY policy keeps enrichment on while the portal is unreachable (never above the 72 h protocol maximum). */
+export const DEFAULT_HEALTHY_TTL_MS = 24 * 3600_000;
 const id = z.string().min(1).max(500);
 const timestamp = z.string().datetime({ offset: true });
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -26,6 +28,8 @@ export interface DesiredPolicyClientOptions {
   cache?: { load: () => Promise<unknown>; save: (state: PolicyCache) => Promise<void> };
   /** Runs after every refresh attempt (e.g. to re-verify the installed bundle); failures never affect the policy. */
   afterRefresh?: () => Promise<void>;
+  /** Healthy-state TTL, clamped to (0, 72 h]; default 24 h. */
+  healthyTtlMs?: number;
 }
 /** What the C3 bundle store needs to authorize consuming a bundle; computed from raw policy state, not from effective(). */
 export interface BundleActivation { enabled: boolean; desiredBundle: string; cohort: string | null; allowedRollbackBundles: string[] }
@@ -63,6 +67,7 @@ export class DesiredPolicyClient {
   private lastHealthyAt: number | null = null;
   private reason: PolicyReason = 'no_policy';
   private syncedDeletionRevision: string | null = null;
+  private readonly healthyTtlMs: number;
   private refreshing: Promise<void> | null = null;
   private cacheLoaded = false;
   private credentialFingerprint: string | null = null;
@@ -75,6 +80,8 @@ export class DesiredPolicyClient {
     this.endpoint = new URL('/api/coletor/analytics-config', base).href;
     this.fetcher = options.fetch ?? fetch;
     this.now = options.now ?? Date.now;
+    const ttl = options.healthyTtlMs;
+    this.healthyTtlMs = typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0 ? Math.min(ttl, POLICY_OFFLINE_MAX_AGE_MS) : DEFAULT_HEALTHY_TTL_MS;
   }
   refresh(): Promise<void> {
     if (this.refreshing) return this.refreshing;
@@ -157,8 +164,11 @@ export class DesiredPolicyClient {
     const policy = this.policy;
     if (!localEnabled) return 'local_disabled';
     if (this.authorizationDenied) return 'unauthorized';
+    // Fail closed: a response the client cannot trust (schema drift, conflict, wrong device, expired window) must not
+    // keep a previously enabled policy alive. Plain outages ('offline') still ride on the healthy TTL below.
+    if (this.reason === 'invalid_policy') return 'invalid_policy';
     if (!policy) return 'no_policy';
-    if (this.lastHealthyAt === null || this.now() - this.lastHealthyAt > POLICY_OFFLINE_MAX_AGE_MS || this.now() >= Date.parse(policy.expiresAt)) return 'policy_expired';
+    if (this.lastHealthyAt === null || this.now() - this.lastHealthyAt > this.healthyTtlMs || this.now() >= Date.parse(policy.expiresAt)) return 'policy_expired';
     if (!policy.enabled || policy.killSwitch) return 'central_disabled';
     return 'ready';
   }

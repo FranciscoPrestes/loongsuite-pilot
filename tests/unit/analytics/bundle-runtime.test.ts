@@ -16,8 +16,9 @@ let dir: string;
 let desired = '1.0.0';
 let killSwitch = false;
 let revision = 1; // the client refuses a changed policy under a reused revision
+let issuedAt = Date.now() - 1000; // stable per test: a policy that changes between fetches is a conflict (and now fails closed)
 const policyBody = () => ({ policyId: 'p', revision: String(revision), desiredBundleVersion: desired, enabled: true, killSwitch, deviceId: 'dev', cohortId: null, reasons: [],
-  deletionRevision: '1', issuedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  deletionRevision: '1', issuedAt: new Date(issuedAt).toISOString(), expiresAt: new Date(issuedAt + 3600_000).toISOString(),
   limits: { reconcileIntervalMs: 60000, hookTargetP95Ms: 100, workerTimeoutMs: 2000, maxMetadataFiles: 100, maxSnippetBytes: 65536, maxReportBytes: 2097152 } });
 const config = () => ({ dataDir: dir, instrumentation: { localEnabled: true, portalBaseUrl: 'https://portal.test', deviceId: 'dev', authorization: 'Bearer fixture' } });
 
@@ -35,7 +36,7 @@ const install = async (version: string) => {
 };
 
 beforeEach(async () => {
-  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'c8-bundle-')); desired = '1.0.0'; killSwitch = false; revision = 1;
+  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'c8-bundle-')); desired = '1.0.0'; killSwitch = false; revision = 1; issuedAt = Date.now() - 1000;
   vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, ok: true, headers: new Headers({ ETag: '"x"' }), json: async () => policyBody() }) as Response));
 });
 afterEach(async () => { vi.unstubAllGlobals(); await fs.rm(dir, { recursive: true, force: true }); });
