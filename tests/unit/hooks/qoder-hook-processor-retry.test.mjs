@@ -128,6 +128,26 @@ describe('releaseRetryLock', () => {
   });
 });
 
+describe('lock creation window', () => {
+  const lockFile = () => retryLockPath('/tmp/t.jsonl', lockDir);
+
+  it('a freshly created but still empty lock is a live peer, never stale (no double ownership)', () => {
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockFile(), ''); // the peer has done openSync('wx') but not yet written its payload
+    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'contender', lockDir)).toBe(false);
+    expect(fs.existsSync(lockFile())).toBe(true); // the peer's file was not removed
+  });
+
+  it('an unreadable lock is reclaimed only after the grace period', () => {
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(lockFile(), '{not json');
+    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'contender', lockDir)).toBe(false);
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(lockFile(), old, old);
+    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'contender', lockDir)).toBe(true);
+  });
+});
+
 describe('isRetryLockStale', () => {
   it('returns true for null lock', () => {
     expect(isRetryLockStale(null)).toBe(true);
