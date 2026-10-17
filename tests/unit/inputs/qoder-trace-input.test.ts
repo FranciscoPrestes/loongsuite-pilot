@@ -115,10 +115,13 @@ function bestMs(fn: (n: number) => unknown, n: number): number {
   return best;
 }
 
-/** True when 4x the input costs well under 16x the time (linear is about 4x; the bar is 10x). */
+/** Pure decision: 4x the input costing well under 16x the time is linear (about 4x; the bar is 10x). */
+function isLinearGrowth(smallMs: number, largeMs: number): boolean {
+  return largeMs / Math.max(smallMs, 1) < 10; // 1 ms floor: sub-millisecond timers are noise
+}
+
 function growsLinearly(fn: (n: number) => unknown, small = 20_000): boolean {
-  const base = Math.max(bestMs(fn, small), 1); // 1 ms floor: sub-millisecond timers are noise
-  return bestMs(fn, small * 4) / base < 10;
+  return isLinearGrowth(bestMs(fn, small), bestMs(fn, small * 4));
 }
 
 describe('QoderTraceInput token-enricher', () => {
@@ -1707,11 +1710,13 @@ describe('QoderTraceInput multimodal', () => {
       expect(growsLinearly(n => extractMarkdownImagePaths(`${'!['.repeat(n)} ![x](/tmp/ok.png)`))).toBe(true);
     });
 
-    it('the growth check itself tells linear work from quadratic work', () => {
-      const linear = (n: number) => { let sum = 0; for (let i = 0; i < n * 200; i += 1) sum += i; return sum; };
-      const quadratic = (n: number) => { let sum = 0; for (let i = 0; i < n; i += 1) for (let j = 0; j < n / 4; j += 1) sum += j; return sum; };
-      expect(growsLinearly(linear)).toBe(true);
-      expect(growsLinearly(quadratic)).toBe(false);
+    it('the growth decision tells linear timings from quadratic ones (deterministic, no clock)', () => {
+      expect(isLinearGrowth(10, 40)).toBe(true);      // 4x input, 4x time
+      expect(isLinearGrowth(10, 90)).toBe(true);      // noisy but still far from quadratic
+      expect(isLinearGrowth(10, 160)).toBe(false);    // 4x input, 16x time
+      expect(isLinearGrowth(10, 400)).toBe(false);
+      expect(isLinearGrowth(0.05, 0.2)).toBe(true);   // sub-millisecond: floor applies
+      expect(isLinearGrowth(0.05, 12)).toBe(false);   // a real blow-up is still caught against the floor
     });
 
     it('caps extracted markdown and tool paths at MAX_MULTIMODAL_PARTS', () => {
