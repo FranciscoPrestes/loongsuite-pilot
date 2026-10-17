@@ -9,6 +9,7 @@ import {
   INVOCATION_USER_ID_FIELD,
 } from '../../../assets/hooks/shared/resource-context.mjs';
 import { VALID_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
+import { retryLockPath } from '../../../assets/hooks/qoder-hook-processor.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
@@ -435,7 +436,12 @@ describe('qoder-hook-processor cold-start recovery', () => {
     fs.writeFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
 
     const first = runRetryAsync(4, 'ide-session', { retryDelay: '50' });
-    await new Promise(resolve => setTimeout(resolve, 10));
+    // Retries keep commit order only when the earlier one reserves the transcript first. Process start-up time
+    // varies a lot under load, so a fixed 10 ms head start is a race: wait until the first really holds the lock.
+    const lockFile = retryLockPath(transcriptPath);
+    const deadline = Date.now() + 10_000;
+    while (!fs.existsSync(lockFile) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(fs.existsSync(lockFile)).toBe(true);
     const second = runRetryAsync(8, 'ide-session', { retryDelay: '50' });
     const results = await Promise.all([first, second]);
 
