@@ -31,7 +31,19 @@ function cleanPath(path: string): string | undefined {
 /** Lower-case, and one trailing dot (fully-qualified form) removed; the result must be a valid host. */
 function normalizeHost(host: string): string | undefined {
   const value = host.toLowerCase().replace(/\.$/, '');
-  return HOST.test(value) ? value : undefined;
+  return HOST.test(value) && isPlausibleHost(value) ? value : undefined;
+}
+
+/**
+ * A numeric host must be a real IPv4 address (four octets <= 255, not 0.0.0.0); a dotted name must end in a label
+ * with a letter; IPv6 literals pass; a bare number or `1.2` is not a host.
+ */
+function isPlausibleHost(host: string): boolean {
+  if (host.startsWith('[')) return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4) return ipv4.slice(1).every(octet => Number(octet) <= 255) && host !== '0.0.0.0';
+  const last = host.split('.').pop() ?? '';
+  return /[a-z]/.test(last);
 }
 
 /** Hosts that name this machine, whatever the form: their repo path is a local path, not a remote identity. */

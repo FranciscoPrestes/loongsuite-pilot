@@ -74,6 +74,17 @@ describe('remote identity parser: nothing sensitive is ever exported', () => {
     'devbox:/Users/alice/x', 'git@devbox:/home/alice/repo.git',
   ])('rejects loopback hosts and single-label hosts with an absolute scp path: %s', (raw) => { expect(parseRemote(raw)).toBeUndefined(); });
 
+  it.each([
+    '0.0.0.0:org/repo', 'git@0.0.0.0:org/repo.git', 'https://0.0.0.0/org/repo', '1234:org/repo', 'git@12345:org/repo', '1.2:org/repo', '999.1.1.1:org/repo',
+    'git@300.300.300.300:org/repo', 'ssh://git@1.2.3/org/repo', 'git@1.2.3.4.5:org/repo',
+  ])('rejects numeric hosts that are not a real IPv4 address: %s', (raw) => { expect(parseRemote(raw)).toBeUndefined(); });
+
+  it('keeps a real on-prem IPv4 git server and alphabetic hosts', () => {
+    expect(parseRemote('git@10.20.30.40:org/repo.git')).toEqual({ repo: 'org/repo', domain: '10.20.30.40' });
+    expect(parseRemote('https://192.168.1.5:8443/org/repo')).toEqual({ repo: 'org/repo', domain: '192.168.1.5' });
+    expect(parseRemote('git@git.corp.example:org/repo.git')?.domain).toBe('git.corp.example');
+  });
+
   it('keeps an intranet single-label host when the path is relative or the form is a URL', () => {
     expect(parseRemote('git@devbox:org/repo.git')).toEqual({ repo: 'org/repo', domain: 'devbox' });
     expect(parseRemote('https://gitserver/org/repo')).toEqual({ repo: 'org/repo', domain: 'gitserver' });
