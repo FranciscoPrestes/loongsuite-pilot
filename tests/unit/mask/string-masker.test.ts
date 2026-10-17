@@ -70,14 +70,10 @@ describe('mask string masker', () => {
     expect(maskString(input, allRules)).toBe(input);
   });
 
-  it('does not mask unsupported API key prefixes or generic key-value pairs', () => {
-    const input = [
-      'google=AIzaSyA0FakeGoogleKeyShouldRemainVisible',
-      'unsupported_github=ghx_1234567890abcdefghijklmnop',
-      'generic_token=token=abc123',
-      'generic_api_key=api_key=not-a-real-key-value',
-      'bearer=Bearer abcdefghijklmnopqrstuvwxyz123456',
-    ].join('\n');
+  it('does not mask unknown API key prefixes on their own', () => {
+    // Google keys, Bearer tokens and `*_token=` / `api_key=` assignments used to be listed here as "not masked";
+    // they are credentials now (see credential-rules.test.ts). A bare unknown prefix has no format or name to go on.
+    const input = 'unsupported_github=ghx_1234567890abcdefghijklmnop';
 
     expect(maskString(input, allRules)).toBe(input);
   });
@@ -131,7 +127,6 @@ describe('mask string masker', () => {
       'mysql://localhost:3306/pilot',
       'mysql://agent@localhost:3306/pilot',
       'mysql://agent:@localhost:3306/pilot',
-      'http://agent:HttpPass123@example.com/path',
       'jdbc:mysql://localhost:3306/db?useSSL=false&user=root',
       'jdbc:mysql://localhost:3306/db?user=root&password=',
       'jdbc:mysql://localhost:3306/db?user=root&passwordless=true',
@@ -140,25 +135,21 @@ describe('mask string masker', () => {
     expect(maskString(input, allRules)).toBe(input);
   });
 
-  it('does not mask public keys, certificates, incomplete private keys, or oversized private key blocks', () => {
-    const oversizedPrivateKey = [
-      '-----BEGIN PRIVATE KEY-----',
-      'A'.repeat(70 * 1024),
-      '-----END PRIVATE KEY-----',
-    ].join('\n');
-    const input = [
-      '-----BEGIN PUBLIC KEY-----',
-      'PublicKeyMaterialOnly',
-      '-----END PUBLIC KEY-----',
-      '-----BEGIN CERTIFICATE-----',
-      'CertificateMaterialOnly',
-      '-----END CERTIFICATE-----',
-      '-----BEGIN PRIVATE KEY-----',
-      'IncompletePrivateKeyMaterialOnly',
-      oversizedPrivateKey,
-    ].join('\n');
+  it('masks a URL password for any scheme, not only database schemes', () => {
+    expect(maskString('http://agent:HttpPass123@example.com/path', allRules)).not.toContain('HttpPass123');
+  });
 
+  it('does not mask public keys or certificates', () => {
+    const input = ['-----BEGIN PUBLIC KEY-----', 'PublicKeyMaterialOnly', '-----END PUBLIC KEY-----',
+      '-----BEGIN CERTIFICATE-----', 'CertificateMaterialOnly', '-----END CERTIFICATE-----'].join('\n');
     expect(maskString(input, allRules)).toBe(input);
+  });
+
+  it('masks incomplete and oversized private key blocks too (a truncated key is still a secret)', () => {
+    const oversized = ['-----BEGIN PRIVATE KEY-----', 'A'.repeat(70 * 1024), '-----END PRIVATE KEY-----'].join('\n');
+    const incomplete = ['-----BEGIN PRIVATE KEY-----', 'IncompletePrivateKeyMaterialOnly'].join('\n');
+    expect(maskString(oversized, allRules)).not.toContain('AAAAAAAA');
+    expect(maskString(incomplete, allRules)).not.toContain('IncompletePrivateKeyMaterialOnly');
   });
 
   it('uses UTF-8 byte length for large-string detection', () => {
