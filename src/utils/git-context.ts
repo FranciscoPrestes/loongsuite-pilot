@@ -12,6 +12,8 @@ export interface GitContextResult {
   branch?: string;
   root?: string;
   domain?: string;
+  /** Absolute git dir of this checkout (a linked worktree has its own); basis of the worktree id. */
+  gitDir?: string;
 }
 
 interface GitContextCacheEntry extends GitContextResult {
@@ -42,13 +44,17 @@ export async function inferGitContext(probeDir: string): Promise<GitContextResul
   const now = Date.now();
   const cached = gitContextCache.get(probeDir);
   if (cached && cached.expiresAt > now) {
-    return { repo: cached.repo, branch: cached.branch, root: cached.root, domain: cached.domain };
+    return { repo: cached.repo, branch: cached.branch, root: cached.root, domain: cached.domain, gitDir: cached.gitDir };
   }
 
-  const root = await runGit(probeDir, ['rev-parse', '--show-toplevel']);
-  const gitRoot = root?.trim() || undefined;
-  const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['rev-parse', '--abbrev-ref', 'HEAD']));
-  const remote = await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url']);
+  // One shared time budget for every git call of a probe (each call is also capped by GIT_CALL_TIMEOUT_MS).
+  const deadline = now + GIT_PROBE_BUDGET_MS;
+  const top = (await runGit(probeDir, ['rev-parse', '--show-toplevel', '--absolute-git-dir'], deadline))?.split('\n').map(l => l.trim());
+  const gitRoot = top?.[0] || undefined;
+  const gitDir = top?.[1] || undefined;
+  // symbolic-ref also answers for an unborn branch (no commit yet); a detached HEAD has no branch and yields none.
+  const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['symbolic-ref', '--short', '-q', 'HEAD'], deadline));
+  const remote = await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url'], deadline);
   const repo = normalizeRepo(remote);
   const domain = normalizeDomain(remote);
 
@@ -59,14 +65,23 @@ export async function inferGitContext(probeDir: string): Promise<GitContextResul
     branch,
     root: gitRoot,
     domain,
+    gitDir,
   });
-  return { repo, branch, root: gitRoot, domain };
+  return { repo, branch, root: gitRoot, domain, gitDir };
 }
 
-async function runGit(root: string, args: string[]): Promise<string | undefined> {
+/** Same read-only hardening as the repository snapshot reader (C5): never write the index or run repo-defined code. */
+const GIT_SAFE_CONFIG = ['--no-optional-locks', '-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'core.pager=cat'];
+const GIT_CALL_TIMEOUT_MS = 1500;
+const GIT_PROBE_BUDGET_MS = 2500;
+
+async function runGit(root: string, args: string[], deadline: number): Promise<string | undefined> {
+  const remaining = Math.min(GIT_CALL_TIMEOUT_MS, deadline - Date.now());
+  if (remaining <= 0) return undefined;
   try {
-    const { stdout } = await execFile('git', ['-C', root, ...args], {
-      timeout: 1500,
+    const { stdout } = await execFile('git', ['-C', root, ...GIT_SAFE_CONFIG, ...args], {
+      timeout: remaining,
+      killSignal: 'SIGKILL',
       maxBuffer: 64 * 1024,
       encoding: 'utf8',
     });

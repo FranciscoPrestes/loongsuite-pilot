@@ -32,6 +32,8 @@ export async function enrichCanonicalEntryWithGit(
   if (!entry['git.repo'] && inferred.repo) entry['git.repo'] = inferred.repo;
   if (!entry['git.branch'] && inferred.branch) entry['git.branch'] = inferred.branch;
   if (!entry['git.domain'] && inferred.domain) entry['git.domain'] = inferred.domain;
+  // Additive and opaque: distinguishes checkouts of one repository (main vs linked worktree) without exposing the path.
+  if (!entry['git.worktree_id'] && inferred.gitDir) entry['git.worktree_id'] = computeWorktreeId(inferred.gitDir);
   if (!entry['workspace.current_root'] && inferred.root) entry['workspace.current_root'] = inferred.root;
 }
 

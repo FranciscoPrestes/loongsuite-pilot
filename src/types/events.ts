@@ -147,6 +147,8 @@ export interface AgentActivityEntry {
   'git.repo'?: string;
   /** Current branch when observed at collection time. */
   'git.branch'?: string;
+  /** Opaque id of the checkout (hash of its git dir): main checkout and linked worktrees differ. */
+  'git.worktree_id'?: string;
   /** Filesystem top-level of the Git repository used to infer Git metadata. */
   'git.repo_root'?: string;
   /** Git hosting domain (e.g. github.com, gitlab.com). */
