@@ -104,6 +104,23 @@ function makeSegment(overrides: Partial<SegmentTokenData> = {}): SegmentTokenDat
   };
 }
 
+/** Best-of-3 time of `fn(n)`. */
+function bestMs(fn: (n: number) => unknown, n: number): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (let run = 0; run < 3; run += 1) {
+    const started = performance.now();
+    fn(n);
+    best = Math.min(best, performance.now() - started);
+  }
+  return best;
+}
+
+/** True when 4x the input costs well under 16x the time (linear is about 4x; the bar is 10x). */
+function growsLinearly(fn: (n: number) => unknown, small = 20_000): boolean {
+  const base = Math.max(bestMs(fn, small), 1); // 1 ms floor: sub-millisecond timers are noise
+  return bestMs(fn, small * 4) / base < 10;
+}
+
 describe('QoderTraceInput token-enricher', () => {
   // Segments are paired with llm.response by completion instant, so a fixture's
   // response time must sit within the join tolerance of its responseEndTs - the
@@ -1682,11 +1699,19 @@ describe('QoderTraceInput multimodal', () => {
     });
 
     it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {
-      const started = Date.now();
       const noise = '!['.repeat(80_000);
       expect(extractMarkdownImagePaths(`${noise} ![x](/tmp/ok.png)`)).toEqual(['/tmp/ok.png']);
-      expect(Date.now() - started).toBeLessThan(200);
       expect(extractMarkdownImagePaths(noise)).toEqual([]);
+      // Growth, not wall-clock: a 4x larger input must cost about 4x (linear), never about 16x (quadratic).
+      // A ratio is stable under machine load, where an absolute time limit is not.
+      expect(growsLinearly(n => extractMarkdownImagePaths(`${'!['.repeat(n)} ![x](/tmp/ok.png)`))).toBe(true);
+    });
+
+    it('the growth check itself tells linear work from quadratic work', () => {
+      const linear = (n: number) => { let sum = 0; for (let i = 0; i < n * 200; i += 1) sum += i; return sum; };
+      const quadratic = (n: number) => { let sum = 0; for (let i = 0; i < n; i += 1) for (let j = 0; j < n / 4; j += 1) sum += j; return sum; };
+      expect(growsLinearly(linear)).toBe(true);
+      expect(growsLinearly(quadratic)).toBe(false);
     });
 
     it('caps extracted markdown and tool paths at MAX_MULTIMODAL_PARTS', () => {
