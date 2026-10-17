@@ -21,6 +21,8 @@ const LEAKY: string[] = [
   `ext::sh -c "echo ${T}"`, `ext::ssh://user:${T}@host/x`, `fd::${T}`,
   `file:///home/${T}/repo.git`, `ftp://user:${T}@host/org/repo`, `http://user:${T}@host/org/repo`,
   `https://github.com/org/repo.git\n?token=${T}`, `https://user:${T}@github.com/org/repo .git`,
+  `https://github.com/org;jsessionid=${T}/repo`, `https://github.com/org/repo;token=${T}`, `git@github.com:org;jsessionid=${T}/repo`, `git@github.com:org/repo;token=${T}.git`,
+  `https://github.com/org/repo%3Btoken=${T}`, `https://github.com/org%3Bjsessionid=${T}/repo`, `ssh://git@github.com/org/repo,${T}`,
   `${T}@github.com:org/repo.git?`, `https://github.com:${T}/org/repo`, `https://user:${T}@`,
 ];
 
@@ -62,6 +64,29 @@ describe('remote identity parser: nothing sensitive is ever exported', () => {
     expect(parseRemote(raw)).toBeUndefined();
   });
 
+  it.each([
+    'git@github.com:org/re$po', 'git@github.com:org/re(po)', 'https://github.com/org/re po', 'https://github.com/org/repo!', 'https://github.com/org/re*po',
+  ])('only slug characters are allowed in path segments: %s', (raw) => { expect(parseRemote(raw)).toBeUndefined(); });
+
+  it.each([
+    'localhost:/Users/alice/x', 'localhost:Users/alice/x', 'git@localhost:/Users/alice/x', '127.0.0.1:/Users/alice/x', 'git@127.0.0.1:/home/a/x',
+    'ssh://git@localhost/Users/alice/x', 'https://localhost/org/repo', 'https://127.0.0.1:8443/org/repo', 'ssh://[::1]/Users/alice/x', 'https://[::1]:3000/org/repo',
+    'devbox:/Users/alice/x', 'git@devbox:/home/alice/repo.git',
+  ])('rejects loopback hosts and single-label hosts with an absolute scp path: %s', (raw) => { expect(parseRemote(raw)).toBeUndefined(); });
+
+  it('keeps an intranet single-label host when the path is relative or the form is a URL', () => {
+    expect(parseRemote('git@devbox:org/repo.git')).toEqual({ repo: 'org/repo', domain: 'devbox' });
+    expect(parseRemote('https://gitserver/org/repo')).toEqual({ repo: 'org/repo', domain: 'gitserver' });
+  });
+
+  it('normalizes a fully-qualified host with a trailing dot instead of dropping the remote', () => {
+    expect(parseRemote('https://GitHub.com./org/repo.git')).toEqual({ repo: 'org/repo', domain: 'github.com' });
+    expect(parseRemote('git@github.com.:org/repo.git')).toEqual({ repo: 'org/repo', domain: 'github.com' });
+    expect(parseRemote('ssh://git@github.com.:2222/org/repo')).toEqual({ repo: 'org/repo', domain: 'github.com' });
+    expect(sanitizeDomainValue('github.com.')).toBe('github.com');
+    expect(parseRemote('https://github.com../org/repo')).toBeUndefined();
+  });
+
   it('rejects non-strings and hostile hosts', () => {
     for (const value of [undefined, null, 5, {}, ['x']]) expect(parseRemote(value as never)).toBeUndefined();
     expect(parseRemote('https://exa mple.com/org/repo')).toBeUndefined();
@@ -74,6 +99,9 @@ describe('hook-supplied values use the same sanitizer', () => {
     expect(normalizeSourceContext({ repo: 'sls/loongsuite-pilot', domain: 'github.com' })).toMatchObject({ repo: 'sls/loongsuite-pilot', domain: 'github.com' });
     expect(normalizeSourceContext({ domain: 'GitHub.com:8443' }).domain).toBe('github.com');
     expect(normalizeSourceContext({ repo: 'https://github.com/example-org/loongsuite-pilot.git' }).repo).toBe('example-org/loongsuite-pilot');
+  });
+  it('drops a loopback domain from hooks as well', () => {
+    for (const host of ['localhost', 'LOCALHOST:3000', '127.0.0.1', 'dev.localhost']) expect(normalizeSourceContext({ domain: host }).domain, host).toBeUndefined();
   });
   it('drops anything that is not a repo slug or a host', () => {
     for (const bad of [`user:${T}@host`, '/Users/alice/repo', 'ext::x', `a@b@${T}`]) {
