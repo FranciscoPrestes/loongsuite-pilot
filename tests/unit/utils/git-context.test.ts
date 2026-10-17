@@ -134,6 +134,20 @@ describe('remote sanitation', () => {
     expect(ctx.domain).toBeUndefined();
   });
 
+  it('a local-path remote and a bare word export nothing (no home directory, no user name)', async () => {
+    for (const url of ['/Users/alice/work/repo.git', '../sibling', 'justaword']) {
+      const ctx = await withRemote(url);
+      expect(ctx.repo, url).toBeUndefined();
+      expect(ctx.domain, url).toBeUndefined();
+    }
+  });
+
+  it('a real repository with a credentialed, query-carrying, ported remote exports a clean identity', async () => {
+    const ctx = await withRemote('ssh://git:T0KEN@git.example.com:2222/org/repo.git?x=T0KEN#T0KEN');
+    expect(ctx).toMatchObject({ repo: 'org/repo', domain: 'git.example.com' });
+    expect(JSON.stringify(ctx)).not.toContain('T0KEN');
+  });
+
   it('drops an oversized remote', async () => {
     const ctx = await withRemote('https://github.com/org/' + 'a'.repeat(600) + '.git');
     expect(ctx.repo).toBeUndefined();

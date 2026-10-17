@@ -1,7 +1,7 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { GIT_SAFE_CONFIG } from './git-safe.js';
-import { normalizeDomain } from '../normalization/source-context.js';
+import { parseRemote } from '../normalization/remote-identity.js';
 
 const execFile = promisify(execFileCb);
 
@@ -67,9 +67,10 @@ async function probeOnce(probeDir: string): Promise<GitContextResult> {
   // symbolic-ref also answers for an unborn branch (no commit yet); a detached HEAD has no branch and yields none.
   const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['symbolic-ref', '-q', 'HEAD'], deadline));
   const remote = (await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url'], deadline))?.trim();
-  const safe = safeRemote(remote);
-  const repo = normalizeRepo(safe);
-  const domain = normalizeDomain(safe);
+  // One parser for both: either a clean {repo, domain} or nothing; the raw remote is never exported.
+  const identity = parseRemote(remote);
+  const repo = identity?.repo;
+  const domain = identity?.domain;
 
   evictStaleEntries(gitContextCache);
   gitContextCache.set(probeDir, {
@@ -107,34 +108,6 @@ async function runGit(root: string, args: string[], deadline: number): Promise<s
 function normalizeBranch(raw: string | undefined): string | undefined {
   const match = raw?.trim().match(/^refs\/heads\/(.+)$/);
   return match ? match[1] : undefined;
-}
-
-const ALLOWED_REMOTE_SCHEMES = new Set(['https', 'ssh', 'git']);
-const MAX_REMOTE_CHARS = 500;
-
-/**
- * `remote.origin.url` is repository-controlled text. Only https/ssh/git URLs and scp-like `host:path` forms
- * may reach `git.repo`/`git.domain`; transport helpers (`ext::`, `fd::`), other schemes (file, ftp, ...),
- * whitespace/control characters and oversized values are dropped (the repo is then simply unknown).
- */
-export function safeRemote(raw: string | undefined): string | undefined {
-  if (!raw || raw.length > MAX_REMOTE_CHARS || /[\s\u0000-\u001f\u007f]/.test(raw)) return undefined;
-  if (/^[A-Za-z][A-Za-z0-9+.-]*::/.test(raw)) return undefined;
-  const scheme = raw.match(/^([A-Za-z][A-Za-z0-9+.-]*):\/\//)?.[1]?.toLowerCase();
-  if (scheme !== undefined && !ALLOWED_REMOTE_SCHEMES.has(scheme)) return undefined;
-  return raw;
-}
-
-export function normalizeRepo(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const sshMatch = trimmed.match(/^[^@]+@[^:]+:(.+)$/);
-  const source = sshMatch ? sshMatch[1] : trimmed;
-  return source
-    .replace(/^(?:https?|ssh|git):\/\/[^/]+\//, '')
-    .replace(/\.git$/, '')
-    .replace(/^\/+|\/+$/g, '');
 }
 
 /**
