@@ -156,16 +156,116 @@ describe('credential masking: shape and safety', () => {
 
   it('survives hostile large inputs in bounded time and still masks inside a large value', () => {
     const started = Date.now();
-    for (const hostile of ['a'.repeat(1_000_000), 'sk-'.repeat(300_000), '['.repeat(500_000), 'password='.repeat(100_000), `${'x'.repeat(600_000)} password=${S}`]) {
+    for (const hostile of ['openssl '.repeat(120_000), 'docker login '.repeat(80_000), 'htpasswd -b a '.repeat(70_000), 'vault login -x '.repeat(70_000), 'zip -P '.repeat(140_000), 'password is '.repeat(90_000), `mysql ${'-p '.repeat(300_000)}`, 'zip -P '.repeat(140_000), 'mysql -p '.repeat(110_000), 'unzip 7z mysql psql -px '.repeat(40_000),
+      'a'.repeat(1_000_000), 'sk-'.repeat(300_000), '['.repeat(500_000), 'password='.repeat(100_000), `${'x'.repeat(600_000)} password=${S}`]) {
       const masked = scanCredentials(hostile).text;
       expect(masked.length).toBeGreaterThan(0);
     }
     expect(scanCredentials(`${'x '.repeat(400_000)}password=${S}`).text).not.toContain(S);
-    expect(Date.now() - started).toBeLessThan(20_000); // generous: the guard is against quadratic blow-ups
+    expect(Date.now() - started).toBeLessThan(20_000); // generous: the guard is against quadratic blow-ups (a quadratic rule took 20 s+ on ONE of these)
   });
 
   it('there are at least 55 positive and 20 negative forms in the table', () => {
     expect(POSITIVE.length).toBeGreaterThanOrEqual(55);
     expect(NEGATIVE.length).toBeGreaterThanOrEqual(20);
+  });
+});
+
+/** C11 (I2): credentials by ARGUMENT POSITION of well-known tools, and the glued -p rule restricted to the tools that use it. */
+const POSITIONAL: Array<[string, string]> = [
+  ['htpasswd -b', `htpasswd -b /etc/nginx/.htpasswd alice ${S}`],
+  ['htpasswd -bc', `htpasswd -bc .htpasswd alice ${S}`],
+  ['htpasswd -nb', `htpasswd -nb alice ${S}`],
+  ['htpasswd -bB with cost', `htpasswd -bB -C 12 .htpasswd alice ${S}`],
+  ['openssl -pass pass:', `openssl genrsa -aes256 -pass pass:${S} -out key.pem 2048`],
+  ['openssl -passin pass:', `openssl rsa -in key.pem -passin pass:${S} -out plain.pem`],
+  ['openssl -passout pass:', `openssl pkcs12 -export -passout pass:${S} -in c.pem`],
+  ['openssl enc -k', `openssl enc -aes-256-cbc -k ${S} -in a -out b`],
+  ['docker login -p space', `docker login -u bob -p ${S} registry.example.com`],
+  ['az login -p space', `az login --service-principal -u app -p ${S} --tenant t`],
+  ['podman login -p', `podman login -p ${S} quay.io`],
+  ['gpg --passphrase space', `gpg --batch --passphrase ${S} -c file`],
+  ['gpg --passphrase=', `gpg --batch --passphrase=${S} -c file`],
+  ['zip -P', `zip -P ${S} out.zip secrets.txt`],
+  ['zip -P glued', `zip -P${S} out.zip a`],
+  ['redis-cli -a', `redis-cli -h cache -a ${S} ping`],
+  ['vault login token', `vault login ${S}`],
+  ['vault login with flag', `vault login -no-print ${S}`],
+  ['aws configure set secret (space)', `aws configure set aws_secret_access_key ${S}`],
+  ['aws configure set session token', `aws configure set aws_session_token ${S}`],
+  ['password is X', `the password is ${S} for the staging box`],
+  ['my passphrase is X', `my passphrase is ${S}`],
+  ['mysql -p glued', `mysql -h db -u root -p${S} appdb`],
+  ['mysqldump -p glued', `mysqldump -uroot -p${S} appdb > dump.sql`],
+  ['mariadb -p glued', `mariadb -pS3kret${S}`],
+  ['7z -p glued', `7z a -p${S} out.7z dir`],
+  ['unrar -p glued', `unrar x -p${S} a.rar`],
+  ['zip with glued -p-less keep', `zip --password ${S} a.zip b`],
+  ['kubectl --token', `kubectl --token ${S} get pods`],
+  ['passphrase flag attached to a longer command', `ssh-keygen -N ${S}`.replace('-N', '--passphrase')],
+];
+
+const POSITIONAL_NEGATIVE: Array<[string, string]> = [
+  ['find -print0', 'find . -name "*.js" -print0 | xargs -0 wc -l'],
+  ['find -prune', 'find . -path ./node_modules -prune -o -type f -print'],
+  ['find -path', 'find src -path "*/test/*" -name "*.ts"'],
+  ['git log -pretty', 'git log -pretty=oneline -n 5'],
+  ['git log --pretty', 'git log --pretty=format:%h -n 3'],
+  ['git log -p', 'git log -p -n 2 README.md'],
+  ['ls -parents', 'ls -parents dir'],
+  ['grep -prune text', 'grep -prune notes.txt'],
+  ['cp -parents', 'cp -parents a b'],
+  ['mkdir -p', 'mkdir -p build/output/logs'],
+  ['npm -prefix', 'npm install -prefix ./app'],
+  ['ssh -p port', 'ssh -p 2222 host'],
+  ['psql -p port glued', 'psql -p5432 -h db'],
+  ['mysql -p prompt', 'mysql -h db -u root -p'],
+  ['curl -p proxy tunnel', 'curl -p -x http://proxy:3128 https://example.com'],
+  ['zip without password', 'zip -r out.zip dir'],
+  ['unzip listing', 'unzip -l out.zip'],
+  ['openssl x509 text', 'openssl x509 -in cert.pem -noout -text'],
+  ['openssl pass from env', 'openssl enc -pass env:MY_PASSPHRASE -in a'],
+  ['openssl pass from file', 'openssl rsa -passin file:/run/secrets/pw -in k'],
+  ['docker login stdin', 'echo $TOKEN | docker login --password-stdin ghcr.io'],
+  ['docker run publish', 'docker run -p 8080:80 nginx'],
+  ['docker ps', 'docker ps -a'],
+  ['gpg list', 'gpg --list-keys'],
+  ['redis-cli plain', 'redis-cli -h cache ping'],
+  ['vault status', 'vault status'],
+  ['vault login method', 'vault login -method=oidc'],
+  ['aws configure list', 'aws configure list'],
+  ['aws region', 'aws configure set region eu-west-1'],
+  ['htpasswd verify', 'htpasswd -v .htpasswd alice'],
+  ['password prose', 'the password is required and must be rotated'],
+  ['password is invalid', 'Error: the password is incorrect'],
+  ['password_reset_url', 'password_reset_url = "https://app.example.com/reset"'],
+  ['password_policy', 'password_policy: strong'],
+  ['password min length', 'password_min_length=12'],
+  ['password_field', 'password_field = "pwd_input"'],
+  ['password file reference', 'password_file=/run/secrets/db'],
+  ['tokenizer', 'tokenizer_max_length = 512'],
+];
+
+describe('C11 I2: argument-position credentials', () => {
+  it.each(POSITIONAL)('masks %s', (_name, input) => {
+    const masked = mask(input);
+    expect(masked, `${input}  =>  ${masked}`).not.toContain(S);
+    expect(masked).toContain('_MASKED]');
+  });
+
+  it.each(POSITIONAL_NEGATIVE)('leaves %s intact', (_name, input) => {
+    expect(mask(input)).toBe(input);
+  });
+
+  it('the tool name and flags stay readable around the masked value', () => {
+    expect(mask(`openssl rsa -in key.pem -passin pass:${S} -out plain.pem`)).toBe('openssl rsa -in key.pem -passin pass:[APIKEY_MASKED] -out plain.pem');
+    expect(mask(`docker login -u bob -p ${S} registry.example.com`)).toBe('docker login -u bob -p [APIKEY_MASKED] registry.example.com');
+    expect(mask(`htpasswd -b .htpasswd alice ${S}`)).toBe('htpasswd -b .htpasswd [USER]'.replace('[USER]', 'alice [APIKEY_MASKED]'));
+  });
+
+  it('is idempotent and the tables are large enough', () => {
+    for (const [, input] of POSITIONAL) expect(mask(mask(input)), input).toBe(mask(input));
+    expect(POSITIONAL.length).toBeGreaterThanOrEqual(28);
+    expect(POSITIONAL_NEGATIVE.length).toBeGreaterThanOrEqual(35);
   });
 });
