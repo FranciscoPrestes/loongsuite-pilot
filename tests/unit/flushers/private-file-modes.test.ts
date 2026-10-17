@@ -81,3 +81,45 @@ describe.skipIf(!posix)('spool and failed-log files stay private (0700 dirs, 060
     for (const file of (await fs.readdir(failedDir)).filter(f => f.endsWith('.jsonl'))) expect(await mode(path.join(failedDir, file)), file).toBe(0o600);
   });
 });
+
+describe.skipIf(!posix)('C11 minors: debug log, SLS failure log and legacy claimed files are private as well', () => {
+  it('the OTLP debug log (full prompts in the spans) is 0700/0600 even when its directory pre-exists loose', async () => {
+    const debugDir = path.join(dir, 'logs', 'otlp-debug');
+    await fs.mkdir(debugDir, { recursive: true }); await fs.chmod(debugDir, 0o755);
+    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318' }], protocol: 'http/protobuf', serviceName: 's', dataDir: dir, debug: true } as never);
+    const span = { spanContext: () => ({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) }), name: 'n', kind: 0, startTime: [1000, 0], endTime: [1001, 0], attributes: { 'gen_ai.input.messages': 'prompt text' },
+      status: { code: 0 }, resource: { attributes: { 'service.name': 's' } }, events: [], links: [], duration: [1, 0], ended: true, instrumentationLibrary: { name: 't' }, droppedAttributesCount: 0, droppedEventsCount: 0, droppedLinksCount: 0 };
+    await (flusher as any).writeDebugLog('claude-code', [span]);
+    await flusher.shutdown();
+    const files = await fs.readdir(debugDir);
+    expect(files.length).toBeGreaterThan(0);
+    expect(await mode(debugDir)).toBe(0o700);
+    for (const file of files) expect(await mode(path.join(debugDir, file))).toBe(0o600);
+  });
+
+  it('the SLS failure log is 0700/0600 and tightened on every write', async () => {
+    const { SlsFailureLogWriter } = await import('../../../src/flushers/sls-failure-log-writer.js');
+    const failedDir = path.join(dir, 'sls-failed');
+    await fs.mkdir(failedDir, { recursive: true }); await fs.chmod(failedDir, 0o755);
+    const writer = new SlsFailureLogWriter(failedDir);
+    const input = { endpoint: 'e', mode: 'webtracking', project: 'p', logstore: 'l', kind: 'agentActivity', batchCount: 1, batchBytes: 10, error: new Error('x') };
+    expect(await writer.write(input)).toBe(true);
+    const file = (await fs.readdir(failedDir)).find(f => f.endsWith('.jsonl'))!;
+    await fs.chmod(path.join(failedDir, file), 0o644); await fs.chmod(failedDir, 0o755);
+    expect(await writer.write(input)).toBe(true);
+    expect(await mode(failedDir)).toBe(0o700);
+    expect(await mode(path.join(failedDir, file))).toBe(0o600);
+  });
+
+  it('a legacy claimed file left loose is re-tightened when the replayer appends to it', async () => {
+    const failedDir = path.join(dir, 'failed-legacy');
+    await fs.mkdir(failedDir, { recursive: true });
+    const record = JSON.stringify({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'n', startTimeUnixNano: String(Date.now() * 1e6), endTimeUnixNano: '2', attributes: {} });
+    const claimed = path.join(failedDir, 'svc__primary.replaying-2026-10-14.jsonl');
+    await fs.writeFile(claimed, `${record}\n`, { mode: 0o644 }); await fs.chmod(claimed, 0o644);
+    // A concurrent writer left an unclaimed file of the same day: it is appended onto the claimed one (appendTerminated).
+    await fs.writeFile(path.join(failedDir, 'svc__primary-2026-10-14.jsonl'), `${record}\n`, { mode: 0o644 });
+    await replayFailedSpans(failedDir, { name: 'primary', url: 'http://ingest.test/v1/traces', headers: {} }, async () => new Response('x', { status: 503 }));
+    for (const file of (await fs.readdir(failedDir)).filter(f => f.endsWith('.jsonl'))) expect(await mode(path.join(failedDir, file)), file).toBe(0o600);
+  });
+});

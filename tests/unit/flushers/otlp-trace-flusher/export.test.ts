@@ -79,9 +79,9 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    expect(fsUtils.ensureDir).toHaveBeenCalled();
-    expect(fsUtils.appendLine).toHaveBeenCalled();
-    const writtenPath = vi.mocked(fsUtils.appendLine).mock.calls[0][0];
+    expect(fsUtils.ensurePrivateDir).toHaveBeenCalled();
+    expect(fsUtils.appendPrivateLine).toHaveBeenCalled();
+    const writtenPath = vi.mocked(fsUtils.appendPrivateLine).mock.calls[0][0];
     expect(writtenPath).toContain('otlp-debug');
     expect(writtenPath).toContain('test-pilot-claude-code');
   });
@@ -93,7 +93,7 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    const debugCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+    const debugCalls = vi.mocked(fsUtils.appendPrivateLine).mock.calls.filter(
       (c) => (c[0] as string).includes('otlp-debug'),
     );
     expect(debugCalls).toHaveLength(0);
@@ -190,7 +190,7 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    const debugCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+    const debugCalls = vi.mocked(fsUtils.appendPrivateLine).mock.calls.filter(
       (c) => (c[0] as string).includes('otlp-debug'),
     );
     const failedCalls = vi.mocked(fsUtils.appendPrivateLine).mock.calls.filter(

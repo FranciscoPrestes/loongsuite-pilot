@@ -2222,12 +2222,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     try {
       const svcName = `${this.cfg.serviceName}-${agentType}`;
       const dir = this.debugDir;
-      await ensureDir(dir);
+      await ensurePrivateDir(dir); // debug spans carry full prompts
       const filename = `${svcName}-${getTodayDateString()}.jsonl`;
       const filepath = path.join(dir, filename);
       const jsonLines = createReadableSpanToOtlpSpanJsonArray(spans);
       for (const line of jsonLines) {
-        await appendLine(filepath, line);
+        await appendPrivateLine(filepath, line);
       }
     } catch (err) {
       logger.warn('Debug log write failed (non-blocking)', { err: String(err) });
