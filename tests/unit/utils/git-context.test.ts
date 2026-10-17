@@ -4,7 +4,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { inferGitContext } from '../../../src/utils/git-context.js';
-import { enrichCanonicalEntriesWithGit } from '../../../src/normalization/enrich-git-context.js';
+import { computeWorktreeId, enrichCanonicalEntriesWithGit } from '../../../src/normalization/enrich-git-context.js';
+import { snapshotRepository } from '../../../src/enrichment/repo-snapshot.js';
 
 let dir: string; let n = 0;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdio: 'pipe' }).toString();
@@ -74,5 +75,42 @@ describe('git context: branch and worktree identity', () => {
   it('a non-repository directory yields nothing and does not throw', async () => {
     const plain = path.join(dir, 'plain'); fs.mkdirSync(plain);
     expect(await inferGitContext(plain)).toEqual({ repo: undefined, branch: undefined, root: undefined, domain: undefined, gitDir: undefined });
+  });
+});
+
+describe('git context parsing robustness', () => {
+  it('a directory whose name contains a newline still yields the right root, git dir and worktree id', async () => {
+    const d = path.join(dir, 'we\nird'); fs.mkdirSync(d); git(d, 'init', '-q', '-b', 'main');
+    git(d, 'commit', '-q', '--allow-empty', '-m', 'x');
+    const ctx = await inferGitContext(d);
+    expect(ctx.root).toBe(d);
+    expect(ctx.gitDir).toBe(path.join(d, '.git'));
+    const entry = { 'gen_ai.agent.type': 'claude-code', 'workspace.path': d } as Record<string, unknown>;
+    await enrichCanonicalEntriesWithGit([entry]);
+    expect(entry['git.worktree_id']).toBe(computeWorktreeId(path.join(d, '.git')));
+    expect(entry['git.worktree_id']).not.toBe(computeWorktreeId('newline'));
+  });
+
+  it('HEAD pointing at a tag ref is not reported as a branch', async () => {
+    const d = repo('main');
+    git(d, 'commit', '-q', '--allow-empty', '-m', 'x');
+    git(d, 'tag', 'v1');
+    git(d, 'symbolic-ref', 'HEAD', 'refs/tags/v1');
+    expect((await inferGitContext(d)).branch).toBeUndefined();
+  });
+
+  it('git.worktree_id equals the worktreeId of the C5 repository snapshot for the same directory, main and linked', async () => {
+    const d = repo('main');
+    git(d, 'commit', '-q', '--allow-empty', '-m', 'x');
+    const linked = path.join(dir, 'linked2');
+    git(d, 'worktree', 'add', '-q', '-b', 'other2', linked);
+    for (const where of [d, linked]) {
+      const entry = { 'gen_ai.agent.type': 'claude-code', 'workspace.path': where } as Record<string, unknown>;
+      await enrichCanonicalEntriesWithGit([entry]);
+      const snapshot = await snapshotRepository(where, new AbortController().signal);
+      expect(entry['git.worktree_id'], where).toBe(snapshot.worktreeId);
+    }
+    // The linked worktree's git dir is not the repository root's: an id derived from the root would differ.
+    expect(computeWorktreeId(linked)).not.toBe((await snapshotRepository(linked, new AbortController().signal)).worktreeId);
   });
 });

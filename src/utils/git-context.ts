@@ -61,12 +61,12 @@ async function probeOnce(probeDir: string): Promise<GitContextResult> {
 
   // One shared time budget for every git call of a probe (each call is also capped by GIT_CALL_TIMEOUT_MS).
   const deadline = now + GIT_PROBE_BUDGET_MS;
-  const top = (await runGit(probeDir, ['rev-parse', '--show-toplevel', '--absolute-git-dir'], deadline))?.split('\n').map(l => l.trim());
-  const gitRoot = top?.[0] || undefined;
-  const gitDir = top?.[1] || undefined;
+  // Separate calls, only the trailing newline removed: a directory name may itself contain a newline.
+  const gitRoot = await runGit(probeDir, ['rev-parse', '--show-toplevel'], deadline);
+  const gitDir = await runGit(gitRoot ?? probeDir, ['rev-parse', '--absolute-git-dir'], deadline);
   // symbolic-ref also answers for an unborn branch (no commit yet); a detached HEAD has no branch and yields none.
-  const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['symbolic-ref', '--short', '-q', 'HEAD'], deadline));
-  const remote = await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url'], deadline);
+  const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['symbolic-ref', '-q', 'HEAD'], deadline));
+  const remote = (await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url'], deadline))?.trim();
   const repo = normalizeRepo(remote);
   const domain = normalizeDomain(remote);
 
@@ -95,16 +95,17 @@ async function runGit(root: string, args: string[], deadline: number): Promise<s
       maxBuffer: 64 * 1024,
       encoding: 'utf8',
     });
-    const text = stdout.trim();
-    return text.length > 0 ? text : undefined;
+    const text = stdout.replace(/\r?\n$/, '');
+    return text.trim().length > 0 ? text : undefined;
   } catch {
     return undefined;
   }
 }
 
+/** Only a real branch ref counts: HEAD pointing at refs/tags/... or anything else is not a branch. */
 function normalizeBranch(raw: string | undefined): string | undefined {
-  if (!raw || raw === 'HEAD') return undefined;
-  return raw;
+  const match = raw?.trim().match(/^refs\/heads\/(.+)$/);
+  return match ? match[1] : undefined;
 }
 
 export function normalizeRepo(raw: string | undefined): string | undefined {
