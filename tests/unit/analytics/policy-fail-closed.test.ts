@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { DesiredPolicyClient, DEFAULT_HEALTHY_TTL_MS } from '../../../src/analytics/desired-policy-client.js';
 import { buildInstrumentationConfig } from '../../../src/core/config-loader.js';
@@ -78,5 +78,78 @@ describe('I6: the last healthy state expires after 24 h by default, configurable
     const base = { portalBaseUrl: 'https://portal.test', localEnabled: true };
     expect(buildInstrumentationConfig({ instrumentation: { ...base, healthyTtlHours: 6 } })?.healthyTtlHours).toBe(6);
     for (const bad of [0, -1, 100, 1.5, 'x', undefined]) expect(buildInstrumentationConfig({ instrumentation: { ...base, healthyTtlHours: bad as never } })?.healthyTtlHours, String(bad)).toBeUndefined();
+  });
+});
+
+describe('C11 I1: failures are classified by TYPE and PHASE, never by message text', () => {
+  beforeEach(() => { clock = Date.parse('2026-10-15T12:00:00Z'); }); // earlier tests advance the shared clock
+  const streamed = (chunks: Array<string | Error>, status = 200) => {
+    const encoder = new TextEncoder();
+    let i = 0;
+    const body = { getReader: () => ({ read: async () => { const next = chunks[i++]; if (next === undefined) return { done: true, value: undefined }; if (next instanceof Error) throw next; return { done: false, value: encoder.encode(next) }; },
+      cancel: async () => undefined, releaseLock: () => undefined }) };
+    return { status, ok: status === 200, headers: new Headers({ ETag: '"x"' }), body } as unknown as Response;
+  };
+
+  it.each(['fetchBudgetMs', 'offlineGraceMs', 'timeoutPolicy', 'abortOnError', 'networkFetchTimeout', 'offline', 'abort'])(
+    'an unknown field named %s after a 200 is invalid_policy and turns enrichment off (message words must not matter)', async (key) => {
+      const client = make(vi.fn().mockResolvedValueOnce(reply(policy())).mockResolvedValueOnce(reply(policy({ revision: '11', [key]: 1 }))));
+      await client.refresh(); await client.refresh();
+      expect(client.getState().reason).toBe('invalid_policy');
+      expect(client.effective(true)).toMatchObject({ enrichmentEnabled: false, reason: 'invalid_policy' });
+    });
+
+  it('a valid kill switch that also carries such a field is not delayed: enrichment is off on the same refresh', async () => {
+    const client = make(vi.fn().mockResolvedValueOnce(reply(policy())).mockResolvedValueOnce(reply(policy({ revision: '11', killSwitch: true, timeoutPolicy: 'x' }))));
+    await client.refresh();
+    expect(client.effective(true).enrichmentEnabled).toBe(true);
+    await client.refresh();
+    expect(client.effective(true).enrichmentEnabled).toBe(false);
+  });
+
+  it('invalid followed by a network outage, a 5xx or a 304-less failure does NOT re-enable the old policy', async () => {
+    const client = make(vi.fn().mockResolvedValueOnce(reply(policy())).mockResolvedValueOnce(reply(policy({ revision: '11', bad: 1 })))
+      .mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValueOnce(reply(null, 503)).mockRejectedValue(new Error('offline')));
+    await client.refresh(); await client.refresh();
+    expect(client.effective(true).enrichmentEnabled).toBe(false);
+    for (let i = 0; i < 3; i += 1) {
+      await client.refresh();
+      expect(client.effective(true), `after failure ${i + 1}`).toMatchObject({ enrichmentEnabled: false, reason: 'invalid_policy' });
+    }
+  });
+
+  it('only a valid policy (or a 304 on the valid etag) ends the invalid state', async () => {
+    const client = make(vi.fn().mockResolvedValueOnce(reply(policy())).mockResolvedValueOnce(reply(policy({ revision: '11', bad: 1 })))
+      .mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(reply(policy({ revision: '12' }))));
+    await client.refresh(); await client.refresh(); await client.refresh();
+    expect(client.effective(true).enrichmentEnabled).toBe(false);
+    await client.refresh();
+    expect(client.effective(true)).toMatchObject({ enrichmentEnabled: true, reason: 'ready' });
+    const reverted = make(vi.fn().mockResolvedValueOnce(reply(policy())).mockResolvedValueOnce(reply(policy({ revision: '11', bad: 1 }))).mockResolvedValueOnce(reply(null, 304)));
+    await reverted.refresh(); await reverted.refresh();
+    expect(reverted.effective(true).enrichmentEnabled).toBe(false);
+    await reverted.refresh(); // the server serves the last valid policy again
+    expect(reverted.effective(true).enrichmentEnabled).toBe(true);
+  });
+
+  it('network phase: a failing fetch, an aborted read of the body and a 5xx are offline (state kept), never invalid', async () => {
+    for (const second of [() => Promise.reject(new TypeError('anything')), () => Promise.reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })),
+      () => Promise.resolve(streamed(['{"policyId":', new Error('socket hang up')])), () => Promise.resolve(reply(null, 502))]) {
+      const client = make(vi.fn().mockResolvedValueOnce(reply(policy())).mockImplementationOnce(second));
+      await client.refresh(); await client.refresh();
+      expect(client.getState().reason).toBe('offline');
+      expect(client.effective(true).enrichmentEnabled).toBe(true);
+    }
+  });
+
+  it('body phase after a 200: unparseable JSON, an oversized body and a wrong shape are invalid_policy', async () => {
+    const big = 'x'.repeat(70 * 1024);
+    for (const second of [() => Promise.resolve(streamed(['{not json'])), () => Promise.resolve(streamed([big])), () => Promise.resolve(streamed(['[]'])),
+      () => Promise.resolve(({ status: 200, ok: true, headers: new Headers(), json: async () => { throw new SyntaxError('Unexpected token'); } }) as unknown as Response)]) {
+      const client = make(vi.fn().mockResolvedValueOnce(reply(policy())).mockImplementationOnce(second));
+      await client.refresh(); await client.refresh();
+      expect(client.getState().reason).toBe('invalid_policy');
+      expect(client.effective(true).enrichmentEnabled).toBe(false);
+    }
   });
 });

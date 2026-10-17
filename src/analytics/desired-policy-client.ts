@@ -35,14 +35,20 @@ export interface DesiredPolicyClientOptions {
 export interface BundleActivation { enabled: boolean; desiredBundle: string; cohort: string | null; allowedRollbackBundles: string[] }
 export interface PolicyCache { policy: InstrumentationPolicy | null; etag: string | null; lastHealthyAt: number | null;
   portalOrigin: string; credentialFingerprint: string; authorizationDenied: boolean }
+/** The connection failed or broke while reading: the portal could not be reached, which says nothing about the policy. */
+class PolicyNetworkError extends Error {}
+
+/** Reads the 200 body. Transport failures are PolicyNetworkError; anything wrong with the CONTENT (parse, size) is a plain error. */
 async function boundedPolicyBody(response: Response): Promise<unknown> {
-  if (!response.body) return response.json(); // injectable fixture transport
+  if (!response.body) return response.json(); // injectable fixture transport: a rejection here is a content problem
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = []; let bytes = 0;
   try {
     while (true) {
-      const { value, done } = await reader.read(); if (done) break;
-      bytes += value.byteLength; if (bytes > 64 * 1024) throw new Error('policy too large'); chunks.push(value);
+      let part: Awaited<ReturnType<typeof reader.read>>;
+      try { part = await reader.read(); } catch (cause) { throw new PolicyNetworkError('policy body read failed', { cause }); }
+      if (part.done) break;
+      bytes += part.value.byteLength; if (bytes > 64 * 1024) throw new Error('policy too large'); chunks.push(part.value);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
@@ -72,6 +78,8 @@ export class DesiredPolicyClient {
   private cacheLoaded = false;
   private credentialFingerprint: string | null = null;
   private authorizationDenied = false;
+  /** Set by a 200 that failed validation; ONLY a valid policy (or a 304 on the valid etag) clears it, outages do not. */
+  private invalid = false;
   constructor(private readonly options: DesiredPolicyClientOptions) {
     const base = new URL(options.baseUrl);
     if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash || base.pathname !== '/') {
@@ -91,7 +99,8 @@ export class DesiredPolicyClient {
   }
   private async refreshOnce(): Promise<void> {
     try {
-      const authorization = await this.options.authorization();
+      let authorization: string;
+      try { authorization = await this.options.authorization(); } catch { this.reason = 'unauthorized'; this.authorizationDenied = true; return; }
       if (!/^Bearer [^\r\n]+$/.test(authorization)) { this.reason = 'unauthorized'; this.authorizationDenied = true; return; }
       const fingerprint = createHash('sha256').update(authorization).digest('hex');
       if (this.credentialFingerprint !== null && this.credentialFingerprint !== fingerprint) {
@@ -115,21 +124,29 @@ export class DesiredPolicyClient {
           }
         } catch { /* corrupt or foreign cache is never an enable signal */ }
       }
-      const response = await this.fetcher(this.endpoint, { method: 'GET', redirect: 'error',
-        headers: { Authorization: authorization, Accept: 'application/json', ...(this.etag ? { 'If-None-Match': this.etag } : {}) },
-        signal: AbortSignal.timeout(2000) });
+      let response: Response;
+      try {
+        response = await this.fetcher(this.endpoint, { method: 'GET', redirect: 'error',
+          headers: { Authorization: authorization, Accept: 'application/json', ...(this.etag ? { 'If-None-Match': this.etag } : {}) },
+          signal: AbortSignal.timeout(2000) });
+      } catch { this.reason = 'offline'; return; } // network phase: unreachable, says nothing about the policy
       if (response.status === 401 || response.status === 403) {
         this.reason = 'unauthorized'; this.authorizationDenied = true;
         await this.persistAuthority();
         return;
       }
       if (response.status === 304 && this.policy) {
-        this.lastHealthyAt = this.now(); this.reason = 'ready'; this.authorizationDenied = false;
+        // 304 against the last VALID etag: the server serves the valid policy again, which ends an invalid state.
+        this.invalid = false; this.lastHealthyAt = this.now(); this.reason = 'ready'; this.authorizationDenied = false;
         await this.persistAuthority().catch(() => {});
         return;
       }
       if (!response.ok || response.status !== 200) { this.reason = 'offline'; return; }
-      const raw: unknown = await boundedPolicyBody(response);
+      let raw: unknown;
+      try { raw = await boundedPolicyBody(response); } catch (error) {
+        if (error instanceof PolicyNetworkError) { this.reason = 'offline'; return; }
+        throw error; // a 200 whose content cannot be read as a policy
+      }
       // The portal wraps every response in its { success, data, error } envelope.
       const body = raw && typeof raw === 'object' && 'success' in raw && 'data' in raw ? (raw as { data: unknown }).data : raw;
       if (Buffer.byteLength(JSON.stringify(body)) > 64 * 1024) throw new Error('policy too large');
@@ -139,10 +156,12 @@ export class DesiredPolicyClient {
       if (next.deviceId === null || (this.options.deviceId !== undefined && next.deviceId !== this.options.deviceId) || Date.parse(next.issuedAt) > this.now() || Date.parse(next.expiresAt) <= this.now()) throw new Error('invalid device or validity');
       if (this.policy && (revision < operationalRevision(this.policy.revision) || deletionRevision < operationalRevision(this.policy.deletionRevision) ||
         (revision === operationalRevision(this.policy.revision) && canonical(next) !== canonical(this.policy)))) throw new Error('policy revision conflict');
-      this.policy = next; this.etag = response.headers.get('ETag'); this.lastHealthyAt = this.now(); this.reason = 'ready'; this.authorizationDenied = false;
+      this.policy = next; this.etag = response.headers.get('ETag'); this.lastHealthyAt = this.now(); this.reason = 'ready'; this.authorizationDenied = false; this.invalid = false;
       await this.persistAuthority().catch(() => {});
-    } catch (error) {
-      this.reason = error instanceof TypeError || (error instanceof Error && /offline|fetch|timeout|abort/i.test(error.message)) ? 'offline' : 'invalid_policy';
+    } catch {
+      // Only code AFTER a 200 response reaches here (network, status and body-transport failures returned above):
+      // whatever failed validation is an invalid policy, whatever words its message contains.
+      this.reason = 'invalid_policy'; this.invalid = true;
     }
   }
   private async persistAuthority(): Promise<void> {
@@ -166,7 +185,7 @@ export class DesiredPolicyClient {
     if (this.authorizationDenied) return 'unauthorized';
     // Fail closed: a response the client cannot trust (schema drift, conflict, wrong device, expired window) must not
     // keep a previously enabled policy alive. Plain outages ('offline') still ride on the healthy TTL below.
-    if (this.reason === 'invalid_policy') return 'invalid_policy';
+    if (this.invalid) return 'invalid_policy';
     if (!policy) return 'no_policy';
     if (this.lastHealthyAt === null || this.now() - this.lastHealthyAt > this.healthyTtlMs || this.now() >= Date.parse(policy.expiresAt)) return 'policy_expired';
     if (!policy.enabled || policy.killSwitch) return 'central_disabled';
