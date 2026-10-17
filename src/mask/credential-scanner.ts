@@ -9,6 +9,8 @@
  * Masking never changes text that has no finding: normalization (NFKC, zero-width removal, %XX decoding) is only
  * used to SEE hidden secrets; when something is found the normalized, masked text is returned.
  */
+import { maskToolArguments } from './tool-argument-rules.js';
+
 export interface ScanResult { text: string; findings: number }
 
 const APIKEY = '[APIKEY_MASKED]';
@@ -55,29 +57,11 @@ const FLAG = /(--(?:password|passwd|passphrase|token|secret|api-?key|auth-?token
 const SSHPASS = /(\bsshpass[ \t]+-p[ \t]*)("[^"]*"|'[^']*'|\S+)/gi;
 const CURL_USER = /([ \t](?:-u|--user)[ \t=]+)([^\s:'"]+):([^\s'"]+)/g;
 // mysql/mariadb/psql: `-pSECRET` glued to the flag (with a space it is a port/path of other tools). Numeric-only and short values do not count.
-// Only for the tools that take the password glued to -p, and only as a standalone token: never inside a longer flag
-// (find -print0/-prune/-path, git log -pretty, ls -parents) or for tools where -p means port/parents/prefix.
-const GLUED_P = /(\b(?:mysql|mysqldump|mysqladmin|mysqlcheck|mysqlimport|mysqlshow|mariadb|mariadb-dump|psql|7z|7za|7zr|unrar|rar|zip|unzip)\b.*?[ \t])(-p)(?=\S)(\S+)/g;
 const CURL_HEADER = /((?:-H|--header)[ \t=]+["']?)([\w-]*(?:key|token|secret|auth|pass|cred|sig|cookie)[\w-]*)([ \t]*:[ \t]*)([^"'\n\u0001\u0002\u0004]+)/gi;
 // Hex of 32 to 64 characters is a hash by default (commit, digest); with a suggestive NAME right before it, it is a key.
 const NAMED_HEX = /\b((?:key|secret|token|pass(?:word|wd)?|sig(?:nature)?|credential|auth|api[-_ ]?key)\b["']?[ \t:=]+["']?)([0-9a-f]{32,64})\b/gi;
 const QUERY_SECRET = /([?&](?:access_token|refresh_token|id_token|auth_token|token|api[_-]?key|apikey|key|secret|client_secret|password|passwd|pwd|sig|signature|code)=)([^&\s#"']+)/gi;
 
-// --- Credentials by ARGUMENT POSITION of well-known tools (the value has no name or format of its own) ---
-// One command per line: the tool and its flag must be on the same line and not cross a shell separator.
-const LINE = String.raw`.*?`;
-/** Tool rules run per command segment (split at newline, pipe, ; and &) and only up to this size: bounded, linear work. */
-const MAX_SEGMENT = 8 * 1024;
-const SEGMENT = /[^\n|;&\u0001\u0002]+/g;
-// htpasswd -b FILE USER PASS | -nb USER PASS: flags first, then positionals; with -n there is no FILE.
-const HTPASSWD = /\bhtpasswd((?:[ \t]+-[A-Za-z]+(?:[ \t]+\d+(?=[ \t]))?)+)((?:[ \t]+[^\s-]\S*){2,3})/g;
-const OPENSSL_PASS = new RegExp(String.raw`(\bopenssl\b${LINE}[ \t]-pass(?:in|out)?[ \t=]+pass:)(\S+)`, 'g');
-const OPENSSL_K = new RegExp(String.raw`(\bopenssl\b${LINE}[ \t]-k[ \t]+)(\S+)`, 'g');
-const REGISTRY_LOGIN = new RegExp(String.raw`(\b(?:docker|podman|nerdctl|buildah|skopeo|az|crane|oras|helm)\b${LINE}\blogin\b${LINE}[ \t]-p[ \t=]+)(\S+)`, 'g');
-const ZIP_P = new RegExp(String.raw`(\b(?:zip|unzip|zipcloak)\b${LINE}[ \t]-P[ \t]?)(\S+)`, 'g');
-const REDIS_A = new RegExp(String.raw`(\bredis-cli\b${LINE}[ \t](?:-a|--pass)[ \t]+)(\S+)`, 'g');
-const VAULT_LOGIN = /(\bvault[ \t]+login(?:[ \t]+-\S+)*[ \t]+)([^\s=-][^\s=]*)(?=\s|$)/g;
-const AWS_CONFIGURE_SET = /(\baws_(?:secret_access_key|session_token)[ \t]+)(\S+)/gi;
 // "the password is hunter2": prose with an obvious verb; ordinary adjectives after it are not a secret.
 const PASSWORD_IS = /(\b(?:password|passwd|passphrase)[ \t]+(?:is|was|=|:)[ \t]+)(["']?)([^\s"']+)/gi;
 const PROSE_VALUES = /^(?:required|optional|invalid|incorrect|wrong|correct|empty|missing|set|unset|hashed|stored|case-sensitive|expired|valid|weak|strong|too|not|the|a|an|your|my|reset|changed|updated|rotated|encrypted|masked|redacted|hidden|blank|none|null|unknown|n\/a|ok|fine|long|short|secure|insecure|mandatory|ignored|needed|checked|verified|accepted|rejected|denied)$/i;
@@ -112,15 +96,15 @@ const CHUNK_CHARS = 256 * 1024;
  * start a word) and quotes are `\"`. Map those escapes to single control characters for the scan and back afterwards;
  * skipped when the text already contains those characters.
  */
-const ESCAPES: ReadonlyArray<readonly [string, string]> = [['\\n', '\u0001'], ['\\r', '\u0002'], ['\\t', '\u0003'], ['\\"', '\u0004"']];
-const HAS_MARKERS = /[\u0001-\u0004]/;
+const ESCAPES: ReadonlyArray<readonly [string, string]> = [['\\\r\n', '\u0006'], ['\\\n', '\u0005'], ['\\\\\\n', '\u0007'], ['\\n', '\u0001'], ['\\r', '\u0002'], ['\\t', '\u0003'], ['\\"', '\u0004"']];
+const HAS_MARKERS = /[\u0001-\u0007]/;
 function escapeView(text: string): string {
   if (HAS_MARKERS.test(text) || !text.includes('\\')) return text;
   return ESCAPES.reduce((t, [from, to]) => t.split(from).join(to), text);
 }
 function restoreEscapes(text: string): string {
   // A lone \u0004 is an escaped quote whose quote character a masked value consumed: restore it as `\"`.
-  return text.replace(/\u0004"/g, '\\"').replace(/\u0001/g, '\\n').replace(/\u0002/g, '\\r').replace(/\u0003/g, '\\t').replace(/\u0004/g, '\\"');
+  return text.replace(/\u0006/g, '\\\r\n').replace(/\u0005/g, '\\\n').replace(/\u0007/g, '\\\\\\n').replace(/\u0004"/g, '\\"').replace(/\u0001/g, '\\n').replace(/\u0002/g, '\\r').replace(/\u0003/g, '\\t').replace(/\u0004/g, '\\"');
 }
 
 function scanText(text: string): ScanResult {
@@ -165,20 +149,6 @@ function scan(base: string): ScanResult {
   let findings = 0;
   const hit = (token: string) => () => { findings += 1; return token; };
   const done = (value: string) => ALREADY.test(value.replace(/^["']/, ''));
-  const positional = (segment: string): string => {
-    let out = segment.replace(HTPASSWD, (m, flags: string, args: string) => {
-      if (!/[ \t]-[A-Za-z]*b/.test(flags)) return m; // batch mode only: the password is on the command line
-      const parts = args.match(/[ \t]+\S+/g) ?? [];
-      const passwordAt = /[ \t]-[A-Za-z]*n/.test(flags) ? 1 : 2; // -n: USER PASS, otherwise FILE USER PASS
-      if (parts.length <= passwordAt || done(parts[passwordAt]!.trim())) return m;
-      findings += 1;
-      return `htpasswd${flags}${parts.map((part, i) => (i === passwordAt ? part.replace(/\S+/, APIKEY) : part)).join('')}`;
-    });
-    for (const re of [OPENSSL_PASS, OPENSSL_K, REGISTRY_LOGIN, ZIP_P, REDIS_A, VAULT_LOGIN, AWS_CONFIGURE_SET]) {
-      out = out.replace(re, (m, head: string, value: string) => (done(value) || NEUTRAL.test(value) && re !== VAULT_LOGIN ? m : (findings += 1, `${head}${APIKEY}`)));
-    }
-    return out.replace(GLUED_P, (m, head: string, flag: string, value: string) => (done(value) || /^\d+$/.test(value) || value.startsWith('-') ? m : (findings += 1, `${head}${flag}${APIKEY}`)));
-  };
   let t = base;
   for (const [token, re] of FORMATS) t = t.replace(re, hit(token));
   t = t.replace(URL_WITH_PASSWORD, (m, scheme: string, user: string, pass: string) => {
@@ -192,7 +162,8 @@ function scan(base: string): ScanResult {
   t = t.replace(BEARER, hit(APIKEY)).replace(BASIC, hit(APIKEY));
   t = t.replace(COOKIE, (m, name: string, sep: string) => (done(m.slice(name.length + sep.length)) ? m : (findings += 1, `${name}${sep}${APIKEY}`)));
   t = t.replace(QUERY_SECRET, (m, pre: string, value: string) => (done(value) || NEUTRAL.test(value) ? m : (findings += 1, `${pre}${APIKEY}`)));
-  t = t.replace(SEGMENT, segment => (segment.length > MAX_SEGMENT ? segment : positional(segment)));
+  const tools = maskToolArguments(t, APIKEY); // tool arguments by position (linear, token based)
+  findings += tools.findings; t = tools.text;
   t = t.replace(PASSWORD_IS, (m, head: string, quote: string, value: string) => (done(value) || PROSE_VALUES.test(value) ? m : (findings += 1, `${head}${quote}${APIKEY}`)));
   t = t.replace(FLAG, (m, flag: string, sep: string, value: string) => (done(value) ? m : (findings += 1, `${flag}${sep}${APIKEY}`)));
   t = t.replace(SSHPASS, (m, pre: string, value: string) => (done(value) ? m : (findings += 1, `${pre}${APIKEY}`)));

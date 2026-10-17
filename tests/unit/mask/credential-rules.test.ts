@@ -269,3 +269,94 @@ describe('C11 I2: argument-position credentials', () => {
     expect(POSITIONAL_NEGATIVE.length).toBeGreaterThanOrEqual(35);
   });
 });
+
+/** C12: the four minors of the C11 re-review. */
+const BASH_SECRET = 'pa$$-w0rd&x;y|z'; // contains &, ; and | : the value is the whole token
+const C12_POSITIVE: Array<[string, string, string[]]> = [
+  ['continuation: -p on the next line', `docker login -u bob \\\n  -p ${S} registry.example.com`, [S]],
+  ['continuation: several lines', `docker login \\\n -u bob \\\n -p ${S} \\\n registry.example.com`, [S]],
+  ['continuation: CRLF', `docker login -u bob \\\r\n  -p ${S}`, [S]],
+  ['continuation: htpasswd', `htpasswd -b \\\n .htpasswd alice \\\n ${S}`, [S]],
+  ['continuation: mysql', `mysql -h db \\\n -u root \\\n -p${S}`, [S]],
+  ['continuation: JSON-escaped', `{"cmd":"docker login -u bob \\\\\\n -p ${S}"}`, [S]],
+  ['long padding line before docker login', `${'echo padding; '.repeat(1) + 'x'.repeat(20_000)} docker login -u bob -p ${S}`, [S]],
+  ['long padding line before htpasswd', `${'y'.repeat(30_000)} htpasswd -b f alice ${S}`, [S]],
+  ['long padding line before mysql', `${'z'.repeat(50_000)} mysql -u root -p${S} db`, [S]],
+  ['tool word inside a 1 MB line', `${'a '.repeat(300_000)}redis-cli -a ${S} ping`, [S]],
+  ['password with & ; | (docker)', `docker login -u bob -p '${BASH_SECRET}'`, ['pa$$', 'x;y']],
+  ['password with & ; | unquoted (docker)', `docker login -u bob -p ${BASH_SECRET} registry`, ['pa$$', 'x;y', 'z']],
+  ['password with & ; | (htpasswd)', `htpasswd -b f alice ${BASH_SECRET}`, ['pa$$', 'x;y']],
+  ['password with & ; | (openssl)', `openssl enc -k ${BASH_SECRET} -in a`, ['pa$$', 'x;y']],
+  ['password with & ; | (mysql)', `mysql -uroot -p${BASH_SECRET} db`, ['pa$$', 'x;y']],
+  ['openssl passwd', `openssl passwd -1 ${S}`, [S]],
+  ['openssl passwd with salt', `openssl passwd -6 -salt abc ${S}`, [S]],
+  ['mongosh -p', `mongosh --host db -u admin -p ${S} --authenticationDatabase admin`, [S]],
+  ['mongosh --password', `mongosh --password ${S}`, [S]],
+  ['sqlcmd -P', `sqlcmd -S db -U sa -P ${S} -Q "select 1"`, [S]],
+  ['sqlcmd -P glued', `sqlcmd -S db -U sa -P${S}`, [S]],
+  ['ldapsearch -w', `ldapsearch -x -D cn=admin -w ${S} -b dc=example`, [S]],
+  ['ldapsearch -w glued', `ldapsearch -x -wS${S}`, [S]],
+  ['smbclient -U user%pass', `smbclient //srv/share -U alice%${S}`, [S]],
+  ['smbclient -U space', `smbclient //srv/share -U alice%${S} -c ls`, [S]],
+  ['redis-cli AUTH', `redis-cli AUTH ${S}`, [S]],
+  ['redis-cli AUTH user pass', `redis-cli AUTH default ${S}`, [S]],
+  ['docker -p before login', `docker -p ${S} login`, [S]],
+  ['uppercase HTPASSWD', `HTPASSWD -b f alice ${S}`, [S]],
+  ['uppercase DOCKER LOGIN', `DOCKER LOGIN -u bob -p ${S}`, [S]],
+  ['absolute path to the tool', `/usr/local/bin/docker login -p ${S}`, [S]],
+  ['windows exe', `C:\\Tools\\openssl.exe enc -k ${S}`, [S]],
+  ['mixed case OpenSSL', `OpenSSL rsa -passin pass:${S}`, [S]],
+  ['two commands: the second one leaks', `echo hi; redis-cli -a ${S} ping`, [S]],
+  ['after &&', `cd /tmp && docker login -p ${S}`, [S]],
+];
+
+const C12_NEGATIVE: Array<[string, string]> = [
+  ['continuation does not glue unrelated lines', 'docker ps \\\n  -a\nredis-cli ping'],
+  ['-p on the next real line belongs to another command', 'docker login -u bob\nssh -p 2222 host'],
+  ['-p after a pipe is another command', 'docker login -u bob | ssh -p 2222 host'],
+  ['-p after a semicolon is another command', 'docker login -u bob ; ls -p'],
+  ['openssl passwd help', 'openssl passwd -help'],
+  ['mongosh without password', 'mongosh --host db --eval "db.stats()"'],
+  ['sqlcmd integrated auth', 'sqlcmd -S db -E -Q "select 1"'],
+  ['sqlcmd lowercase -p', 'sqlcmd -S db -p'],
+  ['ldapsearch simple', 'ldapsearch -x -b dc=example "(cn=bob)"'],
+  ['ldapsearch -W prompt', 'ldapsearch -x -D cn=admin -W -b dc=example'],
+  ['smbclient list', 'smbclient -L //srv -N'],
+  ['smbclient user only', 'smbclient //srv/share -U alice'],
+  ['redis-cli auth word in prose', 'redis-cli --help shows how authentication works'],
+  ['unrelated tool with -w', 'wc -w notes.txt && grep -w word file'],
+  ['unrelated tool with -P', 'grep -P "^a+" file && ps -P'],
+  ['unrelated -k', 'curl -k https://localhost:8443'],
+  ['dockerfile word', 'edit the Dockerfile to run docker build -t app .'],
+  ['long benign line', `${'word '.repeat(60_000)}docker ps`],
+  ['long line with a tool word and no secret', `${'x'.repeat(30_000)} docker login --help`],
+];
+
+describe('C12: continuation lines, long lines, special characters in passwords, more tools', () => {
+  it.each(C12_POSITIVE)('masks %s', (_name, input, parts) => {
+    const masked = mask(input);
+    for (const part of parts) expect(masked, `${input.slice(0, 80)}  =>  ${masked.slice(0, 160)}`).not.toContain(part);
+    expect(masked).toContain('_MASKED]');
+  });
+
+  it.each(C12_NEGATIVE)('leaves %s intact', (_name, input) => { expect(mask(input)).toBe(input); });
+
+  it('a continuation keeps the layout of the command (backslash and newline are preserved)', () => {
+    expect(mask(`docker login -u bob \\\n  -p ${S} \\\n  registry.example.com`)).toBe('docker login -u bob \\\n  -p [APIKEY_MASKED] \\\n  registry.example.com');
+  });
+
+  it('is idempotent and linear on hostile input of 1 MB', () => {
+    for (const [, input] of C12_POSITIVE) expect(mask(mask(input)), input.slice(0, 60)).toBe(mask(input));
+    const started = Date.now();
+    for (const hostile of ['docker login -p '.repeat(65_000), 'openssl passwd '.repeat(65_000), 'redis-cli AUTH '.repeat(65_000), 'smbclient -U a%b '.repeat(60_000), 'htpasswd -b '.repeat(80_000),
+      '\\\n'.repeat(500_000), `${'docker '.repeat(140_000)}login`, 'mysql -p'.repeat(120_000), 'a&b;c|d '.repeat(120_000)]) {
+      mask(hostile);
+    }
+    expect(Date.now() - started).toBeLessThan(20_000);
+  });
+
+  it('the tables are large enough', () => {
+    expect(C12_POSITIVE.length).toBeGreaterThanOrEqual(30);
+    expect(C12_NEGATIVE.length).toBeGreaterThanOrEqual(18);
+  });
+});
