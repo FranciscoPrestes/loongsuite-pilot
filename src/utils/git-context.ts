@@ -1,10 +1,11 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
+import { GIT_SAFE_CONFIG } from './git-safe.js';
 import { normalizeDomain } from '../normalization/source-context.js';
 
 const execFile = promisify(execFileCb);
 
-const GIT_CONTEXT_TTL_MS = 30_000;
+export const GIT_CONTEXT_TTL_MS = 30_000;
 const MAX_CACHE_ENTRIES = 256;
 
 export interface GitContextResult {
@@ -40,7 +41,18 @@ function evictStaleEntries(cache: Map<string, { expiresAt: number }>): void {
  * Uses per-command catch for partial success: e.g. if rev-parse succeeds
  * but remote fails, the available fields are still cached and returned.
  */
-export async function inferGitContext(probeDir: string): Promise<GitContextResult> {
+export function inferGitContext(probeDir: string): Promise<GitContextResult> {
+  // Concurrent probes of one directory (a burst of entries) share a single set of git calls.
+  const running = inflight.get(probeDir);
+  if (running) return running;
+  const probe = probeOnce(probeDir).finally(() => { inflight.delete(probeDir); });
+  inflight.set(probeDir, probe);
+  return probe;
+}
+
+const inflight = new Map<string, Promise<GitContextResult>>();
+
+async function probeOnce(probeDir: string): Promise<GitContextResult> {
   const now = Date.now();
   const cached = gitContextCache.get(probeDir);
   if (cached && cached.expiresAt > now) {
@@ -70,10 +82,8 @@ export async function inferGitContext(probeDir: string): Promise<GitContextResul
   return { repo, branch, root: gitRoot, domain, gitDir };
 }
 
-/** Same read-only hardening as the repository snapshot reader (C5): never write the index or run repo-defined code. */
-const GIT_SAFE_CONFIG = ['--no-optional-locks', '-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'core.pager=cat'];
-const GIT_CALL_TIMEOUT_MS = 1500;
-const GIT_PROBE_BUDGET_MS = 2500;
+export const GIT_CALL_TIMEOUT_MS = 1500;
+export const GIT_PROBE_BUDGET_MS = 2500;
 
 async function runGit(root: string, args: string[], deadline: number): Promise<string | undefined> {
   const remaining = Math.min(GIT_CALL_TIMEOUT_MS, deadline - Date.now());

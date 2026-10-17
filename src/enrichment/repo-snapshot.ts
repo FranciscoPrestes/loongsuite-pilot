@@ -10,6 +10,7 @@ import {
   isPathInside,
   normalizePathForCompare,
 } from '../normalization/enrich-git-context.js';
+import { GIT_SAFE_CONFIG } from '../utils/git-safe.js';
 import type { LocalJob } from './job-contract.js';
 
 const execFile = promisify(execFileCb);
@@ -56,13 +57,7 @@ export const READONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set(['rev-parse
  * - `core.fsmonitor=false` / `core.untrackedCache=false` disable the repo's
  *   fsmonitor daemon/hook; `core.pager=cat` avoids a pager.
  */
-export const GIT_SAFE_CONFIG = [
-  '--no-optional-locks',
-  '-c', 'core.hooksPath=',
-  '-c', 'core.fsmonitor=false',
-  '-c', 'core.untrackedCache=false',
-  '-c', 'core.pager=cat',
-];
+export { GIT_SAFE_CONFIG } from '../utils/git-safe.js';
 
 /** Total git time for one snapshot: all calls together stay inside the 2 s worker deadline. */
 export const SNAPSHOT_BUDGET_MS = 1800;
