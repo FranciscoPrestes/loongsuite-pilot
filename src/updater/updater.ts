@@ -26,6 +26,8 @@ import {
 } from '../utils/restart-breadcrumb.js';
 import { NODE_SQLITE_PROBE } from '../utils/node-sqlite.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
+import { assessRelease, resolveIntegrityPolicy, type ReleaseDescriptor } from './release-integrity.js';
+import { trustedKeyMap, type TrustedAnalyticsKeys } from '../deployment/manifest-signature.js';
 import { AnalyticsBundleStore, type AnalyticsBundleOptions, type VerifiedAnalyticsBundle } from './analytics-bundle-store.js';
 import type { SignedAnalyticsManifest } from '../deployment/manifest-signature.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
@@ -598,11 +600,36 @@ export class Updater {
     }
   }
 
+  /** Owner-provisioned Ed25519 release keys (`<dataDir>/release-trusted-keys.json`); missing or invalid means none. */
+  private async releaseKeys(): Promise<TrustedAnalyticsKeys | undefined> {
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(this.paths.dataDir, 'release-trusted-keys.json'), 'utf8')) as TrustedAnalyticsKeys;
+      trustedKeyMap(parsed);
+      return parsed;
+    } catch { return undefined; }
+  }
+
+  /**
+   * `enforce` refuses before anything is downloaded; the default `warn` only logs, so a server that does not yet
+   * publish sha256/signature keeps working. See release-integrity.ts for the checks and the owner gate.
+   */
+  private async enforceReleaseIntegrity(packageUrl: string, manifest: VersionManifest): Promise<void> {
+    const policy = { ...resolveIntegrityPolicy(this.config), trustedKeys: await this.releaseKeys() };
+    const problems = assessRelease(manifest as ReleaseDescriptor, packageUrl, policy);
+    if (problems.length === 0) return;
+    if (policy.mode === 'enforce') {
+      logger.error('release refused by the integrity policy', { problems, version: manifest.version });
+      throw new Error(`release integrity: ${problems.join(',')}`);
+    }
+    logger.warn('release integrity problems (warn mode, update proceeds)', { problems, version: manifest.version });
+  }
+
   private async downloadAndDeploy(
     packageUrl: string,
     manifest: VersionManifest,
   ): Promise<void> {
     if (Object.hasOwn(manifest, 'analyticsBundle')) throw new Error('Analytics bundle cannot use legacy installer');
+    await this.enforceReleaseIntegrity(packageUrl, manifest);
     const { cacheDir, versionsDir } = this.paths;
     // The tarball is unpacked with tar.exe, which cannot address a non-ASCII path
     // (see utils/win-archive.ts), so under C:\Users\<CJK name> the download staging

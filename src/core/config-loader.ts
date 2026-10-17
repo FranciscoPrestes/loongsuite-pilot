@@ -221,6 +221,7 @@ export interface ConfigFile {
     packageUrl?: string;
     nodeDepsUrl?: string;
     nodeModulesUrl?: string;
+    integrity?: { mode?: string; allowedHosts?: string[] };
   };
 
   fileCollection?: {
@@ -1479,7 +1480,15 @@ export function buildAutoUpdateConfig(
     installId: file?.installId,
     canaryPolicy: file?.canary?.policy,
     canaryHotfixVersion: file?.canary?.hotfix_version ?? 0,
+    integrity: buildIntegrityConfig(file),
   };
+}
+
+/** `enforce` only from an explicit valid value (file or LOONGSUITE_PILOT_UPDATE_INTEGRITY); everything else is `warn`. */
+function buildIntegrityConfig(file: ConfigFile | null): NonNullable<AutoUpdateConfig['integrity']> {
+  const mode = (env('LOONGSUITE_PILOT_UPDATE_INTEGRITY') ?? file?.autoUpdate?.integrity?.mode) === 'enforce' ? 'enforce' : 'warn';
+  const hosts = file?.autoUpdate?.integrity?.allowedHosts;
+  return { mode, ...(Array.isArray(hosts) && hosts.length > 0 ? { allowedHosts: hosts.filter((h): h is string => typeof h === 'string') } : {}) };
 }
 
 /** Invalid governance config pauses analytics and cannot affect base telemetry. */

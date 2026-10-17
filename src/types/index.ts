@@ -25,6 +25,8 @@ export interface AutoUpdateConfig {
   installId?: string;
   canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
+  /** Release integrity for the main package: `warn` (default) logs problems, `enforce` refuses the update. */
+  integrity?: { mode?: 'warn' | 'enforce'; allowedHosts?: string[] };
 }
 
 export interface CmsConfig {
