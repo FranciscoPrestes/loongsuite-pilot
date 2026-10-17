@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { gzipSync } from 'node:zlib';
+import { chmodQuiet, ensurePrivateDir } from '../utils/fs-utils.js';
 
 /** One line of logs/otlp-failed/*.jsonl, as written by otlp-json-serializer. */
 export interface FailedSpanRecord {
@@ -183,8 +184,10 @@ async function post(target: ReplayTarget, fetchImpl: FetchLike, batch: Item[], a
 async function appendRejected(failedDir: string, claimed: string, lines: string[]): Promise<void> {
   if (lines.length === 0) return;
   const dir = path.join(failedDir, 'rejected');
-  await fs.mkdir(dir, { recursive: true });
-  await fs.appendFile(path.join(dir, claimed.replace(CLAIM_TAG, '')), lines.join('\n') + '\n');
+  await ensurePrivateDir(dir);
+  const target = path.join(dir, claimed.replace(CLAIM_TAG, ''));
+  await fs.appendFile(target, lines.join('\n') + '\n', { mode: 0o600 });
+  await chmodQuiet(target, 0o600);
 }
 
 /** Appends text to a claimed file, first terminating a half-written last line so
@@ -193,6 +196,7 @@ async function appendTerminated(claimedPath: string, data: Buffer | string): Pro
   const existing = await fs.readFile(claimedPath).catch(() => null);
   const prefix = existing && existing.length > 0 && existing[existing.length - 1] !== 0x0a ? '\n' : '';
   await fs.appendFile(claimedPath, Buffer.concat([Buffer.from(prefix), Buffer.from(data)]));
+  await chmodQuiet(claimedPath, 0o600);
 }
 
 /** Moves whatever the flusher wrote to the unclaimed file into the claimed one.
@@ -230,8 +234,9 @@ async function appendStaging(claimedPath: string, staging: string): Promise<void
 /** Rewrites the claimed file atomically with the lines still pending. */
 async function rewriteClaimed(claimedPath: string, lines: string[]): Promise<void> {
   const tmp = `${claimedPath}.rewrite.tmp`;
-  await fs.writeFile(tmp, lines.join('\n') + '\n');
+  await fs.writeFile(tmp, lines.join('\n') + '\n', { mode: 0o600 });
   await fs.rename(tmp, claimedPath);
+  await chmodQuiet(claimedPath, 0o600);
 }
 
 /** Resends the failed spans of one endpoint and deletes each file once every line

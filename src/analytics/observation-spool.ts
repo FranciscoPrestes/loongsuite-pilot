@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { chmodQuiet, ensurePrivateDir } from '../utils/fs-utils.js';
 
 /** Managed spool for offline replay. Only this spool is ever removed by exclusions. */
 export interface ObservationSpool {
@@ -57,8 +58,9 @@ export class FileObservationSpool implements ObservationSpool {
     this.failuresPath = path.join(dir, 'failures.jsonl');
   }
 
+  /** The directory is created 0700 and tightened on every operation (it may pre-exist with looser permissions). */
   private async ready(): Promise<void> {
-    await fs.mkdir(path.dirname(this.recordsPath), { recursive: true, mode: 0o700 });
+    await ensurePrivateDir(path.dirname(this.recordsPath));
   }
 
   /** Serializes mutating operations so no rewrite can ever lose an append. */
@@ -83,6 +85,7 @@ export class FileObservationSpool implements ObservationSpool {
         if ((stat?.size ?? 0) + bytes > MAX_SPOOL_BYTES) throw new Error('spool full');
       }
       await fs.appendFile(this.recordsPath, line, { mode: 0o600 });
+      await chmodQuiet(this.recordsPath, 0o600);
     });
   }
 
@@ -102,6 +105,7 @@ export class FileObservationSpool implements ObservationSpool {
     await this.mutate(async () => {
       await this.ready();
       await fs.appendFile(this.recordsPath, `${REMOVE_MARK_PREFIX}${sha256hex(serialized)}"}\n`, { mode: 0o600 });
+      await chmodQuiet(this.recordsPath, 0o600);
     });
   }
 
@@ -110,6 +114,7 @@ export class FileObservationSpool implements ObservationSpool {
       await this.ready();
       await fs.appendFile(this.failuresPath,
         JSON.stringify({ reason, observationId, at: new Date().toISOString() }) + '\n', { mode: 0o600 });
+      await chmodQuiet(this.failuresPath, 0o600);
     } catch { /* failure records never block anything */ }
   }
 
@@ -134,5 +139,6 @@ export class FileObservationSpool implements ObservationSpool {
       seenBytes = current.length;
     }
     await fs.rename(tmp, this.recordsPath);
+    await chmodQuiet(this.recordsPath, 0o600);
   }
 }

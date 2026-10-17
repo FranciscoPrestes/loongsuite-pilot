@@ -22,6 +22,9 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
 
 vi.spyOn(fsUtils, 'appendLine').mockResolvedValue(undefined);
 vi.spyOn(fsUtils, 'ensureDir').mockResolvedValue(undefined);
+// The failed-span log holds prompts and tool output, so it uses the private (0700/0600) writers.
+vi.spyOn(fsUtils, 'appendPrivateLine').mockResolvedValue(undefined);
+vi.spyOn(fsUtils, 'ensurePrivateDir').mockResolvedValue(undefined);
 
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
@@ -55,6 +58,8 @@ describe('OtlpTraceFlusher - export', () => {
     mockExport.mockClear();
     vi.mocked(fsUtils.appendLine).mockClear();
     vi.mocked(fsUtils.ensureDir).mockClear();
+    vi.mocked(fsUtils.appendPrivateLine).mockClear();
+    vi.mocked(fsUtils.ensurePrivateDir).mockClear();
   });
 
   it('calls exporter.export via exportSpansForAgent test seam', async () => {
@@ -105,7 +110,7 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+    const failedCalls = vi.mocked(fsUtils.appendPrivateLine).mock.calls.filter(
       (call) => (call[0] as string).includes('otlp-failed'),
     );
     expect(failedCalls).toHaveLength(1);
@@ -185,11 +190,10 @@ describe('OtlpTraceFlusher - export', () => {
     await flusher.exportSpansForAgent('claude-code', spans);
     await flusher.shutdown();
 
-    const allCalls = vi.mocked(fsUtils.appendLine).mock.calls;
-    const debugCalls = allCalls.filter(
+    const debugCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
       (c) => (c[0] as string).includes('otlp-debug'),
     );
-    const failedCalls = allCalls.filter(
+    const failedCalls = vi.mocked(fsUtils.appendPrivateLine).mock.calls.filter(
       (c) => (c[0] as string).includes('otlp-failed'),
     );
     expect(debugCalls.length).toBeGreaterThan(0);
@@ -201,6 +205,8 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
   beforeEach(() => {
     vi.mocked(fsUtils.appendLine).mockClear();
     vi.mocked(fsUtils.ensureDir).mockClear();
+    vi.mocked(fsUtils.appendPrivateLine).mockClear();
+    vi.mocked(fsUtils.ensurePrivateDir).mockClear();
   });
 
   function twoEndpointConfig(overrides: Record<string, unknown> = {}) {
@@ -306,7 +312,7 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
     await flusher.shutdown();
 
     // only backend-b failed → exactly its endpoint-tagged file is written
-    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+    const failedCalls = vi.mocked(fsUtils.appendPrivateLine).mock.calls.filter(
       (call) => (call[0] as string).includes('otlp-failed'),
     );
     expect(failedCalls).toHaveLength(1);
@@ -331,7 +337,7 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
     await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
     await flusher.shutdown();
 
-    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+    const failedCalls = vi.mocked(fsUtils.appendPrivateLine).mock.calls.filter(
       (call) => (call[0] as string).includes('otlp-failed'),
     );
     expect(failedCalls).toHaveLength(1);

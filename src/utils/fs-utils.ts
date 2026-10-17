@@ -222,6 +222,30 @@ export async function appendLine(path: string, line: string): Promise<void> {
   } catch {}
 }
 
+/** Best-effort POSIX permission set; a no-op where chmod has no meaning (Windows) and never throws. */
+export async function chmodQuiet(target: string, mode: number): Promise<void> {
+  if (process.platform === 'win32') return;
+  try {
+    const current = (await fsp.stat(target)).mode & 0o777;
+    if (current !== mode) await fsp.chmod(target, mode);
+  } catch { /* the path may be gone; permissions are best effort */ }
+}
+
+/** Directory for data that may hold prompts or tool output: 0700, tightened on EVERY call, not only at creation. */
+export async function ensurePrivateDir(dir: string): Promise<void> {
+  try { await fsp.mkdir(dir, { recursive: true, mode: 0o700 }); } catch { /* reported by the write that follows */ }
+  await chmodQuiet(dir, 0o700);
+}
+
+/** Append a line to a private (0600) file inside a private (0700) directory, tightening both on every call. */
+export async function appendPrivateLine(path: string, line: string): Promise<void> {
+  try {
+    await ensurePrivateDir(nodePath.dirname(path));
+    await fsp.appendFile(path, line.endsWith('\n') ? line : `${line}\n`, { encoding: 'utf8', mode: 0o600 });
+    await chmodQuiet(path, 0o600);
+  } catch {}
+}
+
 /**
  * Recursively creates a directory if it does not exist.
  */

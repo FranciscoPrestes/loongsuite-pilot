@@ -32,7 +32,7 @@ import {
   type GlobalAttributesProvider,
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { appendLine, appendPrivateLine, ensureDir, ensurePrivateDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { formatTime } from '../utils/time-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -2246,13 +2246,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const safeEndpoint = endpointName.replace(/[^A-Za-z0-9._-]/g, '_');
       const svcName = `${this.cfg.serviceName}-${agentType}__${safeEndpoint}`;
       const dir = this.failedDir;
-      await ensureDir(dir);
+      await ensurePrivateDir(dir); // failed spans hold prompts and tool output: 0700 dir, 0600 files
       const filepath = path.join(dir, `${svcName}-${getTodayDateString()}.jsonl`);
       const jsonLines = createReadableSpanToOtlpSpanJsonArray(spans);
       for (const line of jsonLines) {
         const obj = JSON.parse(line);
         obj._error = error;
-        await appendLine(filepath, JSON.stringify(obj));
+        await appendPrivateLine(filepath, JSON.stringify(obj));
       }
     } catch (err) {
       logger.warn('Failed-log write failed', { err: String(err) });
