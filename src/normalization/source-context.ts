@@ -85,7 +85,10 @@ function collectAbsolutePathValuesInto(value: unknown, out: Set<string>, depth =
 export function normalizeDomain(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const httpsMatch = raw.match(/^https?:\/\/([^/]+)/);
-  if (httpsMatch) return httpsMatch[1];
+  // Never let URL userinfo (user:token@) leak into the domain.
+  if (httpsMatch) return httpsMatch[1]!.replace(/^[^@]*@/, '');
+  const urlMatch = raw.match(/^(?:ssh|git):\/\/(?:[^@/]*@)?([^/:]+)/);
+  if (urlMatch) return urlMatch[1];
   const sshMatch = raw.match(/^[^@]+@([^:]+)/);
   if (sshMatch) return sshMatch[1];
   return undefined;

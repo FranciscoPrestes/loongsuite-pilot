@@ -67,8 +67,9 @@ async function probeOnce(probeDir: string): Promise<GitContextResult> {
   // symbolic-ref also answers for an unborn branch (no commit yet); a detached HEAD has no branch and yields none.
   const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['symbolic-ref', '-q', 'HEAD'], deadline));
   const remote = (await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url'], deadline))?.trim();
-  const repo = normalizeRepo(remote);
-  const domain = normalizeDomain(remote);
+  const safe = safeRemote(remote);
+  const repo = normalizeRepo(safe);
+  const domain = normalizeDomain(safe);
 
   evictStaleEntries(gitContextCache);
   gitContextCache.set(probeDir, {
@@ -108,6 +109,22 @@ function normalizeBranch(raw: string | undefined): string | undefined {
   return match ? match[1] : undefined;
 }
 
+const ALLOWED_REMOTE_SCHEMES = new Set(['https', 'ssh', 'git']);
+const MAX_REMOTE_CHARS = 500;
+
+/**
+ * `remote.origin.url` is repository-controlled text. Only https/ssh/git URLs and scp-like `host:path` forms
+ * may reach `git.repo`/`git.domain`; transport helpers (`ext::`, `fd::`), other schemes (file, ftp, ...),
+ * whitespace/control characters and oversized values are dropped (the repo is then simply unknown).
+ */
+export function safeRemote(raw: string | undefined): string | undefined {
+  if (!raw || raw.length > MAX_REMOTE_CHARS || /[\s\u0000-\u001f\u007f]/.test(raw)) return undefined;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*::/.test(raw)) return undefined;
+  const scheme = raw.match(/^([A-Za-z][A-Za-z0-9+.-]*):\/\//)?.[1]?.toLowerCase();
+  if (scheme !== undefined && !ALLOWED_REMOTE_SCHEMES.has(scheme)) return undefined;
+  return raw;
+}
+
 export function normalizeRepo(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim();
@@ -115,7 +132,7 @@ export function normalizeRepo(raw: string | undefined): string | undefined {
   const sshMatch = trimmed.match(/^[^@]+@[^:]+:(.+)$/);
   const source = sshMatch ? sshMatch[1] : trimmed;
   return source
-    .replace(/^https?:\/\/[^/]+\//, '')
+    .replace(/^(?:https?|ssh|git):\/\/[^/]+\//, '')
     .replace(/\.git$/, '')
     .replace(/^\/+|\/+$/g, '');
 }

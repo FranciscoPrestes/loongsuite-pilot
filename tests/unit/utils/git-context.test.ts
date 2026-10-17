@@ -114,3 +114,41 @@ describe('git context parsing robustness', () => {
     expect(computeWorktreeId(linked)).not.toBe((await snapshotRepository(linked, new AbortController().signal)).worktreeId);
   });
 });
+
+describe('remote sanitation', () => {
+  const withRemote = async (url: string) => {
+    const d = repo('main'); git(d, 'remote', 'set-url', 'origin', url);
+    return inferGitContext(d);
+  };
+  it.each([
+    ['ext::sh -c "touch /tmp/x" %S', 'transport helper'],
+    ['ext::ssh://x', 'transport helper without spaces'],
+    ['fd::17', 'fd helper'],
+    ['file:///srv/git/secret.git', 'file scheme'],
+    ['ftp://example.com/org/repo.git', 'ftp scheme'],
+    ['http://example.com/org/repo.git', 'cleartext http'],
+    ['https://example.com/org/repo .git', 'whitespace'],
+  ])('drops %s (%s) instead of exporting it as git.repo', async (url) => {
+    const ctx = await withRemote(url);
+    expect(ctx.repo).toBeUndefined();
+    expect(ctx.domain).toBeUndefined();
+  });
+
+  it('drops an oversized remote', async () => {
+    const ctx = await withRemote('https://github.com/org/' + 'a'.repeat(600) + '.git');
+    expect(ctx.repo).toBeUndefined();
+  });
+
+  it.each([
+    ['https://github.com/org/repo.git', 'org/repo', 'github.com'],
+    ['ssh://git@github.com/org/repo.git', 'org/repo', 'github.com'],
+    ['git://github.com/org/repo.git', 'org/repo', undefined],
+    ['git@github.com:org/repo.git', 'org/repo', 'github.com'],
+    ['https://user:s3cret@github.com/org/repo.git', 'org/repo', 'github.com'],
+  ])('keeps %s', async (url, repoName, domain) => {
+    const ctx = await withRemote(url);
+    expect(ctx.repo).toBe(repoName);
+    if (domain) expect(ctx.domain).toBe(domain);
+    expect(JSON.stringify(ctx)).not.toContain('s3cret');
+  });
+});
