@@ -1,6 +1,6 @@
 import type { AgentActivityEntry, MaskConfig } from '../types/index.js';
-import { SUPPORTED_MASK_TYPES } from '../types/index.js';
 import { shouldMaskField } from './field-whitelist.js';
+import { activeMaskPlan, isMaskActive } from './active-mask.js';
 import { loadMaskPlan } from './rule-loader.js';
 import { maskString } from './string-masker.js';
 import type {
@@ -87,25 +87,13 @@ function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): M
 }
 
 /**
- * Full sensitive + PII plan used to sanitize enrichment evidence snippets before
- * they are ever persisted. Reuses the same maskString/loadMaskPlan machinery the
- * C4 job store applies to persisted evidence (maskEvidence).
- */
-const SNIPPET_MASK_CONFIG: MaskConfig = {
-  mode: 'all',
-  types: [...SUPPORTED_MASK_TYPES],
-  replacementMode: 'placeholder',
-};
-let snippetPlan: MaskPlan | undefined;
-
-/**
  * Sanitize a single evidence snippet (local manifest / documentation / command
  * body) before persistence. Bounding the byte size is the caller's job; this
  * only removes sensitive material. Paths are locators and must never be masked.
  */
 export function sanitizeSnippetText(text: string): string {
-  snippetPlan ??= loadMaskPlan(SNIPPET_MASK_CONFIG);
-  return maskString(text, snippetPlan);
+  const plan = activeMaskPlan();
+  return isMaskActive(plan) ? maskString(text, plan) : text;
 }
 
 /**
@@ -116,6 +104,6 @@ export function sanitizeSnippetText(text: string): string {
  * instead of emitting a corrupted record.
  */
 export function sanitizeEnrichedPayload<T>(value: T): T {
-  snippetPlan ??= loadMaskPlan(SNIPPET_MASK_CONFIG);
-  return maskJsonSafeValue(value as JsonSafeValue, snippetPlan, {}) as T;
+  const plan = activeMaskPlan();
+  return isMaskActive(plan) ? (maskJsonSafeValue(value as JsonSafeValue, plan, {}) as T) : value;
 }

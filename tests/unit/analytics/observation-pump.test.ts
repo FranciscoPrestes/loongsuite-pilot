@@ -1,3 +1,4 @@
+import '../../helpers/mask-all.js';
 import { describe, expect, it, vi } from 'vitest';
 import { ObservationPump, type ReplaySource } from '../../../src/analytics/observation-pump.js';
 import type { Observation } from '../../../src/analytics/observation.js';

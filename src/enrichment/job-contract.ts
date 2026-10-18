@@ -2,9 +2,8 @@ import { z } from 'zod';
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import type { Observation } from '../analytics/observation.js';
-import { loadMaskPlan } from '../mask/rule-loader.js';
+import { activeMaskPlan, isMaskActive } from '../mask/active-mask.js';
 import { maskString } from '../mask/string-masker.js';
-import { SUPPORTED_MASK_TYPES } from '../types/index.js';
 export type ObservationKind = Observation['kind'];
 export type EvidenceRef = Observation['sourceRefs'][number];
 const text = z.string().min(1).max(500);
@@ -19,10 +18,9 @@ export const jobSchema = z.object({
 }).strict();
 export type LocalJob = z.infer<typeof jobSchema>;
 export const digest = (value:string):string => createHash('sha256').update(value).digest('hex');
-const maskPlan=loadMaskPlan({mode:'all',types:[...SUPPORTED_MASK_TYPES],replacementMode:'placeholder'});
-/** All persisted evidence strings use the existing sensitive-data masking engine. */
+/** Persisted evidence strings use the mask the user switched on; with none, they are kept as they are. */
 export function maskEvidence<T>(value:T):T {
- if(typeof value==='string')return maskString(value,maskPlan) as T;
+ if(typeof value==='string'){const maskPlan=activeMaskPlan();return (isMaskActive(maskPlan)?maskString(value,maskPlan):value) as T;}
  if(Array.isArray(value))return value.map(v=>maskEvidence(v)) as T;
  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,maskEvidence(v)])) as T;
  return value;

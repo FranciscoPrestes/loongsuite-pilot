@@ -1,3 +1,4 @@
+import { setActiveMaskConfig } from '../mask/active-mask.js';
 import { JobStore } from '../enrichment/job-store.js';
 import { EnrichmentScheduler } from '../enrichment/scheduler.js';
 import { jobFromEntry, type LocalJob } from '../enrichment/job-contract.js';
@@ -268,6 +269,7 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setWorkspacePolicy(workspacePolicy);
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
+    setActiveMaskConfig(this.config.mask);
     this.inputManager.setMaskConfig(
       this.config.mask ?? {
         mode: 'none',

@@ -1,3 +1,4 @@
+import '../../helpers/mask-all.js';
 import {describe,it,expect} from 'vitest';
 import {buildEnrichmentConfig} from '../../../src/core/config-loader.js';
 import {jobFromEntry,prepareJob} from '../../../src/enrichment/job-contract.js';

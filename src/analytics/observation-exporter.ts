@@ -4,13 +4,12 @@ import {
   sha256hex,
   type ObservationSpool,
 } from './observation-spool.js';
+import { activeMaskConfig, activeMaskPlan } from '../mask/active-mask.js';
 import { maskAgentActivityEntry, sanitizeEnrichedPayload } from '../mask/entry-masker.js';
 import {
   ANALYTICS_ANNOTATION_KEYS,
-  SUPPORTED_MASK_TYPES,
   type AgentActivityEntry,
   type AnalyticsAnnotationKey,
-  type MaskConfig,
 } from '../types/index.js';
 
 export { ANALYTICS_ANNOTATION_KEYS };
@@ -115,12 +114,6 @@ export interface TombstoneSyncTarget {
 export interface ExclusionSyncTarget {
   markExclusionsSynchronized(revision: string): void;
 }
-
-const EXPORT_MASK_CONFIG: MaskConfig = {
-  mode: 'all',
-  types: [...SUPPORTED_MASK_TYPES],
-  replacementMode: 'placeholder',
-};
 
 function structuralView(observation: Observation): Record<string, unknown> {
   return {
@@ -300,7 +293,7 @@ export class ObservationExporter {
         return outcome;
       }
       // Mask before any enriched payload is persisted or exported.
-      const masked = maskAgentActivityEntry(entry, EXPORT_MASK_CONFIG);
+      const masked = maskAgentActivityEntry(entry, activeMaskConfig(), activeMaskPlan());
       const maskedEnvelope = readObservationEnvelope(masked);
       if (!maskedEnvelope) {
         outcome.failed = 'redaction_unparseable_envelope';
