@@ -134,17 +134,20 @@ function wordTrie(words: readonly string[]): string {
 // Twilio account/API sids are bare "AC"/"SK" + 32 hex, with no word around them.
 const TRIGGER = new RegExp(`${wordTrie(TRIGGER_WORDS)}|(?:ac|sk)[0-9a-f]{32}`);
 
+/** Every rule `scan` applies, by name, so a test can prove each one has a pre-filter trigger. Keep in step with `scan`. */
+export const CREDENTIAL_RULES: Readonly<Record<string, RegExp>> = {
+  ...Object.fromEntries(FORMATS.map(([, re], i) => [`FORMAT_${i}`, re])),
+  URL_WITH_PASSWORD, AUTHORIZATION, BEARER, BASIC, COOKIE, QUERY_SECRET, PASSWORD_IS, FLAG, SSHPASS, CURL_USER,
+  CURL_HEADER, NAMED_HEX, ASSIGN_PASS, ASSIGN_STRONG, UPPER_ENV,
+};
+
 /** True when the text might contain a credential (a superset test: false positives only cost time). */
 export function mightHoldCredential(text: string): boolean {
   return NEEDS_NORMALIZATION.test(text) || TRIGGER.test(text.toLowerCase());
 }
 
-function scanText(text: string): ScanResult {
-  return mightHoldCredential(text) ? scanTextUnfiltered(text) : { text, findings: 0 };
-}
-
-/** The scan without the pre-filter: the reference the differential test compares against. */
-export function scanTextUnfiltered(text: string): ScanResult {
+function scanText(text: string, prefilter: boolean): ScanResult {
+  if (prefilter && !mightHoldCredential(text)) return { text, findings: 0 };
   const normalized = normalizeForScan(text);
   const view = escapeView(normalized);
   const result = scan(view);
@@ -157,9 +160,10 @@ function normalizeForScan(text: string): string {
   return t;
 }
 
-export function scanCredentials(text: string): ScanResult {
+/** `prefilter: false` is the reference scan the differential test compares against. */
+export function scanCredentials(text: string, prefilter = true): ScanResult {
   if (text.length === 0) return { text, findings: 0 };
-  if (text.length <= CHUNK_CHARS) return finish(text, scanText(text));
+  if (text.length <= CHUNK_CHARS) return finish(text, scanText(text, prefilter));
   // Pathological sizes: scan in chunks cut at whitespace so the work stays bounded and no tail is left unscanned.
   let findings = 0;
   const parts: string[] = [];
@@ -169,7 +173,7 @@ export function scanCredentials(text: string): ScanResult {
       const cut = text.lastIndexOf('\n', end) > start ? text.lastIndexOf('\n', end) : text.lastIndexOf(' ', end);
       if (cut > start) end = cut + 1;
     }
-    const part = scanText(text.slice(start, end));
+    const part = scanText(text.slice(start, end), prefilter);
     findings += part.findings;
     parts.push(part.findings === 0 ? text.slice(start, end) : part.text);
     start = end;
