@@ -149,9 +149,15 @@ function commandState(
   return isCommandMatch(command, patterns) ? 'matched' : 'mismatched';
 }
 
+// A process's own start identity never changes. Reading it spawns `ps` synchronously on macOS, and every
+// acquisition attempt (including the polling losers of an in-process queue) wrote it before finding out the
+// lock was taken, which starved the holder's event loop and made waiters time out under load.
+let ownStartToken: string | undefined;
+
 function writeOwnLock(lockPath: string, ownerId: string): void {
   const startedAt = Date.now(); // Wall-clock evidence for operators; not an eviction timeout.
-  const processStartToken = readProcessStartToken(process.pid);
+  ownStartToken ??= readProcessStartToken(process.pid);
+  const processStartToken = ownStartToken;
   const payload = JSON.stringify({
     pid: process.pid,
     startedAt,
