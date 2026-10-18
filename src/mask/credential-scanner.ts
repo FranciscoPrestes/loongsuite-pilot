@@ -112,7 +112,7 @@ function restoreEscapes(text: string): string {
 // provider prefix, URL or tool name none of the rules below can match. A superset test: false positives only cost time.
 const NEEDS_NORMALIZATION = /[^\x00-\x7f]|%[0-9a-f]{2}/i;
 const TRIGGER_WORDS: readonly string[] = ['pass', 'pwd', 'secret', 'token', 'key', 'cred', 'sig', 'auth', 'bearer', 'basic', 'cookie', '://', 'eyj', 'sk-', 'sk_', 'rk_',
-  'ntcp_', 'npm_', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'glpat-', 'aiza', 'ya29.', 'xox', 'akia', 'asia', 'sg.', 'hf_', '-----begin', ...TOOL_PREFIXES];
+  'ntcp_', 'npm_', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'glpat-', 'aiza', 'ya29.', 'xox', 'akia', 'asia', 'sg.', 'hf_', '-----begin', '-u', '--user', 'code=', ...TOOL_PREFIXES];
 
 /** Prefix tree of the words as one regular expression: far cheaper per character than a flat alternation. */
 function wordTrie(words: readonly string[]): string {
@@ -140,7 +140,11 @@ export function mightHoldCredential(text: string): boolean {
 }
 
 function scanText(text: string): ScanResult {
-  if (!mightHoldCredential(text)) return { text, findings: 0 };
+  return mightHoldCredential(text) ? scanTextUnfiltered(text) : { text, findings: 0 };
+}
+
+/** The scan without the pre-filter: the reference the differential test compares against. */
+export function scanTextUnfiltered(text: string): ScanResult {
   const normalized = normalizeForScan(text);
   const view = escapeView(normalized);
   const result = scan(view);
