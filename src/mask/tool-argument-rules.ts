@@ -15,13 +15,17 @@ const ALREADY_MASKED = /^\[(?:ACCESSKEY|APIKEY|PRIVATEKEY|DATABASEURL|IDCARD|PHO
 const BOUNDARY_GAP = /[\n\u0001\u0002]/;
 const SEPARATOR = /^(?:\|\|?|&&?|;;?|\()$/;
 const TOKEN = /[^\s\u0005\u0006\u0007]+/g;
+const REDIRECTION = /^(?:\d*[<>]|&>)/;
+/** Cheap pre-filter: without any tool word the text is not even tokenized (plain prose is the common case). */
+const TOOL_WORD = /\b(?:htpasswd|openssl|docker|podman|nerdctl|buildah|skopeo|az|crane|oras|helm|zip|unzip|zipcloak|zipsplit|redis-cli|vault|mongosh|mongo|sqlcmd|ldap[a-z]+|smbclient|mysql[a-z]*|mariadb(?:-dump)?|psql|7z[a-z]?|unrar|rar|aws_secret_access_key|aws_session_token)/i;
 
 interface Token { text: string; start: number; end: number; boundaryBefore: boolean }
 interface Edit { start: number; end: number }
 
 function basename(token: string): string {
   // JSON and shell glue punctuation to the command word: `{"cmd":"docker`, `$(openssl`, `FOO=docker`.
-  const unquoted = token.replace(/^.*["'`({=,:]/, '').replace(/["'`)}]+$/g, '');
+  // Trailing quotes/brackets first (`"docker"`), then everything up to the last glue character before the name.
+  const unquoted = token.replace(/["'`)}]+$/g, '').replace(/^.*["'`({=,:]/, '');
   return (unquoted.split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.(?:exe|cmd|bat|sh)$/, '');
 }
 
@@ -53,7 +57,7 @@ const LDAP_TOOLS = new Set(['ldapsearch', 'ldapmodify', 'ldapadd', 'ldapdelete',
 const ZIP_TOOLS = new Set(['zip', 'unzip', 'zipcloak', 'zipsplit']);
 
 export function maskToolArguments(text: string, replacement: string): ToolRuleResult {
-  if (text.length === 0) return { text, findings: 0 };
+  if (text.length === 0 || !TOOL_WORD.test(text)) return { text, findings: 0 };
   const tokens = tokenize(text);
   const edits: Edit[] = [];
   const mask = (token: Token, from = 0) => {
@@ -63,6 +67,7 @@ export function maskToolArguments(text: string, replacement: string): ToolRuleRe
   };
 
   for (let i = 0; i < tokens.length; i += 1) {
+    if (!/[A-Za-z]/.test(tokens[i]!.text)) continue; // names have letters: skip numbers and punctuation cheaply
     const name = basename(tokens[i]!.text);
     if (name.length === 0) continue;
     const isTool = name === 'htpasswd' || name === 'openssl' || REGISTRY_TOOLS.has(name) || ZIP_TOOLS.has(name) || name === 'redis-cli' || name === 'vault'
@@ -118,7 +123,13 @@ export function maskToolArguments(text: string, replacement: string): ToolRuleRe
       for (let k = 0; k < args.length; k += 1) {
         const token = at(k)!;
         if ((token.text === '-a' || token.text === '--pass') && at(k + 1)) mask(at(k + 1)!);
-        else if (token.text.toLowerCase() === 'auth' && at(k + 1)) { mask(at(k + 2) ?? at(k + 1)!); break; } // AUTH pass | AUTH user pass
+        else if (token.text.toLowerCase() === 'auth' && at(k + 1)) {
+          // AUTH pass | AUTH user pass: the first argument is always secret; a second one too unless it is a redirection or a flag.
+          mask(at(k + 1)!);
+          const second = at(k + 2);
+          if (second && !isFlag(second.text) && !REDIRECTION.test(second.text)) mask(second);
+          break;
+        }
       }
     } else if (name === 'vault') {
       if (at(0)?.text === 'login') {

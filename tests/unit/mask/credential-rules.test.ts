@@ -306,6 +306,14 @@ const C12_POSITIVE: Array<[string, string, string[]]> = [
   ['absolute path to the tool', `/usr/local/bin/docker login -p ${S}`, [S]],
   ['windows exe', `C:\\Tools\\openssl.exe enc -k ${S}`, [S]],
   ['mixed case OpenSSL', `OpenSSL rsa -passin pass:${S}`, [S]],
+  ['quoted tool name', `"docker" login -u bob -p ${S}`, [S]],
+  ['single-quoted tool name', `'docker' login -p ${S}`, [S]],
+  ['quoted windows path with spaces', `"C:\\Program Files\\Docker\\docker.exe" login -u bob -p ${S}`, [S]],
+  ['quoted openssl path', `"/opt/openssl 3/bin/openssl" enc -k ${S}`, [S]],
+  ['redis AUTH followed by a redirect', `redis-cli AUTH ${S} 2>&1`, [S]],
+  ['redis AUTH followed by a file redirect', `redis-cli AUTH ${S} > out.txt`, [S]],
+  ['redis AUTH user pass then a redirect', `redis-cli AUTH default ${S} 2>/dev/null`, [S]],
+  ['redis AUTH then a command word', `redis-cli AUTH ${S} ping`, [S]],
   ['two commands: the second one leaks', `echo hi; redis-cli -a ${S} ping`, [S]],
   ['after &&', `cd /tmp && docker login -p ${S}`, [S]],
 ];
@@ -328,6 +336,9 @@ const C12_NEGATIVE: Array<[string, string]> = [
   ['unrelated tool with -P', 'grep -P "^a+" file && ps -P'],
   ['unrelated -k', 'curl -k https://localhost:8443'],
   ['dockerfile word', 'edit the Dockerfile to run docker build -t app .'],
+  ['redis AUTH alone', 'redis-cli AUTH'],
+  ['quoted benign tool use', '"docker" ps -a'],
+  ['quoted windows path benign', '"C:\\Program Files\\Docker\\docker.exe" ps'],
   ['long benign line', `${'word '.repeat(60_000)}docker ps`],
   ['long line with a tool word and no secret', `${'x'.repeat(30_000)} docker login --help`],
 ];
@@ -345,6 +356,12 @@ describe('C12: continuation lines, long lines, special characters in passwords, 
     expect(mask(`docker login -u bob \\\n  -p ${S} \\\n  registry.example.com`)).toBe('docker login -u bob \\\n  -p [APIKEY_MASKED] \\\n  registry.example.com');
   });
 
+  it('redirections and flags after the password stay readable', () => {
+    expect(mask(`redis-cli AUTH ${S} 2>&1`)).toBe('redis-cli AUTH [APIKEY_MASKED] 2>&1');
+    expect(mask(`redis-cli AUTH ${S} > out.txt`)).toBe('redis-cli AUTH [APIKEY_MASKED] > out.txt');
+    expect(mask(`"docker" login -u bob -p ${S} registry`)).toBe('"docker" login -u bob -p [APIKEY_MASKED] registry');
+  });
+
   it('is idempotent and linear on hostile input of 1 MB', () => {
     for (const [, input] of C12_POSITIVE) expect(mask(mask(input)), input.slice(0, 60)).toBe(mask(input));
     const started = Date.now();
@@ -356,7 +373,7 @@ describe('C12: continuation lines, long lines, special characters in passwords, 
   });
 
   it('the tables are large enough', () => {
-    expect(C12_POSITIVE.length).toBeGreaterThanOrEqual(30);
+    expect(C12_POSITIVE.length).toBeGreaterThanOrEqual(38);
     expect(C12_NEGATIVE.length).toBeGreaterThanOrEqual(18);
   });
 });
