@@ -9,7 +9,7 @@
  * Masking never changes text that has no finding: normalization (NFKC, zero-width removal, %XX decoding) is only
  * used to SEE hidden secrets; when something is found the normalized, masked text is returned.
  */
-import { maskToolArguments } from './tool-argument-rules.js';
+import { maskToolArguments, TOOL_PREFIXES } from './tool-argument-rules.js';
 
 export interface ScanResult { text: string; findings: number }
 
@@ -107,7 +107,40 @@ function restoreEscapes(text: string): string {
   return text.replace(/\u0006/g, '\\\r\n').replace(/\u0005/g, '\\\n').replace(/\u0007/g, '\\\\\\n').replace(/\u0004"/g, '\\"').replace(/\u0001/g, '\\n').replace(/\u0002/g, '\\r').replace(/\u0003/g, '\\t').replace(/\u0004/g, '\\"');
 }
 
+// Text that can hide nothing is not scanned at all (most captured text is ordinary prose or code):
+// ASCII without percent-escapes cannot be re-read after normalization, and without any credential-ish word,
+// provider prefix, URL or tool name none of the rules below can match. A superset test: false positives only cost time.
+const NEEDS_NORMALIZATION = /[^\x00-\x7f]|%[0-9a-f]{2}/i;
+const TRIGGER_WORDS: readonly string[] = ['pass', 'pwd', 'secret', 'token', 'key', 'cred', 'sig', 'auth', 'bearer', 'basic', 'cookie', '://', 'eyj', 'sk-', 'sk_', 'rk_',
+  'ntcp_', 'npm_', 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'glpat-', 'aiza', 'ya29.', 'xox', 'akia', 'asia', 'sg.', 'hf_', '-----begin', ...TOOL_PREFIXES];
+
+/** Prefix tree of the words as one regular expression: far cheaper per character than a flat alternation. */
+function wordTrie(words: readonly string[]): string {
+  interface Node { end?: true; next: Map<string, Node> }
+  const root: Node = { next: new Map() };
+  for (const word of words) {
+    let node = root;
+    for (const char of word) { if (!node.next.has(char)) node.next.set(char, { next: new Map() }); node = node.next.get(char)!; }
+    node.end = true;
+  }
+  const escape = (c: string) => c.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+  const emit = (node: Node): string => {
+    const parts = [...node.next].map(([char, child]) => escape(char) + emit(child));
+    if (parts.length === 0) return '';
+    return `(?:${parts.join('|')})${node.end ? '?' : ''}`;
+  };
+  return emit(root);
+}
+// Twilio account/API sids are bare "AC"/"SK" + 32 hex, with no word around them.
+const TRIGGER = new RegExp(`${wordTrie(TRIGGER_WORDS)}|(?:ac|sk)[0-9a-f]{32}`);
+
+/** True when the text might contain a credential (a superset test: false positives only cost time). */
+export function mightHoldCredential(text: string): boolean {
+  return NEEDS_NORMALIZATION.test(text) || TRIGGER.test(text.toLowerCase());
+}
+
 function scanText(text: string): ScanResult {
+  if (!mightHoldCredential(text)) return { text, findings: 0 };
   const normalized = normalizeForScan(text);
   const view = escapeView(normalized);
   const result = scan(view);

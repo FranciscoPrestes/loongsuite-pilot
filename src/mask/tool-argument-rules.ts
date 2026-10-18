@@ -17,7 +17,11 @@ const SEPARATOR = /^(?:\|\|?|&&?|;;?|\()$/;
 const TOKEN = /[^\s\u0005\u0006\u0007]+/g;
 const REDIRECTION = /^(?:\d*[<>]|&>)/;
 /** Cheap pre-filter: without any tool word the text is not even tokenized (plain prose is the common case). */
-const TOOL_WORD = /\b(?:htpasswd|openssl|docker|podman|nerdctl|buildah|skopeo|az|crane|oras|helm|zip|unzip|zipcloak|zipsplit|redis-cli|vault|mongosh|mongo|sqlcmd|ldap[a-z]+|smbclient|mysql[a-z]*|mariadb(?:-dump)?|psql|7z[a-z]?|unrar|rar|aws_secret_access_key|aws_session_token)/i;
+/** Source of the tool-word pattern. */
+const TOOL_WORD_SOURCE = String.raw`\b(?:htpasswd|openssl|docker|podman|nerdctl|buildah|skopeo|az|crane|oras|helm|zip|unzip|zipcloak|zipsplit|redis-cli|vault|mongosh|mongo|sqlcmd|ldap[a-z]+|smbclient|mysql[a-z]*|mariadb(?:-dump)?|psql|7z[a-z]?|unrar|rar|aws_secret_access_key|aws_session_token)`;
+const TOOL_WORD = new RegExp(TOOL_WORD_SOURCE, 'i');
+/** Lower-case prefixes of every tool name above, for the credential scanner's pre-filter. */
+export const TOOL_PREFIXES: readonly string[] = ['htpasswd', 'openssl', 'docker', 'podman', 'nerdctl', 'buildah', 'skopeo', 'az', 'crane', 'oras', 'helm', 'zip', 'redis-cli', 'vault', 'mongo', 'sqlcmd', 'ldap', 'smbclient', 'mysql', 'mariadb', 'psql', '7z', 'unrar', 'rar', 'aws_secret_access_key', 'aws_session_token'];
 
 interface Token { text: string; start: number; end: number; boundaryBefore: boolean }
 interface Edit { start: number; end: number }
