@@ -1066,6 +1066,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     value: string;
     key: string;
   } {
+    // An analytics carrier is a self-contained record, never part of a turn: keyed by its session it would wait
+    // for a turn end that no carrier has (and with no idle timeout it would only leave at shutdown).
+    if (entry['ntconsult.analytics.kind'] !== undefined && typeof entry['event.id'] === 'string') {
+      return { source: 'ephemeral', value: entry['event.id'], key: `ephemeral:${entry['event.id']}` };
+    }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };

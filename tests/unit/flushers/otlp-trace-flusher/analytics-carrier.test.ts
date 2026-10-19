@@ -58,6 +58,19 @@ describe('analytics carrier through the REAL OTLP flusher and converter (interim
     expect(spans.map(span => span.name).sort()).toEqual(['enter_ai_application_system', 'invoke_agent ntconsult-collector']);
   });
 
+  it('delivers each carrier right away, with no turn end, idle timeout or flush (the production flusher has none for them)', async () => {
+    const flusher = newFlusher();
+    try {
+      const signalAt = new Date().toISOString();
+      for (const id of ['job-a', 'job-b']) {
+        const o = { ...observation(job({ occurredAt: signalAt })), observationId: id, occurredAt: signalAt };
+        await flusher.send(attachObservation(carrierFor(o, '/tmp/example', 'u', signalAt), o));
+        await vi.waitFor(() => expect(exported.filter(annotated).map(span => envelopeOf(span)?.observationId)).toContain(id), { timeout: 2000 });
+      }
+      expect(exported.filter(annotated)).toHaveLength(4); // 2 spans per observation, none held back for a turn that never ends
+    } finally { await flusher.shutdown(); }
+  });
+
   it('health: every hook_health observation arrives intact with its ACK', async () => {
     const spans = await viaFlusher(async send => {
       const publisher = createHealthPublisher({ deviceId: 'dev', userId: 'u', collectorVersion: '1.2.0', now: () => new Date(), policy: () => policy }, send);
