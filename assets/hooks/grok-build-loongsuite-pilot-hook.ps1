@@ -50,14 +50,26 @@ function Log-Error {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
         $file = Join-Path $dir "grok-build-error-$day.jsonl"
-        $record = @{
-            time = (Get-Date).ToUniversalTime().ToString("o")
-            "gen_ai.agent.type" = "grok-build"
-            stage = $Stage
-            "error.type" = "ps1_$Stage"
-            "error.message" = $Message
+        $lock = "$file.lock"
+        $stream = $null
+        try {
+            $stream = [System.IO.File]::Open($lock, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        } catch {
+            return
         }
-        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+        try {
+            $record = @{
+                time = (Get-Date).ToUniversalTime().ToString("o")
+                "gen_ai.agent.type" = "grok-build"
+                stage = $Stage
+                "error.type" = "ps1_$Stage"
+                "error.message" = $Message
+            }
+            Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+        } finally {
+            if ($stream) { $stream.Dispose() }
+            Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+        }
     } catch {}
 }
 
