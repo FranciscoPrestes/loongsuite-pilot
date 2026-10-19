@@ -14,7 +14,7 @@ export const jobSchema = z.object({
  workspacePath:z.string().min(1).max(4096).refine(v=>path.isAbsolute(v)&&!v.includes('\0')),
  occurredAt:z.string().datetime({offset:true}),deviceId:text,sessionId:text,nativeCallId:text.nullable(),processNamespace:text,
  harnessId:text,harnessVersion:text,collectorVersion:text,capabilitiesVersion:text,
- turnId:text.optional(),parentCallId:text.optional(),fingerprint:text.optional(),notBefore:count,attempt:count.max(5),leaseToken:text.optional(),
+ turnId:text.optional(),parentCallId:text.optional(),repoKey:text.optional(),fingerprint:text.optional(),notBefore:count,attempt:count.max(5),leaseToken:text.optional(),
 }).strict();
 export type LocalJob = z.infer<typeof jobSchema>;
 export const digest = (value:string):string => createHash('sha256').update(value).digest('hex');
@@ -53,6 +53,6 @@ export function jobFromEntry(entry:import('../types/index.js').AgentActivityEntr
    sourceRefs:[{sourceNamespace:inputId,nativeId,phase:'event',...(entry.trace_id?{traceId:entry.trace_id}:{}),...(entry.span_id?{spanId:entry.span_id}:{})}],
    workspacePath,occurredAt:new Date(Number(timestamp)).toISOString(),deviceId,sessionId,nativeCallId,processNamespace,
    harnessId:entry['gen_ai.agent.type'],harnessVersion:typeof entry['gen_ai.agent.version']==='string'?entry['gen_ai.agent.version']:'unknown',
-   collectorVersion,capabilitiesVersion:'1',...(entry['gen_ai.turn.id']?{turnId:entry['gen_ai.turn.id']}:{}),notBefore:0,attempt:0});
+   collectorVersion,capabilitiesVersion:'1',...(entry['gen_ai.turn.id']?{turnId:entry['gen_ai.turn.id']}:{}),...(typeof entry['git.repo']==='string'&&entry['git.repo']?{repoKey:entry['git.repo']}:{}),notBefore:0,attempt:0});
  }catch{return null;}
 }

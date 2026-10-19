@@ -319,6 +319,7 @@ export function buildRepoSnapshotObservation(
     generatedBy: 'collector' as const,
     kind: 'repo_snapshot' as const,
     payload,
+    ...(job.repoKey ? { repoKey: job.repoKey } : {}),
     ...(job.turnId ? { turnId: job.turnId } : {}),
     ...(job.parentCallId ? { parentCallId: job.parentCallId } : {}),
     ...(job.nativeCallId ? { toolCallId: job.nativeCallId } : {}),
