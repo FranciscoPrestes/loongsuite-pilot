@@ -80,6 +80,19 @@ describe('grok hook install paths', () => {
     expect(first.report.agents[0].status).toBe('ok');
     await fs.access(firstFile);
 
+    const unseen = await runHookInstall({
+      dataDir,
+      pilotDir,
+      builtinAgentsDir: builtinDir,
+      writeResult: false,
+      mode: 'status',
+      agentsFlag: 'grok-build',
+      homes: { 'grok-build': secondHome },
+      identity: { identity: 'e'.repeat(64), source: 'cgroup' },
+    });
+    expect(unseen.report.agents[0].status).not.toBe('ok');
+    expect(unseen.report.agents[0].reason).toBe('not-detected');
+
     const second = await install(secondHome);
     expect(second.report.agents[0].status).toBe('ok');
     const secondText = await fs.readFile(secondFile, 'utf8');

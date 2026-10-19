@@ -5,12 +5,16 @@ import * as path from 'node:path';
 import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
 import {
   HOOK_INSTALL_REASONS,
+  classifyDeployError,
+  definitionAtInstallHome,
   hintForReason,
   hookInstallResultPath,
+  markHookInstallAlarmSent,
   runHookInstall,
   selectAgents,
   toPublicReport,
 } from '../../../src/deployment/hook-install-service.js';
+import { resolveDeploymentScope } from '../../../src/deployment/deployment-scope.js';
 
 vi.mock('node:os', async importOriginal => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -105,6 +109,11 @@ describe('hook install service', () => {
       reason: 'unknown-id',
     });
     expect(unknown.report.agents[0].hint).toBeTruthy();
+    expect(unknown.report.scope).toBe('detected');
+    expect(resolveDeploymentScope(
+      { identity: 'c'.repeat(64), source: 'cgroup' },
+      unknown.report,
+    )).toBe('auto');
 
     await fs.rm(home, { recursive: true, force: true });
     const missing = await run({ agentsFlag: 'sample-agent' });
@@ -139,5 +148,121 @@ describe('hook install service', () => {
     expect(disk.alarmSent).toBe(true);
     expect(pub).not.toHaveProperty('alarmSent');
     expect(result.report.agents[0].status).toBe('ok');
+  });
+
+  it('does not treat a path containing json or an empty settings file as invalid JSON', async () => {
+    expect(classifyDeployError('cannot write /tmp/settings.json: EACCES')).toBe('deploy-failed');
+    expect(classifyDeployError(Object.assign(new Error('denied'), { code: 'EACCES' }))).toBe('deploy-failed');
+    expect(classifyDeployError(new SyntaxError('Unexpected token'))).toBe('invalid-settings');
+
+    await fs.writeFile(path.join(pilotDir, 'agents.d', 'sample-agent.json'), JSON.stringify({
+      id: 'sample-agent',
+      displayName: 'Sample',
+      deployMode: 'hook',
+      detection: { paths: [home], commands: [] },
+      hook: {
+        settingsPath: path.join(home, 'settings.json'),
+        settingsSyntax: 'jsonc',
+        events: ['Stop'],
+        hookCommand: '$PILOT_DATA/hooks/sample-agent-hook.sh',
+        format: 'nested',
+        matcher: '*',
+      },
+    }));
+    await fs.writeFile(path.join(home, 'settings.json'), '{ /* keep */ }\n');
+    const commented = await run({ agentsFlag: 'sample-agent' });
+    expect(commented.report.agents[0].reason).toBeNull();
+    await fs.writeFile(path.join(home, 'settings.json'), '   \n');
+    const empty = await run({ agentsFlag: 'sample-agent' });
+    expect(empty.report.agents[0].reason).toBeNull();
+    expect(empty.report.agents[0].status).toBe('ok');
+  });
+
+  it('keeps a Kiro hook under agents/ and writes CLI settings in the same home', async () => {
+    const kiroHome = path.join(tmp, 'custom-kiro');
+    const defaultHome = path.join(tmp, 'default-kiro');
+    await fs.writeFile(path.join(pilotDir, 'agents.d', 'kiro-cli.json'), JSON.stringify({
+      id: 'kiro-cli',
+      displayName: 'Kiro CLI',
+      deployMode: 'hook',
+      detection: { paths: [defaultHome], commands: [] },
+      hook: {
+        settingsPath: path.join(defaultHome, 'agents', 'pilot-kiro.json'),
+        events: ['stop'],
+        hookCommand: '$PILOT_DATA/hooks/kiro-cli-loongsuite-pilot-hook.sh',
+        format: 'flat',
+        matcher: '*',
+        eventSubcommand: 'as-is',
+        kiroAgent: { name: 'pilot-kiro', tools: ['read'] },
+      },
+    }));
+    const placed = definitionAtInstallHome({
+      id: 'kiro-cli',
+      displayName: 'Kiro CLI',
+      deployMode: 'hook',
+      detection: { paths: [defaultHome], commands: [] },
+      hook: {
+        settingsPath: path.join(defaultHome, 'agents', 'pilot-kiro.json'),
+        events: ['stop'],
+        hookCommand: 'hook.sh',
+        format: 'flat',
+      },
+    }, kiroHome);
+    expect(placed?.hook?.settingsPath).toBe(path.join(kiroHome, 'agents', 'pilot-kiro.json'));
+
+    const result = await run({
+      agentsFlag: 'kiro-cli',
+      homes: { 'kiro-cli': kiroHome },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(await fs.readFile(path.join(kiroHome, 'agents', 'pilot-kiro.json'), 'utf8')).toContain('stop');
+    expect(await fs.readFile(path.join(kiroHome, 'settings', 'cli.json'), 'utf8')).toContain('pilot-kiro');
+    await expect(fs.access(path.join(defaultHome, 'agents', 'pilot-kiro.json'))).rejects.toThrow();
+  });
+
+  it('writes a plugin config under --home instead of the default directory', async () => {
+    const custom = path.join(tmp, 'custom-opencode');
+    const defaults = path.join(tmp, 'default-opencode');
+    await fs.writeFile(path.join(pilotDir, 'agents.d', 'opencode.json'), JSON.stringify({
+      id: 'opencode',
+      displayName: 'OpenCode',
+      deployMode: 'plugin-inject',
+      detection: { paths: [defaults], commands: [] },
+      pluginInject: {
+        createIfMissing: true,
+        configPaths: [path.join(defaults, 'opencode.jsonc')],
+        pluginSpec: 'file:///tmp/pilot-plugin.mjs',
+        pluginId: 'loongsuite-pilot-opencode',
+      },
+    }));
+    const result = await run({
+      agentsFlag: 'opencode',
+      homes: { opencode: custom },
+    });
+    expect(result.exitCode).toBe(0);
+    await fs.access(path.join(custom, 'opencode.jsonc'));
+    await expect(fs.access(path.join(defaults, 'opencode.jsonc'))).rejects.toThrow();
+  });
+
+  it('reports a missing hook as not installed until a record exists', async () => {
+    const status = await run({ agentsFlag: 'sample-agent', mode: 'status', writeResult: false });
+    expect(status.report.agents[0].reason).toBe('not-detected');
+  });
+
+  it('does not mark a newer hook-install report as already alarmed', async () => {
+    const file = hookInstallResultPath(dataDir);
+    await fs.mkdir(dataDir, { recursive: true });
+    await fs.writeFile(file, JSON.stringify({
+      schema: 1,
+      identity: 'c'.repeat(64),
+      ts: 'new',
+      scope: 'named',
+      agents: [],
+      alarmSent: false,
+    }));
+    expect(await markHookInstallAlarmSent(file, 'old')).toBe('stale');
+    const disk = JSON.parse(await fs.readFile(file, 'utf8'));
+    expect(disk.ts).toBe('new');
+    expect(disk.alarmSent).toBe(false);
   });
 });

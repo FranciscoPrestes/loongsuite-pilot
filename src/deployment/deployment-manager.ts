@@ -242,6 +242,14 @@ export class DeploymentManager {
     return Boolean(this.state[agentId]);
   }
 
+  recordedSettingsPaths(agentId: string): string[] {
+    return mergeHookSettingsPaths(this.state[agentId]);
+  }
+
+  recordInstalledBy(agentId: string): 'hook-install' | 'daemon' | 'build' | undefined {
+    return this.state[agentId]?.installedBy;
+  }
+
   reloadState(): Promise<void> {
     return this.runExclusive(async () => {
       await this.loadState();
@@ -252,6 +260,20 @@ export class DeploymentManager {
    * Write one settings file and append it to the grok path list. An explicit
    * home must not be rewritten to the path stored by an earlier install.
    */
+  /** Deploy a definition already pointed at the requested home. */
+  deployPrepared(def: AgentDefinition, assumeDetected = false): Promise<DeployResult> {
+    return this.runExclusive(async () => {
+      await this.loadState();
+      const result = await this.deployAgent(def, {
+        preserveHookSettings: true,
+        preservePluginConfig: true,
+        assumeDetected,
+      });
+      await this.saveState();
+      return result;
+    });
+  }
+
   deployHookFile(def: AgentDefinition, settingsPath: string, assumeDetected = false): Promise<DeployResult> {
     return this.runExclusive(async () => {
       await this.loadState();
@@ -313,7 +335,7 @@ export class DeploymentManager {
    * (re)deployed. Used by the watchdog to detect specs overwritten by other
    * tools. Returns true when the strategy reports the integration is absent.
    */
-  needsRedeploy(def: AgentDefinition): Promise<boolean> {
+  needsRedeploy(def: AgentDefinition, opts?: { settingsPath?: string }): Promise<boolean> {
     return this.runExclusive(async () => {
       await this.loadState();
       const defTarget = applyPersistedDeployTargets(def, this.state[def.id]);
@@ -322,6 +344,10 @@ export class DeploymentManager {
         return target ? this.dshYamlPatchStrategy.needsDeployAt(defTarget, target) : true;
       }
       if (def.id === 'grok-build') {
+        if (opts?.settingsPath) {
+          const targeted = definitionAtHookSettings(def, opts.settingsPath);
+          return this.hookStrategy.needsDeploy(targeted, this.state[def.id]);
+        }
         const paths = mergeHookSettingsPaths(this.state[def.id]);
         if (paths.length > 0) {
           for (const settingsPath of paths) {
@@ -349,7 +375,7 @@ export class DeploymentManager {
 
   private async deployAgent(
     def: AgentDefinition,
-    opts?: { preserveHookSettings?: boolean; assumeDetected?: boolean },
+    opts?: { preserveHookSettings?: boolean; preservePluginConfig?: boolean; assumeDetected?: boolean },
   ): Promise<DeployResult> {
     if (def.id === 'grok-build' && !opts?.preserveHookSettings) {
       const paths = mergeHookSettingsPaths(this.state[def.id]);
@@ -368,6 +394,7 @@ export class DeploymentManager {
     const record = this.state[def.id];
     def = applyPersistedDeployTargets(def, record, {
       preserveHookSettings: opts?.preserveHookSettings,
+      preservePluginConfig: opts?.preservePluginConfig,
     });
     const strategy = this.getStrategy(def);
     const dshTarget = def.deployMode === 'dsh-yaml-patch'

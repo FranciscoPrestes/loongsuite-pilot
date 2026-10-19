@@ -15,7 +15,7 @@ import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/deployment-scope.js';
 import { hookInstallAlarmKey, shouldRelayHookInstallAlarm } from '../deployment/hook-install-alarm.js';
-import { hookInstallResultPath, hookInstallSignalPath, type HookInstallReport } from '../deployment/hook-install-service.js';
+import { hookInstallResultPath, hookInstallSignalPath, markHookInstallAlarmSent, type HookInstallReport } from '../deployment/hook-install-service.js';
 import { readContainerIdentity } from '../utils/container-identity.js';
 import {
   areGrokBuildHookAssetsHealthy,
@@ -171,6 +171,8 @@ export class Orchestrator extends EventEmitter {
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private deploymentScope: DeploymentScopeMode = 'auto';
+  /** Agents a named install actually wrote. Raced deployAll records are not in this set. */
+  private recordedAgentIds = new Set<string>();
   private hookInstallSignalTimer: ReturnType<typeof setInterval> | null = null;
   private hookInstallSignalMtime = 0;
   private readonly relayedHookInstallAlarms = new Set<string>();
@@ -330,6 +332,7 @@ export class Orchestrator extends EventEmitter {
     });
     await this.deploymentManager.loadDefinitions();
     await this.refreshDeploymentScope();
+    await this.reconcileRecordedAgents();
     if (this.deploymentScope === 'auto') {
       await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
     } else {
@@ -614,31 +617,58 @@ export class Orchestrator extends EventEmitter {
   }
 
   private scopeAllows(agentId: string): boolean {
-    return this.deploymentScope === 'auto' || this.deploymentManager.hasRecord(agentId);
+    if (this.deploymentScope !== 'recorded') return true;
+    return this.recordedAgentIds.has(agentId);
   }
 
   private async refreshDeploymentScope(): Promise<void> {
     const result = await readJsonFile<HookInstallReport>(hookInstallResultPath(this.dataDir));
     this.deploymentScope = resolveDeploymentScope(readContainerIdentity(), result);
+    this.recordedAgentIds = this.deploymentScope === 'recorded'
+      ? this.allowListForRecorded(result)
+      : new Set();
     await this.relayHookInstallAlarm(result);
+  }
+
+  /** Named successes, plus image-build records. Daemon records from a raced deployAll stay out. */
+  private allowListForRecorded(result: HookInstallReport | null): Set<string> {
+    const allowed = new Set<string>();
+    for (const agent of result?.agents ?? []) {
+      if (agent.status === 'ok' || agent.status === 'up-to-date') allowed.add(agent.id);
+    }
+    for (const def of this.deploymentManager.getDefinitions()) {
+      if (this.deploymentManager.recordInstalledBy(def.id) === 'build') allowed.add(def.id);
+    }
+    return allowed;
   }
 
   private async relayHookInstallAlarm(result: HookInstallReport | null): Promise<void> {
     if (!shouldRelayHookInstallAlarm(result, this.relayedHookInstallAlarms) || !result) return;
-    const key = hookInstallAlarmKey(result);
-    this.relayedHookInstallAlarms.add(key);
+    const marked = await markHookInstallAlarmSent(hookInstallResultPath(this.dataDir), result.ts);
+    if (marked === 'stale') return;
+    this.relayedHookInstallAlarms.add(hookInstallAlarmKey(result));
+    if (marked !== 'marked') return;
     const failed = result.agents.filter(agent => agent.status === 'failed').map(agent => agent.id).join(',');
     this.alarmManager.record(
       'HOOK_INSTALL_ALARM',
       '2',
       `hook install failed identity=${result.identity} ts=${result.ts} agents=${failed}`,
     );
-    result.alarmSent = true;
-    try {
-      await writeJsonFile(hookInstallResultPath(this.dataDir), result);
-    } catch (err) {
-      logger.warn('failed to mark hook install alarm sent', { error: String(err) });
+  }
+
+  /** Drop agents a raced deployAll wrote, and stop inputs outside the named set. */
+  private async reconcileRecordedAgents(): Promise<void> {
+    if (this.deploymentScope !== 'recorded') return;
+    for (const def of this.deploymentManager.getDefinitions()) {
+      if (!this.deploymentManager.hasRecord(def.id)) continue;
+      if (this.recordedAgentIds.has(def.id)) continue;
+      try {
+        await this.deploymentManager.undeployAgent(def);
+      } catch (err) {
+        logger.warn('failed to remove agent outside recorded scope', { agentId: def.id, error: String(err) });
+      }
     }
+    await this.agentDiscoveryService?.refresh('recorded-scope');
   }
 
   private startHookInstallSignalWatch(): void {
@@ -662,10 +692,11 @@ export class Orchestrator extends EventEmitter {
       return;
     }
     if (mtime === this.hookInstallSignalMtime) return;
-    this.hookInstallSignalMtime = mtime;
     try {
       await this.deploymentManager.reloadState();
       await this.refreshDeploymentScope();
+      await this.reconcileRecordedAgents();
+      this.hookInstallSignalMtime = mtime;
     } catch (err) {
       logger.warn('hook install signal handling failed', { error: String(err) });
     }
@@ -1786,7 +1817,7 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    return isAgentGatedEnabledIn(this.config, agentId);
+    return this.scopeAllows(agentId) && isAgentGatedEnabledIn(this.config, agentId);
   }
 
   /**

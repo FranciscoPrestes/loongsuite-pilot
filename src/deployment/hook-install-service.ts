@@ -1,11 +1,12 @@
-import { mkdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, stat, utimes, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition, DeployResult } from '../types/deployment.js';
 import { readContainerIdentity, type ContainerIdentity } from '../utils/container-identity.js';
-import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
+import { readJsonFile, resolveHome, writeJsonFile } from '../utils/fs-utils.js';
+import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
+import { withDeployedStateLock } from './deployed-state-merge.js';
 import { createLogger } from '../utils/logger.js';
 import { DeploymentManager } from './deployment-manager.js';
-import { definitionAtHookSettings } from './persisted-deploy-paths.js';
 import { postAlarm } from '../internal/post-alarm.js';
 
 const logger = createLogger('HookInstall');
@@ -104,10 +105,50 @@ export function hintForReason(reason: HookInstallReason, agentId?: string): stri
   }
 }
 
-export function settingsPathForHome(def: AgentDefinition, home: string): string {
-  if (def.id === 'grok-build') return path.join(home, 'hooks', 'loongsuite-pilot.json');
-  const base = def.hook?.settingsPath ? path.basename(def.hook.settingsPath) : 'settings.json';
-  return path.join(home, base);
+/** Path of a declared file relative to a detection home, or null when it sits outside. */
+export function relativeToDetectionHome(declaredPath: string, detectionPaths: string[]): string | null {
+  const declared = path.resolve(resolveHome(declaredPath));
+  for (const detectionPath of detectionPaths) {
+    if (!detectionPath.trim()) continue;
+    const root = path.resolve(resolveHome(detectionPath));
+    const rel = path.relative(root, declared);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+    return rel;
+  }
+  return null;
+}
+
+/**
+ * Rewrite the file this install writes so it stays under `home` with the same
+ * relative path the definition uses under its detection home. Returns null when
+ * that relative path cannot be derived; callers must fail instead of writing
+ * the default location.
+ */
+export function definitionAtInstallHome(def: AgentDefinition, home: string): AgentDefinition | null {
+  const root = path.resolve(home);
+  if (def.hook?.settingsPath) {
+    const rel = relativeToDetectionHome(def.hook.settingsPath, def.detection.paths);
+    if (!rel) return null;
+    return {
+      ...def,
+      detection: { ...def.detection, paths: [root, ...def.detection.paths] },
+      hook: { ...def.hook, settingsPath: path.join(root, rel) },
+    };
+  }
+  if (def.pluginInject?.configPaths?.length) {
+    const rewritten: string[] = [];
+    for (const configPath of def.pluginInject.configPaths) {
+      const rel = relativeToDetectionHome(configPath, def.detection.paths);
+      if (!rel) return null;
+      rewritten.push(path.join(root, rel));
+    }
+    return {
+      ...def,
+      detection: { ...def.detection, paths: [root, ...def.detection.paths] },
+      pluginInject: { ...def.pluginInject, configPaths: rewritten },
+    };
+  }
+  return null;
 }
 
 export function hookInstallResultPath(dataDir: string): string {
@@ -184,33 +225,45 @@ function fromDeploy(def: AgentDefinition, result: DeployResult, settingsPath: st
   if (result.success && !result.skipped) {
     return { id: def.id, status: 'ok', reason: null, hint: null, settingsPath, deployMode: def.deployMode };
   }
-  return failed(def.id, reasonFromError(result.error), def.deployMode, settingsPath);
+  return failed(def.id, classifyDeployError(result.error), def.deployMode, settingsPath);
 }
 
-function reasonFromError(error: string | undefined): HookInstallReason {
-  const text = error ?? '';
-  if (text.includes('lock-timeout')) return 'lock-timeout';
-  if (/activation/i.test(text) && /pending/i.test(text)) return 'activation-pending';
-  if (/activation/i.test(text) && /fail/i.test(text)) return 'activation-failed';
-  if (/ENOENT|settings directory/i.test(text)) return 'settings-dir-missing';
-  if (/JSON|SyntaxError|invalid settings/i.test(text)) return 'invalid-settings';
+export function classifyDeployError(error: unknown): HookInstallReason {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  const text = error instanceof Error ? error.message : String(error ?? '');
+  if (code === 'lock-timeout' || text.includes('lock-timeout')) return 'lock-timeout';
+  if (code === 'EACCES' || code === 'EPERM' || code === 'ENOSPC') return 'deploy-failed';
+  if (code === 'ENOENT' || /\bENOENT\b/.test(text) || text.includes('settings directory')) return 'settings-dir-missing';
+  if (/\bactivation\b/i.test(text) && /\bpending\b/i.test(text)) return 'activation-pending';
+  if (/\bactivation\b/i.test(text) && /\bfail/i.test(text)) return 'activation-failed';
+  if (error instanceof SyntaxError || text.includes('SyntaxError') || /\binvalid JSONC?\b/i.test(text) || text.includes('invalid settings')) {
+    return 'invalid-settings';
+  }
   return 'deploy-failed';
 }
 
-async function jsonErrorLine(file: string): Promise<string | null> {
-  let raw: string;
-  try {
-    raw = await readFile(file, 'utf8');
-  } catch {
-    return null;
-  }
-  try {
-    JSON.parse(raw);
-    return null;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return `${file}: ${message}`;
-  }
+function settingsSyntax(def: AgentDefinition, file: string | null): JsonSyntax {
+  if (def.hook?.settingsSyntax) return def.hook.settingsSyntax;
+  if (file?.endsWith('.jsonc')) return 'jsonc';
+  return 'json';
+}
+
+/** Missing and empty files are installable. JSONC comments and a leading BOM are too. */
+async function settingsDocumentError(file: string, syntax: JsonSyntax): Promise<string | null> {
+  const document = await readJsonDocument(file, syntax);
+  if (document.status === 'missing' || document.status === 'empty' || document.status === 'ok') return null;
+  return `${file}: ${document.error.message}`;
+}
+
+export async function markHookInstallAlarmSent(file: string, expectedTs: string): Promise<'marked' | 'already' | 'stale'> {
+  return withDeployedStateLock(`${file}.lock`, async () => {
+    const current = await readJsonFile<HookInstallReport>(file);
+    if (!current || current.ts !== expectedTs) return 'stale';
+    if (current.alarmSent === true) return 'already';
+    current.alarmSent = true;
+    await writeJsonFile(file, current);
+    return 'marked';
+  });
 }
 
 async function defaultHomeOwner(home: string): Promise<number | null> {
@@ -249,7 +302,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       schema: 1,
       identity: identity.identity,
       ts,
-      scope: selection.kind === 'named' ? 'named' : 'detected',
+      scope: 'detected',
       agents: [failed('*', 'runtime-unprepared', null)],
     };
     return { exitCode: 1, report, warnings, wroteResult: false };
@@ -294,19 +347,26 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       continue;
     }
     const home = homes[def.id];
-    const targeted = home ? definitionAtHookSettings(def, settingsPathForHome(def, home)) : def;
-    const settingsPath = targeted.hook?.settingsPath ?? targeted.pluginInject?.configPaths?.[0] ?? null;
+    const targeted = home ? definitionAtInstallHome(def, home) : def;
+    if (home && !targeted) {
+      const unsupported = failed(def.id, 'deploy-failed', def.deployMode);
+      unsupported.hint = `--home cannot be applied to ${def.id}. The definition has no settings path under its detection home.`;
+      agents.push(unsupported);
+      continue;
+    }
+    const active = targeted ?? def;
+    const settingsPath = active.hook?.settingsPath ?? active.pluginInject?.configPaths?.[0] ?? null;
     if (home) {
       const owner = await homeOwner(home);
       if (euid === 0 && owner !== null && owner !== 0) {
-        agents.push(failed(def.id, 'uid-mismatch', def.deployMode, settingsPath));
+        agents.push(failed(def.id, 'uid-mismatch', active.deployMode, settingsPath));
         continue;
       }
     }
     if (settingsPath) {
-      const invalid = await jsonErrorLine(settingsPath);
+      const invalid = await settingsDocumentError(settingsPath, settingsSyntax(active, settingsPath));
       if (invalid) {
-        const result = failed(def.id, 'invalid-settings', def.deployMode, settingsPath);
+        const result = failed(def.id, 'invalid-settings', active.deployMode, settingsPath);
         result.hint = `${hintForReason('invalid-settings', def.id)} ${invalid}`;
         agents.push(result);
         continue;
@@ -315,30 +375,38 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
 
     try {
       if (statusOnly) {
-        const detected = home ? true : await manager.isAgentDetected(targeted);
+        const detected = home ? true : await manager.isAgentDetected(active);
         if (!detected) {
-          if (selection.kind === 'named') agents.push(failed(def.id, 'not-detected', def.deployMode, settingsPath));
+          if (selection.kind === 'named') agents.push(failed(def.id, 'not-detected', active.deployMode, settingsPath));
           continue;
         }
-        const needs = await manager.needsRedeploy(targeted);
-        agents.push(needs
-          ? failed(def.id, 'overwritten', def.deployMode, settingsPath)
-          : { id: def.id, status: 'ok', reason: null, hint: null, settingsPath, deployMode: def.deployMode });
+        const needs = await manager.needsRedeploy(
+          active,
+          home && settingsPath ? { settingsPath } : undefined,
+        );
+        if (!needs) {
+          agents.push({ id: def.id, status: 'ok', reason: null, hint: null, settingsPath, deployMode: active.deployMode });
+          continue;
+        }
+        const known = def.id === 'grok-build' && settingsPath
+          ? manager.recordedSettingsPaths(def.id).includes(path.resolve(settingsPath))
+          : manager.hasRecord(def.id);
+        agents.push(failed(def.id, known ? 'overwritten' : 'not-detected', active.deployMode, settingsPath));
         continue;
       }
 
       const result = home
-        ? await manager.deployHookFile(targeted, settingsPathForHome(def, home), true)
-        : await manager.deploySingle(targeted);
+        ? await manager.deployPrepared(active, true)
+        : await manager.deploySingle(active);
       if (selection.kind === 'detect' && result.skipped && result.reason === 'not-detected') continue;
       agents.push(fromDeploy(def, result, settingsPath));
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      agents.push(failed(def.id, reasonFromError(message), def.deployMode, settingsPath));
+      agents.push(failed(def.id, classifyDeployError(err), active.deployMode, settingsPath));
     }
   }
 
-  let scope: 'detected' | 'named' = selection.kind === 'named' ? 'named' : 'detected';
+  const installed = agents.some(agent => agent.status === 'ok' || agent.status === 'up-to-date');
+  let scope: 'detected' | 'named' = selection.kind === 'named' && installed ? 'named' : 'detected';
   if (scope === 'detected' && opts.writeResult) {
     const existing = await readJsonFile<HookInstallReport>(hookInstallResultPath(opts.dataDir));
     if (existing?.scope === 'named' && existing.identity === identity.identity) scope = 'named';

@@ -16,37 +16,28 @@
 
 ## 场景一：镜像集成
 
-**1-1 默认。** 构建期注入加上入口注入，和现有 Dockerfile 写法相同：
+本仓库的公开安装器不接受 `--mode container`，安装包里也没有 `entrypoint.sh`。构建期门禁用 `loongsuite-pilot deploy --require`。容器启动后、Agent 进程起来之前，由业务命令调用 `hook install`。会在入口里自动执行 `hook install` 的 `entrypoint.sh` 不在这个仓库。
+
+**1-1 配置已经在镜像里。** 先安装 Agent，再安装 Pilot，最后在启动命令里注入：
 
 ```dockerfile
 FROM node:22-bookworm-slim
-ARG PILOT_INSTALLER_URL=https://example.internal/loongsuite-pilot/installer.sh
+ARG PILOT_INSTALLER_URL=https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
-# 先装 agent：构建期注入靠磁盘探测
 RUN npm install -g @anthropic-ai/claude-code
 RUN useradd --create-home --shell /bin/bash agent
 USER agent
 ENV HOME=/home/agent PATH=/home/agent/.local/bin:$PATH
-# 构建期注入：deploy --require 构建门禁
-RUN curl -fsSL "$PILOT_INSTALLER_URL" | bash -s -- install --mode container --agents claude-code
-# 入口在启动 CMD 之前全量探测并注入
-ENTRYPOINT ["/home/agent/.loongsuite-pilot/entrypoint.sh"]
-CMD ["claude", "-p", "hello"]
+RUN curl -fsSL "$PILOT_INSTALLER_URL" | bash -s -- install --agents claude-code
+CMD ["sh", "-c", "loongsuite-pilot hook install --agents claude-code || true; exec claude -p hello"]
 ```
 
-```sh
-docker run --rm --init --stop-timeout 30 \
-  -e LOONGSUITE_PILOT_CMS_LICENSE_KEY="$CMS_LICENSE_KEY" \
-  -e LOONGSUITE_PILOT_CMS_WORKSPACE="$CMS_WORKSPACE" \
-  my-agent:instrumented
-# 日志中应出现一行：[entrypoint] hook install: claude-code=ok
-```
+`install` 接受 `--agents`。`hook install` 打印的是 `claude-code=ok` 这种结果行。`|| true` 表示注入失败时业务进程仍然启动。
 
-**1-2 渲染后再注入。** `|| true` 保证注入失败时应用仍会启动。`LOONGSUITE_PILOT_AGENTS=none` 省掉入口那一次全量探测。命令行上的 `--agents` 优先，不受这个环境变量影响。
+**1-2 渲染后再注入。** 渲染完成后再执行 `hook install`。命令行上的 `--agents` 优先于 `LOONGSUITE_PILOT_AGENTS`。
 
 ```dockerfile
-ENV LOONGSUITE_PILOT_AGENTS=none
 CMD ["sh", "-c", "/app/render-settings.sh && { loongsuite-pilot hook install --agents claude-code || true; } && exec claude -p \"$TASK\""]
 ```
 
@@ -137,7 +128,7 @@ spec:
 
 - 用 Agent 自己的 uid 执行。`HOME` 和该 Agent 的 home 变量与 Agent 一致。否则原因码是 `uid-mismatch` 或 `not-detected`。
 - 在配置写完之后、Agent 读取配置之前执行。写晚了，`hook status` 报 `overwritten`。
-- `start.sh` 需要 bash。`entrypoint.sh` 和 `bin/loongsuite-pilot` 只需要 POSIX sh。
+- `start.sh` 需要 bash。`bin/loongsuite-pilot` 只需要 POSIX sh。本仓库没有 `entrypoint.sh`。
 - 不要用 `postStart`。它和入口并发，返回非零还会导致容器被杀。
 
 ## 排障

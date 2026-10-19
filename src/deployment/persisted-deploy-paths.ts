@@ -82,7 +82,7 @@ export function definitionAtHookSettings(def: AgentDefinition, settingsPath: str
 export function applyPersistedDeployTargets(
   def: AgentDefinition,
   record?: DeployedAgentRecord,
-  opts?: { preserveHookSettings?: boolean },
+  opts?: { preserveHookSettings?: boolean; preservePluginConfig?: boolean },
 ): AgentDefinition {
   if (!record) return def;
 
@@ -100,7 +100,7 @@ export function applyPersistedDeployTargets(
   }
 
   const pluginInjectConfigPath = absolutePath(record.pluginInjectConfigPath);
-  if (pluginInjectConfigPath && def.pluginInject) {
+  if (!opts?.preservePluginConfig && pluginInjectConfigPath && def.pluginInject) {
     const rest = (def.pluginInject.configPaths ?? [])
       .filter(candidate => path.resolve(candidate) !== pluginInjectConfigPath);
     next = {
