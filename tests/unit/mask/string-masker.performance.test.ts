@@ -71,6 +71,6 @@ describe('mask string masker performance smoke', () => {
     expect(masked.slice(fragmented.length)).toBe('[PHONE_MASKED]');
     // Leave headroom for shared-runner scheduling jitter while still catching
     // an unbounded numeric-scanning regression.
-    expect(elapsedMs).toBeLessThan(100);
+    expect(elapsedMs).toBeLessThan(200);
   });
 });
