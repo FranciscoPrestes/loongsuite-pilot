@@ -52,12 +52,10 @@ function Log-Error {
         $file = Join-Path $dir "grok-build-error-$day.jsonl"
         $lock = "$file.lock"
         $locked = $false
-        # FullLanguage can take an exclusive lock file. Constrained Language
-        # rejects [System.IO.File]::Open, so a failure here falls through to
-        # Add-Content instead of dropping the error line.
+        # New-Item fails when the lock file already exists. Constrained Language
+        # cannot call [System.IO.File]::Open, so a failed claim still appends.
         try {
-            $stream = [System.IO.File]::Open($lock, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            $stream.Dispose()
+            New-Item -Path $lock -ItemType File -ErrorAction Stop | Out-Null
             $locked = $true
         } catch {
             $locked = $false
