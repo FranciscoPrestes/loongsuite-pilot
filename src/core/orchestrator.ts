@@ -13,6 +13,10 @@ import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorService, type InterceptorService } from '../interceptor/daemon/lifecycle.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
+import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/deployment-scope.js';
+import { hookInstallAlarmKey, shouldRelayHookInstallAlarm } from '../deployment/hook-install-alarm.js';
+import { hookInstallResultPath, hookInstallSignalPath, markHookInstallAlarmSent, type HookInstallReport } from '../deployment/hook-install-service.js';
+import { readContainerIdentity } from '../utils/container-identity.js';
 import {
   areGrokBuildHookAssetsHealthy,
   restoreGrokBuildHookAssets,
@@ -166,6 +170,12 @@ export class Orchestrator extends EventEmitter {
   private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
+  private deploymentScope: DeploymentScopeMode = 'auto';
+  /** Agents a named install actually wrote. Raced deployAll records are not in this set. */
+  private recordedAgentIds = new Set<string>();
+  private hookInstallSignalTimer: ReturnType<typeof setInterval> | null = null;
+  private hookInstallSignalMtime = 0;
+  private readonly relayedHookInstallAlarms = new Set<string>();
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
@@ -318,15 +328,23 @@ export class Orchestrator extends EventEmitter {
     this.deploymentManager = new DeploymentManager({
       dataDir: this.dataDir,
       pilotDir,
+      installedBy: 'daemon',
     });
-    await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
+    await this.deploymentManager.loadDefinitions();
+    await this.refreshDeploymentScope();
+    await this.reconcileRecordedAgents();
+    if (this.deploymentScope === 'auto') {
+      await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
+    } else {
+      logger.info('recorded deployment scope; skipping deployAll');
+    }
 
     // Build the watchdog immediately after deployment so its constructor records
     // the exact post-deploy Codex config.toml fingerprint. The watchdog itself is
     // started later, after discovery and retention services are ready.
     const hookWatchdogTargets = this.buildHookWatchdogTargets();
     const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
       ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
@@ -372,6 +390,7 @@ export class Orchestrator extends EventEmitter {
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
     this.hookWatchdog.start();
+    this.startHookInstallSignalWatch();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
     if (this.config.autoUpdate?.enabled) {
@@ -543,6 +562,7 @@ export class Orchestrator extends EventEmitter {
     this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
+    this.stopHookInstallSignalWatch();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
@@ -596,6 +616,98 @@ export class Orchestrator extends EventEmitter {
     this.inputManager?.setUserId(userId);
   }
 
+  private scopeAllows(agentId: string): boolean {
+    if (this.deploymentScope !== 'recorded') return true;
+    return this.recordedAgentIds.has(agentId);
+  }
+
+  private async refreshDeploymentScope(): Promise<void> {
+    const result = await readJsonFile<HookInstallReport>(hookInstallResultPath(this.dataDir));
+    this.deploymentScope = resolveDeploymentScope(readContainerIdentity(), result);
+    this.recordedAgentIds = this.deploymentScope === 'recorded'
+      ? this.allowListForRecorded(result)
+      : new Set();
+    await this.relayHookInstallAlarm(result);
+  }
+
+  /** Named successes, plus image-build records. Daemon records from a raced deployAll stay out. */
+  private allowListForRecorded(result: HookInstallReport | null): Set<string> {
+    const allowed = new Set<string>();
+    for (const agent of result?.agents ?? []) {
+      if (agent.status === 'ok' || agent.status === 'up-to-date') allowed.add(agent.id);
+    }
+    for (const def of this.deploymentManager.getDefinitions()) {
+      if (this.deploymentManager.recordInstalledBy(def.id) === 'build') allowed.add(def.id);
+    }
+    return allowed;
+  }
+
+  private async relayHookInstallAlarm(result: HookInstallReport | null): Promise<void> {
+    if (!shouldRelayHookInstallAlarm(result, this.relayedHookInstallAlarms) || !result) return;
+    const marked = await markHookInstallAlarmSent(hookInstallResultPath(this.dataDir), result.ts);
+    if (marked === 'stale') return;
+    this.relayedHookInstallAlarms.add(hookInstallAlarmKey(result));
+    if (marked !== 'marked') return;
+    const failed = result.agents.filter(agent => agent.status === 'failed').map(agent => agent.id).join(',');
+    this.alarmManager.record(
+      'HOOK_INSTALL_ALARM',
+      '2',
+      `hook install failed identity=${result.identity} ts=${result.ts} agents=${failed}`,
+    );
+  }
+
+  /**
+   * Remove daemon records that raced ahead of a named install, and agents this
+   * named result no longer counts as installed. A later install keeps earlier
+   * successes in the result file, so those ids stay in the allow list and are
+   * not uninstalled. Build records are in the allow list as well.
+   */
+  private async reconcileRecordedAgents(): Promise<void> {
+    if (this.deploymentScope !== 'recorded') return;
+    for (const def of this.deploymentManager.getDefinitions()) {
+      if (!this.deploymentManager.hasRecord(def.id)) continue;
+      if (this.recordedAgentIds.has(def.id)) continue;
+      if (this.deploymentManager.recordInstalledBy(def.id) === 'build') continue;
+      try {
+        await this.deploymentManager.undeployAgent(def);
+      } catch (err) {
+        logger.warn('failed to remove agent outside recorded scope', { agentId: def.id, error: String(err) });
+      }
+    }
+    await this.agentDiscoveryService?.refresh('recorded-scope');
+  }
+
+  private startHookInstallSignalWatch(): void {
+    const signal = hookInstallSignalPath(this.dataDir);
+    const tick = () => { void this.pollHookInstallSignal(signal); };
+    void this.pollHookInstallSignal(signal);
+    this.hookInstallSignalTimer = setInterval(tick, 1000);
+    this.hookInstallSignalTimer.unref?.();
+  }
+
+  private stopHookInstallSignalWatch(): void {
+    if (this.hookInstallSignalTimer) clearInterval(this.hookInstallSignalTimer);
+    this.hookInstallSignalTimer = null;
+  }
+
+  private async pollHookInstallSignal(signal: string): Promise<void> {
+    let mtime = 0;
+    try {
+      mtime = fsSync.statSync(signal).mtimeMs;
+    } catch {
+      return;
+    }
+    if (mtime === this.hookInstallSignalMtime) return;
+    try {
+      await this.deploymentManager.reloadState();
+      await this.refreshDeploymentScope();
+      await this.reconcileRecordedAgents();
+      this.hookInstallSignalMtime = mtime;
+    } catch (err) {
+      logger.warn('hook install signal handling failed', { error: String(err) });
+    }
+  }
+
   /**
    * Build detection entries for agent definitions that haven't been deployed yet.
    * When a new agent is discovered at runtime, triggers deploySingle().
@@ -615,9 +727,13 @@ export class Orchestrator extends EventEmitter {
         id: entryId,
         type: 'deploy-detection',
         watchPaths,
-        isAvailable: () => this.deploymentManager.isAgentDetected(def),
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        isAvailable: async () => {
+          if (this.deploymentScope === 'recorded') return false;
+          return this.deploymentManager.isAgentDetected(def);
+        },
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         start: async () => {
+          if (this.deploymentScope === 'recorded') return;
           logger.info('new agent discovered, deploying', { agentId: def.id });
           await this.deploymentManager.deploySingle(def);
         },
@@ -649,7 +765,7 @@ export class Orchestrator extends EventEmitter {
         // Runtime gate: a user who has turned this agent off (config.agents[id]
         // .enabled === false) must never have its hook re-injected. Evaluated on
         // each check so a config change takes effect without rebuilding targets.
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
         ...(def.id === 'codex' && def.hook.trustToml ? {
           changeWatchPath: resolveHome(def.hook.trustToml.configPath),
@@ -671,14 +787,14 @@ export class Orchestrator extends EventEmitter {
 
     return [{
       id: 'hook:grok-build',
-      enabled: () => this.isAgentGatedEnabled(def.id),
+      enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
       precondition: () => this.deploymentManager.isAgentDetected(def),
       check: async () =>
         !(await this.deploymentManager.needsRedeploy(def))
         && await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir),
       repair: async () => {
         await restoreGrokBuildHookAssets(pilotDir, this.dataDir);
-        const result = await this.deploymentManager.deploySingle(def);
+        const result = await this.deploymentManager.repairHookSettings(def);
         if (!result.success) {
           throw new Error(result.error ?? 'failed to restore Grok Build hook');
         }
@@ -717,7 +833,7 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `plugin-inject:${def.id}`,
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
@@ -762,7 +878,7 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `directory-plugin:${def.id}`,
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () =>
           (await directoryExists(def.directoryPlugin!.sourceDir))
           && (await detectAgent(def.detection)),
@@ -789,7 +905,7 @@ export class Orchestrator extends EventEmitter {
       const pluginPath = resolveHome(def.dshYamlPatch.pluginSource);
       targets.push({
         id: `dsh-yaml-patch:${def.id}`,
-        enabled: () => this.isAgentGatedEnabled(def.id),
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () =>
           (await fileExists(pluginPath))
           && (await this.deploymentManager.isAgentDetected(def)),
@@ -1707,7 +1823,7 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    return isAgentGatedEnabledIn(this.config, agentId);
+    return this.scopeAllows(agentId) && isAgentGatedEnabledIn(this.config, agentId);
   }
 
   /**
