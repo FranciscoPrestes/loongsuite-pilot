@@ -1130,6 +1130,7 @@ export class Orchestrator extends EventEmitter {
     const qoderWorkTraceInput = new QoderWorkTraceInput({
       stateStore: this.stateStore,
       logDir: path.join(this.dataDir, 'logs', 'qoder-work', 'history'),
+      pollIntervalMs: listenerCfg['qoder-work-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkTraceInput);
     const qoderWorkTraceEnabled = () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-trace']) &&
@@ -1155,7 +1156,7 @@ export class Orchestrator extends EventEmitter {
       );
 
     // --- QoderCN (SQLite token usage polling, fallback when trace is disabled) ---
-    const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore });
+    const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-cn-sqlite']?.pollInterval });
     this.inputManager.registerInput(qoderCnSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
@@ -1172,7 +1173,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- QoderCN (IDE snapshot — file history + ai_tracker) — disabled when qoder-cn-trace is enabled ---
-    const qoderCnInput = new QoderCnInput({ stateStore: this.stateStore });
+    const qoderCnInput = new QoderCnInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-cn']?.pollInterval });
     this.inputManager.registerInput(qoderCnInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnInput, {
@@ -1210,6 +1211,7 @@ export class Orchestrator extends EventEmitter {
     const qoderWorkInput = new QoderWorkInput({
       stateStore: this.stateStore,
       logDir: qoderWorkLogDir,
+      pollIntervalMs: listenerCfg['qoder-work']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkInput);
     entries.push(
@@ -1227,7 +1229,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (SDK Log tail) — disabled when CN trace is active ---
-    const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore });
+    const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-work-log']?.pollInterval });
     this.inputManager.registerInput(qoderWorkLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkLogInput, {
@@ -1244,7 +1246,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (SQLite agents.db) — disabled when CN trace is active ---
-    const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore });
+    const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qoder-work-sqlite']?.pollInterval });
     this.inputManager.registerInput(qoderWorkSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
@@ -1270,6 +1272,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
+      pollIntervalMs: listenerCfg['qoder-work-cn-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNTraceInput);
     const qoderWorkCNTraceEnabled = () =>
@@ -1292,6 +1295,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       logDir: qoderWorkCNLogDir,
+      pollIntervalMs: listenerCfg['qoder-work-cn-hook']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNHookInput);
     entries.push(
@@ -1313,6 +1317,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
+      pollIntervalMs: listenerCfg['qoder-work-cn-log']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNLogInput);
     entries.push(
@@ -1334,6 +1339,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
+      pollIntervalMs: listenerCfg['qoder-work-cn-sqlite']?.pollInterval,
     });
     this.inputManager.registerInput(qoderWorkCNSqliteInput);
     entries.push(
@@ -1356,6 +1362,7 @@ export class Orchestrator extends EventEmitter {
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
+      pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -1399,7 +1406,7 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore });
+    const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['qwen-work-cn-sqlite']?.pollInterval });
     this.inputManager.registerInput(qwenWorkCNSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qwenWorkCNSqliteInput, {
@@ -1424,6 +1431,7 @@ export class Orchestrator extends EventEmitter {
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,
+      pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
       multimodal: {
         enabled: qoderMultimodalEnabled,
         uploadMode: qoderAgentCfg.multimodal?.uploadMode ?? 'none',
@@ -1455,6 +1463,7 @@ export class Orchestrator extends EventEmitter {
     const cursorHookInput = new CursorHookInput({
       stateStore: this.stateStore,
       logDir: cursorHookLogDir,
+      pollIntervalMs: listenerCfg['cursor-hook']?.pollInterval,
     });
     this.inputManager.registerInput(cursorHookInput);
     entries.push(
@@ -1475,6 +1484,7 @@ export class Orchestrator extends EventEmitter {
     const claudeCodeLogInput = new ClaudeCodeLogInput({
       stateStore: this.stateStore,
       logDir: claudeCodeLogDir,
+      pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
     });
     this.inputManager.registerInput(claudeCodeLogInput);
     entries.push(
@@ -1495,6 +1505,7 @@ export class Orchestrator extends EventEmitter {
     const grokBuildLogInput = new GrokBuildLogInput({
       stateStore: this.stateStore,
       logDir: grokBuildLogDir,
+      pollIntervalMs: listenerCfg['grok-build-log']?.pollInterval,
     });
     this.inputManager.registerInput(grokBuildLogInput);
     entries.push(
@@ -1520,6 +1531,7 @@ export class Orchestrator extends EventEmitter {
     const kiroCliLogInput = new KiroCliLogInput({
       stateStore: this.stateStore,
       logDir: kiroCliLogDir,
+      pollIntervalMs: listenerCfg['kiro-cli-log']?.pollInterval,
     });
     this.inputManager.registerInput(kiroCliLogInput);
     entries.push(
@@ -1572,6 +1584,7 @@ export class Orchestrator extends EventEmitter {
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
       wakeupDir: codexWakeupDir,
+      pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
       spanContextDir: codexSpanContextDir,
       multimodal: {
         enabled: codexMultimodalEnabled,
@@ -1625,6 +1638,7 @@ export class Orchestrator extends EventEmitter {
     const piCodingAgentLogInput = new PiCodingAgentLogInput({
       stateStore: this.stateStore,
       logDir: piCodingAgentLogDir,
+      pollIntervalMs: listenerCfg['pi-coding-agent-log']?.pollInterval,
       // The physical JSONL stream is shared by the built-in PI integration and
       // every registered high-level SDK Agent. Admission therefore has to be
       // checked against the identity on each record, not only once for the
@@ -1654,6 +1668,7 @@ export class Orchestrator extends EventEmitter {
     const mimoCodeLogInput = new MimoCodeLogInput({
       stateStore: this.stateStore,
       logDir: mimoCodeLogDir,
+      pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
     });
     this.inputManager.registerInput(mimoCodeLogInput);
     entries.push(
@@ -1676,6 +1691,7 @@ export class Orchestrator extends EventEmitter {
     const qwenCodeCliLogInput = new QwenCodeCliLogInput({
       stateStore: this.stateStore,
       logDir: qwenCodeCliLogDir,
+      pollIntervalMs: listenerCfg['qwen-code-cli-log']?.pollInterval,
     });
     this.inputManager.registerInput(qwenCodeCliLogInput);
     entries.push(
@@ -1758,7 +1774,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Wukong (CLI API polling) ---
-    const wukongInput = new WukongInput({ stateStore: this.stateStore });
+    const wukongInput = new WukongInput({ stateStore: this.stateStore, pollIntervalMs: listenerCfg['wukong']?.pollInterval });
     this.inputManager.registerInput(wukongInput);
     entries.push(
       this.inputManager.buildDetectionEntry(wukongInput, {
