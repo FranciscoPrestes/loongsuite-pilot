@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createLogger } from '../utils/logger.js';
-import { ensureDir } from '../utils/fs-utils.js';
+import { chmodQuiet, ensurePrivateDir } from '../utils/fs-utils.js';
 
 const logger = createLogger('SlsFailureLogWriter');
 
@@ -80,7 +80,7 @@ export class SlsFailureLogWriter {
   }
 
   async start(): Promise<void> {
-    await ensureDir(this.directory);
+    await ensurePrivateDir(this.directory);
   }
 
   async write(input: SlsFailureLogInput): Promise<boolean> {
@@ -102,7 +102,7 @@ export class SlsFailureLogWriter {
   }
 
   private async writeOnce(input: SlsFailureLogInput): Promise<boolean> {
-    await ensureDir(this.directory);
+    await ensurePrivateDir(this.directory);
 
     const now = this.now();
     const record = buildSlsFailureLogRecord(input, now);
@@ -127,7 +127,8 @@ export class SlsFailureLogWriter {
       return false;
     }
 
-    await fs.appendFile(state.filePath, line, 'utf8');
+    await fs.appendFile(state.filePath, line, { encoding: 'utf8', mode: 0o600 });
+    await chmodQuiet(state.filePath, 0o600);
     return true;
   }
 

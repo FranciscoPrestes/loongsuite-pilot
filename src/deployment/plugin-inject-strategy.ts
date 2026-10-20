@@ -9,6 +9,7 @@ import type {
 } from '../types/index.js';
 import { fileExists, resolveHome } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
+import { updateJsonConfig } from './config-repair.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem, type OpenClawHost } from './openclaw-version-resolver.js';
 
@@ -75,6 +76,19 @@ function stripJsoncComments(text: string): string {
 
   return result;
 }
+
+/** An explicit host/user opt-out is never a repair target. Check every fresh attempt. */
+export function isOpenClawInstrumentationDisabled(json: Record<string, unknown>, pluginId: string): boolean {
+  const plugins = json.plugins;
+  if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return false;
+  const config = plugins as Record<string, unknown>;
+  if (config.enabled === false) return true;
+  const entries = config.entries;
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return false;
+  const owned = (entries as Record<string, unknown>)[pluginId];
+  return !!owned && typeof owned === 'object' && !Array.isArray(owned) && (owned as Record<string, unknown>).enabled === false;
+}
+class NativeInstrumentationDisabled extends Error {}
 
 export class PluginInjectStrategy implements DeployStrategy {
   private readonly dataDir: string;
@@ -159,33 +173,15 @@ export class PluginInjectStrategy implements DeployStrategy {
         };
       }
 
-      const raw = await fs.readFile(configPath, 'utf-8');
-      const json = JSON.parse(stripJsoncComments(raw)) as Record<string, unknown>;
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
-      const migratingLegacyOpenclawSchema = this.isOpenclawNested(config)
-        && (Array.isArray(json.plugin) || Array.isArray(json.plugins));
-
-      let mutated: boolean;
-      if (this.isOpenclawNested(config)) {
-        mutated = this.openclawInject(json, resolvedSpec, config, host!);
-        logger.info('OpenClaw compatibility selected', { version: host!.version, adapter: host!.adapter, source: host!.source });
-      } else {
-        mutated = this.flatArrayInject(json, resolvedSpec, config);
-      }
-
-      if (mutated) {
-        const hasComments = raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n';
-        if (hasComments || migratingLegacyOpenclawSchema) {
-          if (hasComments) {
-            logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
-          }
-          await this.writePrivateBackup(configPath + '.bak', raw);
-        }
-        await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
-        logger.info('plugin injected', { agentId: def.id, configPath, spec: resolvedSpec });
-      } else {
-        logger.info('plugin already injected', { agentId: def.id, configPath, spec: resolvedSpec });
-      }
+      await updateJsonConfig(configPath, json => {
+        if (this.isOpenclawNested(config)) {
+          if (isOpenClawInstrumentationDisabled(json, config.pluginId)) throw new NativeInstrumentationDisabled();
+          this.openclawInject(json, resolvedSpec, config, host!);
+        } else this.flatArrayInject(json, resolvedSpec, config);
+        return json;
+      }, 'jsonc', '.bak');
+      logger.info('plugin configured', { agentId: def.id, configPath });
       return {
         success: true,
         agentId: def.id,
@@ -193,6 +189,7 @@ export class PluginInjectStrategy implements DeployStrategy {
         pluginInjectConfigPath: path.resolve(configPath),
       };
     } catch (err) {
+      if (err instanceof NativeInstrumentationDisabled) return { success: true, agentId: def.id, deployMode: 'plugin-inject', skipped: true, reason: 'disabled' };
       return { success: false, agentId: def.id, deployMode: 'plugin-inject', error: String(err) };
     }
   }
@@ -207,33 +204,16 @@ export class PluginInjectStrategy implements DeployStrategy {
       // remaining Pilot spec to clean up.
       if (!configPath) return true;
 
-      const raw = await fs.readFile(configPath, 'utf-8');
-      const json = JSON.parse(stripJsoncComments(raw)) as Record<string, unknown>;
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
-
-      let mutated: boolean;
-      if (this.isOpenclawNested(config)) {
-        mutated = this.openclawRemove(json, resolvedSpec, config);
-      } else {
-        const pluginKey = this.resolvePluginKey(json, config);
-        if (!Array.isArray(json[pluginKey])) return true;
-        const before = (json[pluginKey] as unknown[]).length;
-        json[pluginKey] = (json[pluginKey] as unknown[]).filter(
-          (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
-        );
-        mutated = (json[pluginKey] as unknown[]).length < before;
-      }
-
-      if (mutated) {
-        const hasComments = raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n';
-        if (hasComments) {
-          logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
-          await this.writePrivateBackup(configPath + '.bak', raw);
+      await updateJsonConfig(configPath, json => {
+        if (this.isOpenclawNested(config)) this.openclawRemove(json, resolvedSpec, config);
+        else {
+          const pluginKey = this.resolvePluginKey(json, config);
+          if (Array.isArray(json[pluginKey])) json[pluginKey] = (json[pluginKey] as unknown[]).filter(
+            entry => !this.matchesSpec(entry, resolvedSpec, config.pluginId));
         }
-        await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
-        logger.info('plugin removed', { agentId: def.id, configPath });
-      }
-
+        return json;
+      }, 'jsonc', '.bak');
       return true;
     } catch (err) {
       logger.error('undeploy failed', { agentId: def.id, error: String(err) });
@@ -306,7 +286,16 @@ export class PluginInjectStrategy implements DeployStrategy {
         : '';
 
     return this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)
-      || entryStr.includes(pluginId);
+      || this.hasOwnershipMarker(entryStr, pluginId);
+  }
+
+  private hasOwnershipMarker(spec: string, marker: string): boolean {
+    const normalized = spec.replace(/\\/g, '/');
+    const at = normalized.indexOf(marker);
+    if (at < 0) return false;
+    const before = at === 0 || normalized[at - 1] === '/';
+    const tail = normalized.slice(at + marker.length);
+    return before && (tail === '' || tail.startsWith('/') || /^@[0-9]/.test(tail));
   }
 
   private normalizeSpecForComparison(spec: string): string {
@@ -327,7 +316,7 @@ export class PluginInjectStrategy implements DeployStrategy {
       json[pluginKey] = (json[pluginKey] as unknown[]).filter((entry) => {
         const entryStr = typeof entry === 'string' ? entry : Array.isArray(entry) ? entry[0] : '';
         return !config.replaceSpecs!.some((old) =>
-          typeof entryStr === 'string' && entryStr.includes(old),
+          typeof entryStr === 'string' && this.hasOwnershipMarker(entryStr, old),
         );
       });
     }
@@ -386,7 +375,7 @@ export class PluginInjectStrategy implements DeployStrategy {
   private pathMatches(entry: unknown, resolvedSpec: string, pluginId: string): boolean {
     if (typeof entry !== 'string') return false;
     if (entry === resolvedSpec || entry === this.toOpenclawPath(resolvedSpec)) return true;
-    return entry.includes(pluginId);
+    return this.hasOwnershipMarker(entry, pluginId);
   }
 
   private openclawReplacementMatches(entry: string, replacementSpec: string): boolean {
@@ -395,7 +384,7 @@ export class PluginInjectStrategy implements DeployStrategy {
       || resolvedReplacement.startsWith('file://')
       || path.isAbsolute(resolvedReplacement);
 
-    if (!isPathReplacement) return entry.includes(replacementSpec);
+    if (!isPathReplacement) return this.hasOwnershipMarker(entry, replacementSpec);
 
     return path.normalize(this.toOpenclawPath(entry))
       === path.normalize(this.toOpenclawPath(resolvedReplacement));

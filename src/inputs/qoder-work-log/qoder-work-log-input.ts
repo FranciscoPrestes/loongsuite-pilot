@@ -656,17 +656,28 @@ function sessionAttributes(session: SessionState | undefined): Record<string, Js
   return out;
 }
 
-export function resolveQoderWorkRoot(variant: 'standard' | 'cn' = 'standard'): string {
-  if (process.platform === 'darwin') {
-    return resolveHome(variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_MAC : DEFAULT_QODERWORK_ROOT_MAC);
+export interface QoderWorkRootContext {
+  platform?: NodeJS.Platform;
+  homeDir?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export function resolveQoderWorkRoot(variant: 'standard' | 'cn' = 'standard', context: QoderWorkRootContext = {}): string {
+  const platform = context.platform ?? process.platform;
+  const homeDir = context.homeDir ?? os.homedir();
+  const env = context.env ?? process.env;
+  if (platform === 'darwin') {
+    const relativeRoot = variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_MAC : DEFAULT_QODERWORK_ROOT_MAC;
+    return path.join(homeDir, relativeRoot.slice(2));
   }
   const dirName = variant === 'cn' ? 'QoderWork CN' : 'QoderWork';
-  if (process.platform === 'win32') {
-    return path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), dirName);
+  if (platform === 'win32') {
+    return path.join(env.APPDATA ?? path.join(homeDir, 'AppData', 'Roaming'), dirName);
   }
-  const xdg = process.env.XDG_CONFIG_HOME;
+  const xdg = env.XDG_CONFIG_HOME;
   if (xdg) return path.join(xdg, dirName);
-  return resolveHome(variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_LINUX : DEFAULT_QODERWORK_ROOT_LINUX);
+  const relativeRoot = variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_LINUX : DEFAULT_QODERWORK_ROOT_LINUX;
+  return path.join(homeDir, relativeRoot.slice(2));
 }
 
 export function parseSdkLogLine(line: string): SdkEvent | null {

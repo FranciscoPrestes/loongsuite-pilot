@@ -20,16 +20,29 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+/**
+ * fs.watch arms asynchronously (FSEvents on macOS needs a moment after watch()/rewatch()), so a change made
+ * right after arming can be missed by design. Wait for the CONDITION instead of a fixed sleep: keep touching the
+ * file until the watcher reports it, bounded by a generous deadline. A watcher that never fires still fails.
+ */
+async function touchUntilDirty(watcher: FileWatcher, file: string, timeoutMs = 10_000): Promise<string[]> {
+  const seen = new Set<string>();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    fs.appendFileSync(file, 'data\n');
+    await new Promise((r) => setTimeout(r, 50));
+    for (const f of watcher.getDirtyFiles()) seen.add(f);
+    if ([...seen].some((f) => f.endsWith(path.basename(file)))) break;
+  }
+  return [...seen];
+}
+
 describe('FileWatcher', () => {
   it('marks files as dirty when fs.watch fires', async () => {
     const watcher = new FileWatcher();
     watcher.watch([tmpDir]);
 
-    fs.writeFileSync(path.join(tmpDir, 'test.log'), 'hello\n');
-
-    await new Promise((r) => setTimeout(r, 200));
-
-    const dirty = watcher.getDirtyFiles();
+    const dirty = await touchUntilDirty(watcher, path.join(tmpDir, 'test.log'));
     expect(dirty.length).toBeGreaterThanOrEqual(1);
     expect(dirty.some((f) => f.includes('test.log'))).toBe(true);
 
@@ -96,10 +109,7 @@ describe('FileWatcher', () => {
     const preserved = watcher.getDirtyFiles();
     expect(preserved).toEqual(['/tmp/pending.log']);
 
-    fs.writeFileSync(path.join(tmpDir, 'after-rewatch.log'), 'data\n');
-    await new Promise((r) => setTimeout(r, 200));
-
-    const dirty = watcher.getDirtyFiles();
+    const dirty = await touchUntilDirty(watcher, path.join(tmpDir, 'after-rewatch.log'));
     expect(dirty.some((f) => f.includes('after-rewatch.log'))).toBe(true);
 
     watcher.close();

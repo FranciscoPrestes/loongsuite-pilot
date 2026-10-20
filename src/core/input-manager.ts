@@ -488,6 +488,8 @@ export class InputManager extends EventEmitter {
       return;
     }
 
+    // Listeners only persist bounded signals; failures never change base capture.
+    try { this.emit('enrichment:signals', {inputId,entries}); } catch { /* fail open */ }
     const counter = this.counters.get(inputId);
     try {
       await this.flusher.sendBatch(entries, logicalBytes);

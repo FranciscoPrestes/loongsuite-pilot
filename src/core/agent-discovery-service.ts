@@ -5,7 +5,7 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('AgentDiscoveryService');
 
-const DEFAULT_POLL_MS = 300_000; // 5 minutes
+const DEFAULT_POLL_MS = 60_000; // continuous local discovery
 const FORCE_POLLING = process.env.LOONGSUITE_PILOT_FORCE_POLLING === 'true';
 
 interface EntryRuntime {
@@ -84,6 +84,7 @@ export class AgentDiscoveryService extends EventEmitter {
     for (const rt of this.runtimes.values()) {
       await this.processEntry(rt);
     }
+    this.emit('discovery:refreshed', trigger);
   }
 
   getStates(): Record<string, EntryState> {
@@ -186,7 +187,7 @@ export class AgentDiscoveryService extends EventEmitter {
     for (const watchPath of rt.entry.watchPaths) {
       try {
         const watcher = fs.watch(watchPath, { persistent: false }, () => {
-          void this.processEntry(rt);
+          void this.processEntry(rt).then(() => this.emit('discovery:refreshed', 'watch'));
         });
         watcher.on('error', () => {
           watcher.close();

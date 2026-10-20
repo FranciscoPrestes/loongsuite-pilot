@@ -20,6 +20,16 @@ const psJs = psWriter.match(/-e @'\r?\n([\s\S]*?)\r?\n'@ \$cfgTmp/)?.[1];
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 const hasPowerShell = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']).status === 0;
 
+/**
+ * The captured program reads its piped input with `fs.readFileSync(0)`. Run in-process, fd 0 would be the test
+ * runner's own stdin (an open non-blocking pipe in CI or a non-TTY shell: EAGAIN). Serve fd 0 from the input the
+ * shell stub really received instead.
+ */
+function requireWithStdin(stdinPath) {
+  const fsShim = { ...require('node:fs'), readFileSync: (target, ...rest) => require('node:fs').readFileSync(target === 0 ? stdinPath : target, ...rest) };
+  return (id) => (id === 'fs' || id === 'node:fs' ? fsShim : require(id));
+}
+
 // Exercise the real parser and capture its expanded Node program, then execute
 // that program in-process against a temporary data dir. This tests shell-to-JS
 // value transport without requiring a second Node runtime or any installation.
@@ -33,11 +43,13 @@ function runConfig(platform, args = [], existing, command = 'install', probePadd
     if (platform === 'bash') {
       const scriptPath = resolve(root, 'config-writer.js');
       const valuePath = resolve(root, 'status-bar-value');
+      const stdinPath = resolve(root, 'captured-stdin');
       result = spawnSync('bash', ['-c', `${shellPrelude}
 msg() { :; }
 capture_node() {
-  # Match the real writer's stdin consumption so printf cannot fail with SIGPIPE.
-  cat > /dev/null
+  # Match the real writer's stdin consumption so printf cannot fail with SIGPIPE, and keep what was piped:
+  # the captured program reads it with readFileSync(0), which must never touch the test runner's own stdin.
+  cat > "$PILOT_TEST_STDIN"
   printf '%s' "$2" > "$PILOT_TEST_JS"
   printf '%s' "$LP_ENABLE_STATUS_BAR_APP" > "$PILOT_TEST_STATUS_BAR"
 }
@@ -45,11 +57,13 @@ NODE_BIN=capture_node
 PROBE_RESULT="$(printf '%${probePadding}s' '')[]"
 ${shellWriter}
 write_config`, 'installer-test', command, '--data-dir', root, ...args], {
-        encoding: 'utf8', env: { ...env, PILOT_TEST_JS: scriptPath, PILOT_TEST_STATUS_BAR: valuePath },
+        encoding: 'utf8', env: { ...env, PILOT_TEST_JS: scriptPath, PILOT_TEST_STATUS_BAR: valuePath, PILOT_TEST_STDIN: stdinPath },
+        // The spawned shell gets no inherited stdin either (an open non-blocking pipe there caused EAGAIN).
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
       if (result.status === 0) {
         runInNewContext(readFileSync(scriptPath, 'utf8'), {
-          require, console,
+          require: requireWithStdin(stdinPath), console,
           process: { env: { LP_ENABLE_STATUS_BAR_APP: readFileSync(valuePath, 'utf8') } },
         });
       }

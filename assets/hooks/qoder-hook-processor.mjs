@@ -94,6 +94,16 @@ export function isRetryLockStale(lock) {
   return !pidAlive(lock.pid);
 }
 
+export const RETRY_LOCK_UNREADABLE_GRACE_MS = 2_000;
+
+function unreadableLockIsReclaimable(lockPath) {
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs > RETRY_LOCK_UNREADABLE_GRACE_MS;
+  } catch {
+    return true; // vanished meanwhile: nothing to protect
+  }
+}
+
 export function tryAcquireRetryLock(transcriptPath, sessionId, dir = RETRY_LOCK_DIR) {
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -107,7 +117,9 @@ export function tryAcquireRetryLock(transcriptPath, sessionId, dir = RETRY_LOCK_
     } catch (err) {
       if (err && err.code === 'EEXIST') {
         const existing = readRetryLock(lockPath);
-        if (isRetryLockStale(existing)) {
+        // A lock that cannot be read yet may be a peer between open('wx') and its first write: only an OLD
+        // unreadable file is reclaimable, otherwise two processes would both believe they own the transcript.
+        if (existing === null ? unreadableLockIsReclaimable(lockPath) : isRetryLockStale(existing)) {
           try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
           try {
             const handle = fs.openSync(lockPath, 'wx');

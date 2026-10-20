@@ -82,6 +82,7 @@ const SPAN_ATTR_RESERVED_PREFIXES = [
   "agent.",
   "time_unix_nano",
   "observed_time_unix_nano",
+  "ntconsult.analytics.",
 ];
 const SPAN_ATTR_MAX_VALUE_LENGTH = 512;
 const SPAN_ATTR_SENSITIVE_RE =

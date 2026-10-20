@@ -58,16 +58,18 @@
     "@opentelemetry/otlp-transformer": "^0.57.0",
     "@opentelemetry/resources": "^1.30.0",
     "@opentelemetry/sdk-trace-base": "^1.30.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "axios": "^1.6.0",
     "express": "^4.18.0",
     "jsonc-parser": "^3.3.1",
     "pino": "^9.14.0",
     "pino-roll": "^3.1.0",
     "smol-toml": "^1.8.0",
+    "sqlite3": "file:compat/sqlite3",
     "undici": "^6.28.0",
     "uuid": "^9.0.0",
-    "zod": "^3.22.0",
-    "sqlite3": "file:compat/sqlite3"
+    "zod": "^3.22.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.0",
@@ -86,7 +88,8 @@
     "assets/",
     "compat/",
     "scripts/",
-    "agents.d/"
+    "agents.d/",
+    "schemas/"
   ],
   "overrides": {
     "cookie": "1.0.0",

@@ -4,12 +4,77 @@
   "deployMode": "hook",
   "detection": {
     "paths": [],
-    "commands": ["cursor-agent"]
+    "commands": [
+      "cursor-agent"
+    ]
   },
   "hook": {
     "settingsPath": "~/.cursor/hooks.json",
     "events": [],
     "hookCommand": "",
     "format": "flat"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-hook-transcript-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "cursor-hook",
+        "role": "shared"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "cursor.managed-hook-transcript-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "cursor.managed-hook-transcript-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "cursor.managed-hook-transcript-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "cursor.managed-hook-transcript-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Shared Cursor stream; no standalone listener or separate invocation count",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

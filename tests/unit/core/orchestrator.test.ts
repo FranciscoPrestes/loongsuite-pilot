@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { AnalyticsConfig } from '../../../src/types/index.js';
+import type { AgentActivityEntry, AnalyticsConfig } from '../../../src/types/index.js';
+import { SUPPORTED_MASK_TYPES } from '../../../src/types/index.js';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
@@ -48,6 +50,7 @@ vi.mock('../../../src/status-bar/index.js', () => ({
     return {
       start: mockMetricsSummaryStart,
       stop: mockMetricsSummaryStop,
+      setAnalyticsHealth: vi.fn(),
     };
   }),
   StatusBarAppManager: vi.fn().mockImplementation(() => ({
@@ -76,7 +79,8 @@ vi.mock('../../../src/dashboard/index.js', () => ({
 const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
 const mockResolveHome = vi.fn((p: string) => p.replace(/^~/, os.homedir()));
 
-vi.mock('../../../src/utils/fs-utils.js', () => ({
+vi.mock('../../../src/utils/fs-utils.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/utils/fs-utils.js')>(),
   ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
   resolveHome: (p: string) => mockResolveHome(p),
   readJsonFile: vi.fn().mockResolvedValue(null),
@@ -274,6 +278,136 @@ describe('Orchestrator', () => {
   });
 
   describe('startup sequence (T038)', () => {
+    it('starts a durable queue, exposes fail-open enqueue, and stops its real scheduler', async () => {
+      const orch = new Orchestrator(makeConfig({dataDir:path.join(homeDir,'queue-data')}));
+      try {
+        await orch.start();
+        expect(orch.getEnrichmentScheduler()).not.toBeNull();
+        expect(await orch.enqueueEnrichment({} as never)).toBe('disabled');
+        const policy = {enrichmentEnabled:true,replayEnabled:false,baseTelemetryEnabled:true as const,reason:'ready' as const,desiredRevision:'1',deletionRevision:'1'};
+        vi.spyOn(orch.getDesiredStateReconciler()!,'getEffectivePolicy').mockReturnValue(policy);
+        const {job,observation,observationsFor} = await import('../enrichment/fixtures.js');
+        orch.getEnrichmentScheduler()!.register('repo_snapshot',async j=>observation(j));
+        expect(await orch.enqueueEnrichment(job({occurredAt:new Date().toISOString()}))).toBe('created');
+        await orch.getEnrichmentScheduler()!.tick();
+        expect(await observationsFor(path.join(homeDir,'queue-data'),'job-1')).toHaveLength(1);
+        expect(await orch.enqueueEnrichment({} as never)).toBe('unavailable');
+      } finally { await orch.stop(); }
+      expect(orch.getEnrichmentScheduler()).toBeNull();
+    });
+
+    it('converts post-mask native signals into repo snapshot jobs without blocking base capture', async () => {
+      const excludedWorkspace = path.join(homeDir, 'excluded-workspace');
+      fs.mkdirSync(excludedWorkspace, { recursive: true });
+      const orch = new Orchestrator(makeConfig({
+        dataDir: path.join(homeDir, 'signal-data'),
+        instrumentation: { localEnabled: true, portalBaseUrl: 'https://analytics.invalid', deviceId: 'device-1' },
+        mask: { mode: 'all', types: [...SUPPORTED_MASK_TYPES], replacementMode: 'placeholder' },
+        privacy: { excludeWorkspaces: [excludedWorkspace] },
+        flushers: { jsonl: { enabled: true, outputDir: path.join(homeDir, 'signal-output'), rotateDaily: true, maxFileSizeMb: 100 } },
+      }));
+      const statusReasons: string[] = [];
+      orch.on('enrichment:status', (e: { reason?: string }) => statusReasons.push(e.reason ?? 'status'));
+      try {
+        await orch.start();
+        vi.spyOn(orch.getDesiredStateReconciler()!, 'getEffectivePolicy').mockReturnValue(
+          { enrichmentEnabled: true, replayEnabled: false, baseTelemetryEnabled: true, reason: 'ready', desiredRevision: '1', deletionRevision: '1' });
+        const signals: AgentActivityEntry[] = [];
+        orch.getInputManager().on('enrichment:signals', (e: { entries: AgentActivityEntry[] }) => signals.push(...e.entries));
+        const input = Object.assign(new EventEmitter(), {
+          id: 'c4-signal-input', collectionMethod: 'hook-jsonl', agentType: 'claude-code', running: false,
+          setWorkspacePolicy: () => undefined, start: async () => undefined, stop: async () => undefined,
+        });
+        orch.getInputManager().registerInput(input as never);
+        const secret = 'api_key=sk-abcdefghijklmnopqrstuvwxyz1234567890';
+        const nowNanos = () => String(BigInt(Date.now()) * 1000000n);
+        const entries = [
+          { 'event.id': 'good-event', time_unix_nano: nowNanos(), 'gen_ai.session.id': 'session-good',
+            'gen_ai.agent.type': 'claude-code', 'gen_ai.tool.call.id': 'call-e2e', 'workspace.path': '/tmp/example',
+            'gen_ai.tool.call.arguments': secret },
+          { 'event.id': 'expired-event', time_unix_nano: String((BigInt(Date.now()) - 30n * 86400000n) * 1000000n),
+            'gen_ai.session.id': 'session-expired', 'gen_ai.agent.type': 'claude-code', 'workspace.path': '/tmp/example' },
+          { 'event.id': 'excluded-event', time_unix_nano: nowNanos(), 'gen_ai.session.id': 'session-excluded',
+            'gen_ai.agent.type': 'claude-code', 'workspace.path': excludedWorkspace },
+        ] as unknown as AgentActivityEntry[];
+        const flushed = new Promise<{ count: number }>(resolve => orch.getInputManager().once('flushed', resolve));
+        input.emit('entries', entries);
+        expect((await flushed).count).toBeGreaterThanOrEqual(2); // base capture keeps every non-excluded entry
+        const good = signals.find(e => e['event.id'] === 'good-event');
+        expect(good?.['gen_ai.tool.call.arguments']).not.toContain('sk-abcdefghijklmnopqrstuvwxyz'); // post-mask
+        expect(signals.some(e => e['event.id'] === 'excluded-event')).toBe(false); // local workspace exclusion preserved
+        await vi.waitFor(() => { expect(statusReasons).toContain('enqueue_unavailable'); }); // expired signal fails open
+        await vi.waitFor(async () => {
+          const claimed = await orch.getEnrichmentStore()!.claim(Date.now(), 2000);
+          expect(claimed).toMatchObject({ nativeCallId: 'call-e2e', workspacePath: '/tmp/example', harnessId: 'claude-code', collectorVersion: '1.0.0-test' });
+        });
+        expect(await orch.getEnrichmentStore()!.claim(Date.now(), 2000)).toBeNull(); // no job from excluded or expired signals
+      } finally { await orch.stop(); }
+    });
+
+    it('keeps base capture alive when the enrichment configuration is invalid', async () => {
+      const orch = new Orchestrator(makeConfig({
+        dataDir: path.join(homeDir, 'bad-enrichment'),
+        enrichment: { timeoutMs: 9999, maxAgeDays: 7, maxSpoolBytes: 268435456 },
+        flushers: { jsonl: { enabled: true, outputDir: path.join(homeDir, 'bad-output'), rotateDaily: true, maxFileSizeMb: 100 } },
+      }));
+      try {
+        await orch.start(); // must not reject on invalid enrichment bounds
+        expect(orch.getEnrichmentScheduler()).toBeNull();
+        expect(orch.getEnrichmentStore()).toBeNull();
+        expect(await orch.enqueueEnrichment({} as never)).toBe('unavailable');
+        const input = Object.assign(new EventEmitter(), {
+          id: 'c4-base-input', collectionMethod: 'hook-jsonl', agentType: 'claude-code', running: false,
+          setWorkspacePolicy: () => undefined, start: async () => undefined, stop: async () => undefined,
+        });
+        orch.getInputManager().registerInput(input as never);
+        const flushed = new Promise<{ count: number }>(resolve => orch.getInputManager().once('flushed', resolve));
+        const entries2 = [{
+          'event.id': 'base-event', time_unix_nano: String(BigInt(Date.now()) * 1000000n), 'gen_ai.session.id': 'session-base',
+          'gen_ai.agent.type': 'claude-code', 'workspace.path': '/tmp/example',
+        }] as unknown as AgentActivityEntry[];
+        input.emit('entries', entries2);
+        expect((await flushed).count).toBe(1); // base capture still flows with enrichment disabled
+      } finally { await orch.stop(); }
+    });
+
+    it('wires the analytics runtime only with a device identity and portal, never touching the network in tests', async () => {
+      const offline = vi.fn().mockRejectedValue(new Error('offline'));
+      vi.stubGlobal('fetch', offline);
+      const jsonl = { jsonl: { enabled: true, outputDir: path.join(homeDir, 'rt-output'), rotateDaily: true, maxFileSizeMb: 100 } };
+      const withDevice = new Orchestrator(makeConfig({ dataDir: path.join(homeDir, 'rt-on'), flushers: jsonl,
+        instrumentation: { localEnabled: true, portalBaseUrl: 'https://portal.test', deviceId: 'device-1', authorization: 'Bearer fixture' } }));
+      const withoutDevice = new Orchestrator(makeConfig({ dataDir: path.join(homeDir, 'rt-off'), flushers: jsonl,
+        instrumentation: { localEnabled: true, portalBaseUrl: 'https://portal.test', authorization: 'Bearer fixture' } }));
+      try {
+        await withDevice.start();
+        expect(withDevice.getAnalyticsRuntime()).not.toBeNull();
+        // The reconciler's startup status batch is published, not lost to a late listener.
+        expect(withDevice.getAnalyticsRuntime()!.healthSummary()).not.toBeNull();
+        await withoutDevice.start();
+        expect(withoutDevice.getAnalyticsRuntime()).toBeNull(); // no device identity: analytics stays off, base capture runs
+        expect(withoutDevice.getEnrichmentStore()).not.toBeNull();
+      } finally {
+        await withDevice.stop();
+        await withoutDevice.stop();
+        vi.unstubAllGlobals();
+      }
+      expect(withDevice.getAnalyticsRuntime()).toBeNull();
+    });
+
+    it('keeps command-only deployment discovery and starts the real sixty-second reconciler', async () => {
+      const orch = new Orchestrator(makeConfig({ dataDir: path.join(homeDir, 'pilot-data') }));
+      try {
+        await orch.start();
+        const commandOnly = discoveryEntries.find(entry => entry.id === 'deploy:cursor-cli');
+        expect(commandOnly).toBeDefined(); expect(commandOnly!.watchPaths).toEqual([]);
+        expect(orch.getDesiredStateReconciler()?.nextTickMs).toBe(60_000);
+        expect(orch.getDesiredStateReconciler()?.getEffectivePolicy()).toMatchObject({ enrichmentEnabled: false, baseTelemetryEnabled: true });
+        const reconcile = vi.spyOn(orch.getDesiredStateReconciler()!, 'reconcile');
+        discoveryHandlers['discovery:refreshed'](); expect(reconcile).toHaveBeenCalledWith('discovery');
+      } finally { await orch.stop(); }
+    });
+
     it('creates a detected OpenCode config only inside the isolated home', async () => {
       const binDir = path.join(homeDir, 'bin');
       fs.mkdirSync(binDir);

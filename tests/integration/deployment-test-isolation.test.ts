@@ -8,8 +8,18 @@ import { promisify } from 'node:util';
 import { agentHomeEnvironment } from '../helpers/isolated-agent-home.js';
 
 let root: string;
+let nestedPid: number | undefined;
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 afterEach(async () => {
   if (root) await fs.rm(root, { recursive: true, force: true });
+  // A nested run that was killed (timeout under load) cannot run its own afterAll: remove exactly what that
+  // child created (its pid is in the directory name), never another worker's bundle.
+  if (nestedPid !== undefined) {
+    for (const name of await fs.readdir(repoRoot)) {
+      if (name.startsWith(`.inject-test-${nestedPid}-`)) await fs.rm(path.join(repoRoot, name), { recursive: true, force: true });
+    }
+    nestedPid = undefined;
+  }
 });
 
 async function snapshot(dir: string, prefix = ''): Promise<Record<string, string>> {
@@ -72,7 +82,7 @@ it('deployment tests leave the launching user home unchanged, including legacy p
   const before = await snapshot(home);
   const repo = fileURLToPath(new URL('../../', import.meta.url));
   const vitest = path.join(repo, 'node_modules', 'vitest', 'vitest.mjs');
-  const { stdout, stderr } = await promisify(execFile)(process.execPath, [
+  const nested = promisify(execFile)(process.execPath, [
     vitest, 'run',
     'tests/unit/deployment/inject-command.test.ts',
     'tests/unit/deployment/deployment-manager.test.ts',
@@ -83,12 +93,16 @@ it('deployment tests leave the launching user home unchanged, including legacy p
     '--pool=threads', '--maxWorkers=1', '--minWorkers=1', '--reporter=dot',
   ], {
     cwd: repo,
-    timeout: 40_000,
+    // Generous: alone the nested run takes about 10 s, but a loaded full suite stretches it several times over.
+    // The deadline only bounds a hang; it is not part of what the test asserts.
+    timeout: 150_000,
     env: {
       ...process.env,
       ...agentHomeEnvironment(home),
       TMPDIR: temp, TMP: temp, TEMP: temp,
     },
   });
+  nestedPid = nested.child.pid;
+  const { stdout, stderr } = await nested;
   expect(await snapshot(home), stdout + stderr).toEqual(before);
-}, 45_000);
+}, 160_000);

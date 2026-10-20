@@ -354,9 +354,18 @@ function validateConfig(content: string): void {
   }
 }
 
-function writeValidatedConfig(configPath: string, content: string): void {
+function writeValidatedConfig(configPath: string, content: string, expected: string): void {
   validateConfig(content);
-  fs.writeFileSync(configPath, content, 'utf-8');
+  const current = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+  if (current !== expected) throw new Error('file changed before write');
+  const backup = configPath + '.loongsuite-pilot.bak';
+  if (fs.existsSync(configPath) && !fs.existsSync(backup)) fs.copyFileSync(configPath, backup, fs.constants.COPYFILE_EXCL);
+  const temp = configPath + '.loongsuite-pilot-' + process.pid + '.tmp';
+  try {
+    fs.writeFileSync(temp, content, { encoding: 'utf8', mode: fs.existsSync(configPath) ? fs.statSync(configPath).mode & 0o777 : 0o600 });
+    if ((fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '') !== expected) throw new Error('file changed before write');
+    fs.renameSync(temp, configPath);
+  } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
 }
 
 function appendCanonicalTrustSections(
@@ -505,6 +514,16 @@ export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
  * Returns false when the trust state is already correct and no file was written.
  */
 export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return writeTrustedHashesOnce(rawOpts); }
+    catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('file changed before write') || attempt === 2) throw error;
+    }
+  }
+  return false;
+}
+
+function writeTrustedHashesOnce(rawOpts: TrustOpts): boolean {
   const opts = normalizeTrustOpts(rawOpts);
   const existing = fs.existsSync(opts.configPath)
     ? fs.readFileSync(opts.configPath, 'utf-8')
@@ -566,7 +585,7 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
       const output = appendCanonicalTrustSections(minimal, opts.marker, missing, enabledByKey);
       if (output === existing) return false;
       try {
-        writeValidatedConfig(opts.configPath, output);
+        writeValidatedConfig(opts.configPath, output, existing);
         return true;
       } catch (err) {
         if (!(err instanceof InvalidCodexConfigError)) throw err;
@@ -605,7 +624,7 @@ export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
   const output = appendCanonicalTrustSections(content, opts.marker, missing, enabledByKey);
   if (output === existing) return false;
   try {
-    writeValidatedConfig(opts.configPath, output);
+    writeValidatedConfig(opts.configPath, output, existing);
   } catch (err) {
     if (parsedRemainder && err instanceof InvalidCodexConfigError) {
       throw new InvalidCodexConfigError(
@@ -627,7 +646,7 @@ export function removeTrustBlock(
   const owned = new Set(ownedHookStateKeys);
   const content = removeExactTrustSections(removeLegacyTrustMarkers(before, marker), owned);
   if (content === before) return false;
-  writeValidatedConfig(configPath, content);
+  writeValidatedConfig(configPath, content, before);
   return true;
 }
 
@@ -646,7 +665,7 @@ export function removeTrustStateKeys(
   try {
     const content = removeExactTrustSections(before, new Set(ownedHookStateKeys));
     if (content === before) return false;
-    writeValidatedConfig(configPath, content);
+    writeValidatedConfig(configPath, content, before);
     return true;
   } catch (err) {
     if (err instanceof InvalidCodexConfigError) return false;

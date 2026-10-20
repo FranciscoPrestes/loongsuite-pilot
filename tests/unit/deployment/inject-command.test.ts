@@ -26,7 +26,7 @@ vi.mock('../../../src/deployment/deploy-command.js', () => ({
 }));
 let bundleDir: string;
 beforeAll(async () => {
-  bundleDir = await fs.mkdtemp(path.join(process.cwd(), '.inject-test-'));
+  bundleDir = await fs.mkdtemp(path.join(process.cwd(), `.inject-test-${process.pid}-`)) // pid in the name: a parent test can sweep what a killed child left;
   await build({ stdin: { contents: `import { injectClaudeDirectory } from './src/deployment/inject-command.ts';
     const [dir, data, hook] = process.argv.slice(2);
     console.log(JSON.stringify(await injectClaudeDirectory(dir, data, JSON.parse(hook))));`, resolveDir: process.cwd(), loader: 'ts' },

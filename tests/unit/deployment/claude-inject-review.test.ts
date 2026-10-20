@@ -72,8 +72,8 @@ describe('Claude inject review regressions', () => {
     let reached!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
     const writing = new Promise<void>(resolve => { reached = resolve; });
-    const original = files.writeJsonFile;
-    vi.spyOn(files, 'writeJsonFile').mockImplementationOnce(async (...args) => {
+    const original = files.writeTextFileAtomic;
+    vi.spyOn(files, 'writeTextFileAtomic').mockImplementationOnce(async (...args) => {
       reached(); await blocked; await original(...args);
     });
     const operationPromise = operation === 'install' ? manager.installHook(definitions[0])

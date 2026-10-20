@@ -827,6 +827,10 @@ function buildToolCall(ev, ctx, stepId) {
     'gen_ai.step.id': stepId,
     'gen_ai.tool.name': ev.tool_name,
     'gen_ai.tool.call.id': ev.tool_use_id,
+    // Execution handle for C6 execution correlation (the Cursor journal
+    // exposes no separate process handle; the call id identifies the
+    // execution). Additive only — the legacy record shape is unchanged.
+    'gen_ai.tool.call.exec.id': ev.tool_use_id,
     'gen_ai.tool.call.arguments': toJsonValue(parseMaybeJson(ev.tool_input)),
     'agent.cursor.hook_event_name': ev.hook_event,
   }, ctx.runtimeConfig);
@@ -843,6 +847,7 @@ function buildToolCallWithTs(ts, ev, ctx, stepId) {
     'gen_ai.step.id': stepId,
     'gen_ai.tool.name': ev.tool_name,
     'gen_ai.tool.call.id': ev.tool_use_id,
+    'gen_ai.tool.call.exec.id': ev.tool_use_id,
     'gen_ai.tool.call.arguments': toJsonValue(parseMaybeJson(ev.tool_input)),
     'agent.cursor.hook_event_name': ev.hook_event,
   }, ctx.runtimeConfig);
@@ -859,6 +864,7 @@ function buildToolResult(ev, ctx, stepId) {
     'gen_ai.step.id': stepId,
     'gen_ai.tool.name': ev.tool_name,
     'gen_ai.tool.call.id': ev.tool_use_id,
+    'gen_ai.tool.call.exec.id': ev.tool_use_id,
     'gen_ai.tool.call.result': isFailure ? undefined : toJsonValue(parseMaybeJson(ev.tool_output)),
     'gen_ai.tool.call.duration': ev.duration_ms,
     'tool.result.status': isFailure ? 'failure' : undefined,
@@ -879,6 +885,7 @@ function buildSubagentResult(preToolUseEvent, subagentResult, ctx, stepId) {
     'gen_ai.step.id': stepId,
     'gen_ai.tool.name': subagentResult.toolName || preToolUseEvent.tool_name || 'Subagent',
     'gen_ai.tool.call.id': preToolUseEvent.tool_use_id,
+    'gen_ai.tool.call.exec.id': preToolUseEvent.tool_use_id,
     'gen_ai.tool.call.duration': subagentResult.durationMs,
     'gen_ai.tool.call.result': subagentResult.resultText
       ? { summary: subagentResult.resultText.slice(0, 500) }

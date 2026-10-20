@@ -1,5 +1,6 @@
 import type { AgentActivityEntry, MaskConfig } from '../types/index.js';
 import { shouldMaskField } from './field-whitelist.js';
+import { activeMaskPlan, isMaskActive } from './active-mask.js';
 import { loadMaskPlan } from './rule-loader.js';
 import { maskString } from './string-masker.js';
 import type {
@@ -83,4 +84,26 @@ function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): M
     };
   }
   return planOrRules as MaskPlan;
+}
+
+/**
+ * Sanitize a single evidence snippet (local manifest / documentation / command
+ * body) before persistence. Bounding the byte size is the caller's job; this
+ * only removes sensitive material. Paths are locators and must never be masked.
+ */
+export function sanitizeSnippetText(text: string): string {
+  const plan = activeMaskPlan();
+  return isMaskActive(plan) ? maskString(text, plan) : text;
+}
+
+/**
+ * Sanitize an enriched payload (e.g. a whole analytics observation) before it
+ * is persisted or exported. Deep-masks every string leaf with the full
+ * sensitive + PII plan; bounding is the caller's job. Structural identity that
+ * masking would rewrite (ids, versions, refs) must make the caller fail closed
+ * instead of emitting a corrupted record.
+ */
+export function sanitizeEnrichedPayload<T>(value: T): T {
+  const plan = activeMaskPlan();
+  return isMaskActive(plan) ? (maskJsonSafeValue(value as JsonSafeValue, plan, {}) as T) : value;
 }

@@ -1,0 +1,76 @@
+{
+  "id": "wukong",
+  "displayName": "Wukong",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": [
+      "/Applications/Wukong.app/Contents/MacOS/wukong-cli",
+      "~/.real/daemon.sock"
+    ],
+    "commands": []
+  },
+  "input": {
+    "type": "local-cli-daemon-polling"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-cli-daemon"
+    ],
+    "adapters": [
+      {
+        "id": "wukong",
+        "role": "primary"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "wukong.local-cli-daemon.messages",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "wukong.local-cli-daemon.messages",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "wukong.local-cli-daemon.messages",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "wukong.local-cli-daemon.messages",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Local CLI and daemon socket required; no external API ingestion",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
+  }
+}

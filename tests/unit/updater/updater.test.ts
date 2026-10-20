@@ -524,6 +524,41 @@ describe('Updater', () => {
       );
     });
 
+    describe('release integrity (I8)', () => {
+      beforeEach(() => { mockFetch.mockReset(); mockFsWriteFile.mockClear(); });
+      const pointerWritten = () => mockFsWriteFile.mock.calls.some(call => String(call[0]).includes('current.tmp'));
+      const packageFetches = () => mockFetch.mock.calls.filter(call => /\/pkg\.tar\.gz$/.test(String(call[0]))).length;
+
+      it('warn mode (default) logs the problems and still deploys a release without sha256', async () => {
+        setupForDownload();
+        const updater = new Updater(makeConfig(), tmpDir);
+        await updater.check();
+        expect(pointerWritten()).toBe(true);
+        expect(packageFetches()).toBe(1);
+      });
+
+      it('enforce mode refuses a release without sha256/signature BEFORE downloading anything', async () => {
+        setupForDownload();
+        const updater = new Updater(makeConfig({ integrity: { mode: 'enforce' } }), tmpDir);
+        await updater.check();
+        expect(packageFetches()).toBe(0); // the package was never requested
+        expect(pointerWritten()).toBe(false);
+        expect((updater as any).consecutiveFailures).toBe(1); // reported as a failed check with backoff
+      });
+
+      it('enforce mode refuses an http package_url and a host that is not allowed', async () => {
+        for (const url of ['http://example.com/pkg.tar.gz', 'https://evil.example.net/pkg.tar.gz']) {
+          mockFetch.mockReset();
+          mockFsWriteFile.mockClear();
+          mockFetch.mockResolvedValueOnce(makeResponseJson(makeManifest({ package_url: url, sha256: 'a'.repeat(64) })));
+          const updater = new Updater(makeConfig({ integrity: { mode: 'enforce' } }), tmpDir);
+          await updater.check();
+          expect(packageFetches(), url).toBe(0);
+          expect(pointerWritten(), url).toBe(false);
+        }
+      });
+    });
+
     it('runs the staged package postinstall, pointed at this install data dir', async () => {
       // scripts/postinstall.js is the only thing that fills <dataDir>/{hooks,skills,
       // plugins}, so this call is also how an install broken by the Windows fs.cpSync

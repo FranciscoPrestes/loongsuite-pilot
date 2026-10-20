@@ -32,6 +32,10 @@ export const FIELDS_TO_MASK = new Set<string>([
   'agent._ccontent',
   'agent._cthinking',
 
+  // Serialized analytics observation envelope: enriched payloads are masked
+  // before they are ever persisted or exported (mask-before-spool-and-export).
+  'ntconsult.analytics.observation',
+
   'error',
   'error_message',
 ]);

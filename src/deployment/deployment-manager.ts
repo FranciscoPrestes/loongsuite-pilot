@@ -1,4 +1,6 @@
 import * as path from 'node:path';
+import { InstrumentationHealth, inspectInstalledVersion, type VersionProbeRunner } from './instrumentation-health.js';
+import type { CapabilityStatus } from './desired-state-reconciler.js';
 import type {
   AgentDefinition,
   DeployResult,
@@ -9,7 +11,7 @@ import type {
 import { AgentDefLoader, type AgentDefLoaderOptions } from './agent-def-loader.js';
 import { HookStrategy } from './hook-strategy.js';
 import { PluginProbeStrategy } from './plugin-probe-strategy.js';
-import { PluginInjectStrategy } from './plugin-inject-strategy.js';
+import { PluginInjectStrategy, isOpenClawInstrumentationDisabled } from './plugin-inject-strategy.js';
 import { DirectoryPluginStrategy } from './directory-plugin-strategy.js';
 import { DetectionOnlyStrategy } from './detection-only-strategy.js';
 import { DshYamlPatchStrategy } from './dsh-yaml-patch-strategy.js';
@@ -17,6 +19,7 @@ import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
+import { readJsonDocument } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
 import {
   applyPersistedDeployTargets,
@@ -30,9 +33,12 @@ export interface DeploymentManagerOptions {
   dataDir: string;
   pilotDir: string;
   builtinAgentsDir?: string;
+  versionProbeRunner?: VersionProbeRunner;
 }
 
 export class DeploymentManager {
+  private readonly versionProbeRunner?: VersionProbeRunner;
+  private readonly instrumentationEvents = new Map<string, number>();
   private readonly dataDir: string;
   private readonly pilotDir: string;
   private readonly hookStrategy: HookStrategy;
@@ -48,6 +54,7 @@ export class DeploymentManager {
   private operationTail: Promise<void> = Promise.resolve();
 
   constructor(opts: DeploymentManagerOptions) {
+    this.versionProbeRunner = opts.versionProbeRunner;
     this.dataDir = opts.dataDir;
     this.pilotDir = opts.pilotDir;
     this.stateFilePath = path.join(opts.dataDir, 'deployed-agents.json');
@@ -186,7 +193,11 @@ export class DeploymentManager {
    * uninstaller path so the agent's config doesn't keep a dangling spec
    * pointing at a (possibly purged) plugin.mjs.
    */
-  async undeployAgent(def: AgentDefinition): Promise<boolean> {
+  undeployAgent(def: AgentDefinition): Promise<boolean> {
+    return this.runExclusive(() => this.undeployAgentUnlocked(def));
+  }
+
+  private async undeployAgentUnlocked(def: AgentDefinition): Promise<boolean> {
     await this.loadState();
     const strategy = this.getStrategy(def);
     if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
@@ -219,6 +230,17 @@ export class DeploymentManager {
     });
   }
 
+  /** Native explicit disable is an opt-out, not drift to repair. */
+  async isInstrumentationExplicitlyDisabled(def: AgentDefinition): Promise<boolean> {
+    if (def.deployMode === 'plugin-inject' && def.pluginInject?.configShape === 'openclaw-nested') {
+      const configPath = await this.pluginInjectStrategy.resolveExistingConfigPath(def.pluginInject);
+      if (!configPath) return false;
+      const document = await readJsonDocument<Record<string, unknown>>(configPath, 'jsonc');
+      return document.status === 'ok' && isOpenClawInstrumentationDisabled(document.data, def.pluginInject.pluginId);
+    }
+    return false;
+  }
+
   /**
    * Whether the agent's integration is currently missing and needs to be
    * (re)deployed. Used by the watchdog to detect specs overwritten by other
@@ -248,7 +270,26 @@ export class DeploymentManager {
     }
   }
 
+  /** C8 calls only after a validated event from the current instrumentation. */
+  recordInstrumentationEvent(agentId: string, receivedAt: number): void {
+    if (Number.isFinite(receivedAt) && receivedAt <= Date.now()) this.instrumentationEvents.set(agentId, receivedAt);
+  }
+
+  async inspectInstrumentation(def: AgentDefinition): Promise<CapabilityStatus> {
+    return new InstrumentationHealth({
+      detected: d => this.isAgentDetected(d),
+      configured: async d => !(await this.needsRedeploy(d)),
+      enabled: async d => !(await this.isInstrumentationExplicitlyDisabled(d)),
+      versionProbeRunner: this.versionProbeRunner,
+      configuredAt: d => this.state[d.id] ? Date.parse(this.state[d.id].deployedAt) : null,
+      lastEventAt: d => this.instrumentationEvents.get(d.id) ?? null,
+    }).inspect(def);
+  }
+
   private async deployAgent(def: AgentDefinition): Promise<DeployResult> {
+    if (await this.isInstrumentationExplicitlyDisabled(def)) return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true, reason: 'disabled' };
+    const version = await inspectInstalledVersion(def, this.versionProbeRunner);
+    if (!version.compatible) return { success: false, agentId: def.id, deployMode: def.deployMode, skipped: true, reason: 'unsupported_version', error: version.reason };
     const record = this.state[def.id];
     def = applyPersistedDeployTargets(def, record);
     const strategy = this.getStrategy(def);
@@ -309,6 +350,7 @@ export class DeploymentManager {
       ? await this.dshYamlPatchStrategy.deployAt(def, dshTarget)
       : await strategy.deploy(def);
 
+    if (result.reason === 'disabled') return result;
     if (result.success) {
       const newRecord: DeployedAgentRecord = {
         deployMode: def.deployMode,

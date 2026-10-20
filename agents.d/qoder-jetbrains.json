@@ -16,5 +16,68 @@
       "~/.config/JetBrains/GoLand*/plugins/qoder-jetbrains"
     ],
     "commands": []
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "shared-local-source"
+    ],
+    "adapters": [
+      {
+        "id": "qoder-trace",
+        "role": "shared"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "qoder.shared-native-session-unresolved",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "qoder.shared-native-session-unresolved",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "qoder.shared-native-session-unresolved",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "qoder.shared-native-session-unresolved",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "unavailable",
+      "tools": "unavailable",
+      "results": "unavailable",
+      "tokens": "unavailable",
+      "subagents": "unavailable"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Detection only; shared Qoder source identity must be resolved before attribution",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

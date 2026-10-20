@@ -39,6 +39,7 @@ const SPAN_ATTR_RESERVED_PREFIXES = [
   'agent.',
   'time_unix_nano',
   'observed_time_unix_nano',
+  'ntconsult.analytics.',
 ];
 
 function isReservedSpanAttrKey(key) {

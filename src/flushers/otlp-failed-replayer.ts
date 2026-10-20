@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { gzipSync } from 'node:zlib';
+import { chmodQuiet, ensurePrivateDir } from '../utils/fs-utils.js';
 
 /** One line of logs/otlp-failed/*.jsonl, as written by otlp-json-serializer. */
 export interface FailedSpanRecord {
@@ -33,8 +34,24 @@ export interface ReplayResult {
   authFailed: boolean;
   /** True when the run stopped after MAX_CONSECUTIVE_REJECTIONS single-span rejections in a row. */
   systemicReject: boolean;
+  /** Records dropped without sending because a synchronized exclusion covers them. */
+  excluded?: number;
 }
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+export interface ReplayOptions {
+  /**
+   * Server-recorded exclusions synchronized to the device. Excluded records are
+   * removed from the managed spool only and never resent (the originals outside
+   * the spool are untouched).
+   */
+  isExcluded?: (record: FailedSpanRecord) => boolean;
+  /**
+   * Records that must stay in the spool, neither sent nor dropped (e.g. analytics records while the
+   * exclusion fence is not synchronized for the current credential). Checked after `isExcluded`.
+   */
+  isHeld?: (record: FailedSpanRecord) => boolean;
+}
 
 interface Item { line: string; rec: FailedSpanRecord }
 
@@ -167,8 +184,10 @@ async function post(target: ReplayTarget, fetchImpl: FetchLike, batch: Item[], a
 async function appendRejected(failedDir: string, claimed: string, lines: string[]): Promise<void> {
   if (lines.length === 0) return;
   const dir = path.join(failedDir, 'rejected');
-  await fs.mkdir(dir, { recursive: true });
-  await fs.appendFile(path.join(dir, claimed.replace(CLAIM_TAG, '')), lines.join('\n') + '\n');
+  await ensurePrivateDir(dir);
+  const target = path.join(dir, claimed.replace(CLAIM_TAG, ''));
+  await fs.appendFile(target, lines.join('\n') + '\n', { mode: 0o600 });
+  await chmodQuiet(target, 0o600);
 }
 
 /** Appends text to a claimed file, first terminating a half-written last line so
@@ -177,6 +196,7 @@ async function appendTerminated(claimedPath: string, data: Buffer | string): Pro
   const existing = await fs.readFile(claimedPath).catch(() => null);
   const prefix = existing && existing.length > 0 && existing[existing.length - 1] !== 0x0a ? '\n' : '';
   await fs.appendFile(claimedPath, Buffer.concat([Buffer.from(prefix), Buffer.from(data)]));
+  await chmodQuiet(claimedPath, 0o600);
 }
 
 /** Moves whatever the flusher wrote to the unclaimed file into the claimed one.
@@ -214,8 +234,9 @@ async function appendStaging(claimedPath: string, staging: string): Promise<void
 /** Rewrites the claimed file atomically with the lines still pending. */
 async function rewriteClaimed(claimedPath: string, lines: string[]): Promise<void> {
   const tmp = `${claimedPath}.rewrite.tmp`;
-  await fs.writeFile(tmp, lines.join('\n') + '\n');
+  await fs.writeFile(tmp, lines.join('\n') + '\n', { mode: 0o600 });
   await fs.rename(tmp, claimedPath);
+  await chmodQuiet(claimedPath, 0o600);
 }
 
 /** Resends the failed spans of one endpoint and deletes each file once every line
@@ -230,6 +251,7 @@ export async function replayFailedSpans(
   fetchImpl: FetchLike = (url, init) => fetch(url, init),
   shouldStop?: () => boolean,
   abort?: AbortSignal,
+  options?: ReplayOptions,
 ): Promise<ReplayResult> {
   let consecutiveRejections = 0;
   const result: ReplayResult = { sent: 0, rejected: 0, kept: 0, authFailed: false, systemicReject: false };
@@ -270,7 +292,20 @@ export async function replayFailedSpans(
     result.rejected += bad.length;
 
     let changed = bad.length > 0;
-    const pending = batchesBySize(parsed);
+    // Synchronized exclusions drop their records from the managed spool only,
+    // without any send, before any batch is built.
+    const included: Item[] = [];
+    const held: string[] = [];
+    for (const item of parsed) {
+      if (options?.isHeld?.(item.rec)) { held.push(item.line); continue; }
+      if (options?.isExcluded?.(item.rec)) {
+        result.excluded = (result.excluded ?? 0) + 1;
+        changed = true;
+        continue;
+      }
+      included.push(item);
+    }
+    const pending = batchesBySize(included);
     while (pending.length > 0) {
       const batch = pending.shift()!;
       const status = shouldStop?.() ? null : await post(target, fetchImpl, batch, abort);
@@ -291,7 +326,7 @@ export async function replayFailedSpans(
         consecutiveRejections++;
         if (consecutiveRejections >= MAX_CONSECUTIVE_REJECTIONS && pending.length > 0) {
           // The backend rejects everything: keep the rest instead of quarantining the backlog.
-          const rest = pending.flat().map((b) => b.line);
+          const rest = [...pending.flat().map((b) => b.line), ...held];
           await rewriteClaimed(claimedPath, rest);
           result.kept += rest.length;
           result.systemicReject = true;
@@ -299,13 +334,18 @@ export async function replayFailedSpans(
         }
       } else {
         if (status === 401 || status === 403) result.authFailed = true;
-        const rest = [batch, ...pending].flat().map((b) => b.line);
+        const rest = [...[batch, ...pending].flat().map((b) => b.line), ...held];
         if (changed) await rewriteClaimed(claimedPath, rest);
         result.kept += rest.length;
         return result;
       }
     }
-    await fs.rm(claimedPath, { force: true });
+    if (held.length > 0) {
+      await rewriteClaimed(claimedPath, held);
+      result.kept += held.length;
+    } else {
+      await fs.rm(claimedPath, { force: true });
+    }
   }
   return result;
 }

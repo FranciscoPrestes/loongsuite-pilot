@@ -89,6 +89,17 @@ describe('WorkerManifestSupervisor', () => {
     );
   }
 
+  it('process inspection never fabricates observed event health', async () => {
+    const supervisor = new WorkerManifestSupervisor();
+    expect(await supervisor.inspectProcess(bundleRoot, options())).toEqual({ configured: false, processAlive: false, observedEventAt: null });
+    await fs.writeFile(path.join(bundleRoot, 'worker.manifest.json'), '{}');
+    expect(await supervisor.inspectProcess(bundleRoot, options())).toEqual({ configured: false, processAlive: false, observedEventAt: null });
+    await writeManifest(['unused']);
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(path.join(stateDir, 'worker.pid'), String(process.pid));
+    expect(await supervisor.inspectProcess(bundleRoot, options())).toEqual({ configured: true, processAlive: true, observedEventAt: null });
+  });
+
   it('resolves the controlled pilot node placeholder to the running Pilot node', async () => {
     const capture = path.join(tmpDir, 'capture.json');
     const entry = path.join(bundleRoot, 'worker-entrypoint.mjs');

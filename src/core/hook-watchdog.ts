@@ -251,6 +251,7 @@ export class HookWatchdog {
   private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
+  private checking: Promise<CheckResult> | null = null;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -294,7 +295,13 @@ export class HookWatchdog {
     }
   }
 
-  async runCheck(): Promise<CheckResult> {
+  runCheck(): Promise<CheckResult> {
+    if (this.checking) return this.checking;
+    this.checking = this.runCheckOnce().finally(() => { this.checking = null; });
+    return this.checking;
+  }
+
+  private async runCheckOnce(): Promise<CheckResult> {
     const summary: CheckResult = { checked: 0, repaired: 0, skipped: 0 };
 
     for (const target of this.targets) {

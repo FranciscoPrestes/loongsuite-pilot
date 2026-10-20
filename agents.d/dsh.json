@@ -3,8 +3,12 @@
   "displayName": "DeepSeek Harness",
   "deployMode": "dsh-yaml-patch",
   "detection": {
-    "paths": ["$DSH_HOME"],
-    "commands": ["dsh"]
+    "paths": [
+      "$DSH_HOME"
+    ],
+    "commands": [
+      "dsh"
+    ]
   },
   "dshYamlPatch": {
     "pluginSource": "$PILOT_DATA/plugins/dsh/plugin.mjs",
@@ -15,5 +19,67 @@
     "type": "session-file-polling",
     "logDir": "$PILOT_DATA/logs/dsh",
     "filePattern": "dsh-*.jsonl"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-directory-plugin-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "dsh-log",
+        "role": "primary"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "dsh.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "dsh.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "dsh.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "dsh.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

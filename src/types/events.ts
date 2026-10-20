@@ -30,6 +30,27 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 
 /**
+ * Reserved additive analytics annotation keys (the complete allowlist). These
+ * are collector-authored only: hook records, user-defined custom attributes and
+ * content-policy inputs can never inject or overwrite them, and only
+ * `attachObservation` may write them. Anything else under
+ * `ntconsult.analytics.*` is excluded as untrusted.
+ */
+export const ANALYTICS_ANNOTATION_KEYS = [
+  'ntconsult.analytics.schema_version',
+  'ntconsult.analytics.observation_id',
+  'ntconsult.analytics.kind',
+  'ntconsult.analytics.observation',
+  'ntconsult.analytics.generated_by',
+] as const;
+
+export type AnalyticsAnnotationKey = (typeof ANALYTICS_ANNOTATION_KEYS)[number];
+
+export function isAnalyticsAnnotationKey(key: string): key is AnalyticsAnnotationKey {
+  return (ANALYTICS_ANNOTATION_KEYS as readonly string[]).includes(key);
+}
+
+/**
  * Unified AI agent event — the normalized event_t-compatible format shared by inputs.
  *
  * The dotted keys intentionally mirror the SLS wide-table schema so serialization can
@@ -37,6 +58,13 @@ export type JsonValue =
  */
 export interface AgentActivityEntry {
   [key: string]: JsonValue | undefined;
+
+  /** Additive serialized observation metadata; existing native tool events remain primary. */
+  'ntconsult.analytics.schema_version'?: string;
+  'ntconsult.analytics.observation_id'?: string;
+  'ntconsult.analytics.kind'?: 'capability' | 'repo_snapshot' | 'command_context' | 'local_report' | 'hook_health';
+  'ntconsult.analytics.observation'?: string;
+  'ntconsult.analytics.generated_by'?: 'collector' | 'analytics';
 
   time_unix_nano: string;
   observed_time_unix_nano?: string;
@@ -119,6 +147,8 @@ export interface AgentActivityEntry {
   'git.repo'?: string;
   /** Current branch when observed at collection time. */
   'git.branch'?: string;
+  /** Opaque id of the checkout (hash of its git dir): main checkout and linked worktrees differ. */
+  'git.worktree_id'?: string;
   /** Filesystem top-level of the Git repository used to infer Git metadata. */
   'git.repo_root'?: string;
   /** Git hosting domain (e.g. github.com, gitlab.com). */

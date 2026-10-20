@@ -1,0 +1,21 @@
+{
+  "policyId": "fixture-policy",
+  "revision": "10",
+  "desiredBundleVersion": "1.2.0",
+  "enabled": true,
+  "killSwitch": false,
+  "deviceId": "fixture-device",
+  "cohortId": null,
+  "reasons": [],
+  "deletionRevision": "2",
+  "issuedAt": "2026-10-14T12:00:00Z",
+  "expiresAt": "2026-10-17T12:00:00Z",
+  "limits": {
+    "reconcileIntervalMs": 60000,
+    "hookTargetP95Ms": 100,
+    "workerTimeoutMs": 2000,
+    "maxMetadataFiles": 100,
+    "maxSnippetBytes": 65536,
+    "maxReportBytes": 2097152
+  }
+}

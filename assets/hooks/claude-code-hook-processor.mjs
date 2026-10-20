@@ -104,6 +104,39 @@ function isAgentTool(toolName) {
   return toolName === 'Agent' || toolName === 'agent';
 }
 
+// ─── C6 execution correlation evidence (additive) ───
+
+const MAX_EXEC_HANDLE_LENGTH = 200;
+const BACKGROUND_SPAWN_ID = /Command running in background with ID:\s*([A-Za-z0-9._:@-]{1,200})/;
+
+/**
+ * Process/execution handle for a tool execution, from REAL observed evidence
+ * only (never invented): `bash_id` on a background-output poll, the subagent
+ * agent id, or the spawn acknowledgement's background task id. Returns
+ * undefined when no handle exists — correlation then falls back to the call id.
+ */
+function resolveToolExecHandle(input, timestamps) {
+  const bashId = input && typeof input.bash_id === 'string' ? input.bash_id : undefined;
+  if (bashId && bashId.length > 0 && bashId.length <= MAX_EXEC_HANDLE_LENGTH) return bashId;
+  const agentId = timestamps && typeof timestamps.agentId === 'string' ? timestamps.agentId : undefined;
+  if (agentId && agentId.length > 0 && agentId.length <= MAX_EXEC_HANDLE_LENGTH) return agentId;
+  const resultContent = timestamps && typeof timestamps.resultContent === 'string'
+    ? timestamps.resultContent.slice(0, 10_000)
+    : '';
+  const spawn = BACKGROUND_SPAWN_ID.exec(resultContent);
+  return spawn ? spawn[1] : undefined;
+}
+
+/**
+ * True when the tool result is only an async launch acknowledgement (the
+ * process keeps running): tool completion must never be read as the runner's
+ * final result.
+ */
+function isAsyncSpawn(input, timestamps) {
+  if (input && input.run_in_background === true) return true;
+  return Boolean(timestamps && timestamps.isAsync === true);
+}
+
 /**
  * Resolve a direct subagent transcript at:
  * <parent-directory>/<parent-session>/subagents/agent-<agent-id>.jsonl
@@ -1506,6 +1539,16 @@ function buildTurnRecords(
         : {};
       if (skillLoad) consumedSkillLoads.add(skillLoad);
 
+      // C6 execution correlation evidence (additive; legacy fields unchanged):
+      // the process/execution handle lets async polling join the ORIGINAL
+      // execution. Handles come from real observed evidence only — the
+      // background task id (BashOutput poll or spawn ack), the subagent agent
+      // id, or the spawn message "Command running in background with ID: <id>".
+      const execHandle = resolveToolExecHandle(toolBlock.input, timestamps);
+      const execFields = execHandle ? { 'gen_ai.tool.call.exec.id': execHandle } : {};
+      const spawnedAsync = Boolean(execHandle) && isAsyncSpawn(toolBlock.input, timestamps);
+      const execPhaseFields = spawnedAsync ? { 'gen_ai.tool.call.exec.phase': 'spawned' } : {};
+
       // tool.call
       records.push({
         time_unix_nano: isoToUnixNanos(timestamps.call),
@@ -1518,6 +1561,7 @@ function buildTurnRecords(
         'gen_ai.tool.name': toolName,
         'gen_ai.tool.call.id': toolId,
         'gen_ai.tool.call.arguments': toJsonValue(toolBlock.input || {}),
+        ...execFields,
         ...skillFields,
       });
 
@@ -1535,6 +1579,8 @@ function buildTurnRecords(
           'gen_ai.tool.call.id': toolId,
           'gen_ai.tool.call.result': toJsonValue(timestamps.resultContent || ''),
           'tool.result.status': timestamps.isError ? 'error' : 'success',
+          ...execFields,
+          ...execPhaseFields,
           ...skillFields,
         };
         if (timestamps.isError) {

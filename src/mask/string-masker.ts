@@ -1,4 +1,5 @@
 import { collectPiiRanges } from './pii-detectors.js';
+import { scanCredentials } from './credential-scanner.js';
 import {
   collectSensitiveRanges,
   resolveStringMaskOptions,
@@ -51,7 +52,24 @@ export function maskString(
     );
   }
 
-  return applyMaskRanges(value, ranges);
+  const masked = applyMaskRanges(value, ranges);
+  // Context- and format-based credentials (Bearer, JWT, password=..., URL passwords, cookies, query tokens, ...)
+  // ride on the API-key type: whoever masks API keys also gets these.
+  return plan.rules.some(rule => rule.type === 'apiKey') ? scanAroundPreviews(masked) : masked;
+}
+
+/** Preview tokens (`[X_MASKED]{abc***}`) are already-masked output: scan only the text between them. */
+function scanAroundPreviews(value: string): string {
+  const previews = collectMaskedPreviewRanges(value);
+  if (previews.length === 0) return scanCredentials(value).text;
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (const range of previews) {
+    chunks.push(scanCredentials(value.slice(cursor, range.start)).text, value.slice(range.start, range.end));
+    cursor = range.end;
+  }
+  chunks.push(scanCredentials(value.slice(cursor)).text);
+  return chunks.join('');
 }
 
 interface ProtectedPreviewRange {

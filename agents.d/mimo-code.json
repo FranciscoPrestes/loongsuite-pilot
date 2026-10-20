@@ -3,8 +3,14 @@
   "displayName": "MiMo Code",
   "deployMode": "plugin-inject",
   "detection": {
-    "paths": ["~/.mimocode", "~/.config/mimocode", "~/.local/share/mimocode"],
-    "commands": ["mimo"]
+    "paths": [
+      "~/.mimocode",
+      "~/.config/mimocode",
+      "~/.local/share/mimocode"
+    ],
+    "commands": [
+      "mimo"
+    ]
   },
   "pluginInject": {
     "configPaths": [
@@ -21,5 +27,67 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/mimo-code"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-extension-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "mimo-code-log",
+        "role": "primary"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "mimo-code.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "mimo-code.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "mimo-code.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "mimo-code.local-plugin-jsonl",
+        "secondary": [],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "delta"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

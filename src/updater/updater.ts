@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createWriteStream, readdirSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
@@ -26,6 +26,10 @@ import {
 } from '../utils/restart-breadcrumb.js';
 import { NODE_SQLITE_PROBE } from '../utils/node-sqlite.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
+import { assessRelease, resolveIntegrityPolicy, type ReleaseDescriptor } from './release-integrity.js';
+import { trustedKeyMap, type TrustedAnalyticsKeys } from '../deployment/manifest-signature.js';
+import { AnalyticsBundleStore, type AnalyticsBundleOptions, type VerifiedAnalyticsBundle } from './analytics-bundle-store.js';
+import type { SignedAnalyticsManifest } from '../deployment/manifest-signature.js';
 import type { UpdaterMetrics } from './updater-metrics.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from './runtime-state.js';
 
@@ -102,6 +106,8 @@ export interface VersionManifest {
   package_url: string;
   released_at?: string;
   sha256?: string;
+  /** Signed analytics-only archive; never routed through npm/postinstall. */
+  analyticsBundle?: SignedAnalyticsManifest;
 }
 
 export interface CanaryManifest extends VersionManifest {
@@ -203,6 +209,7 @@ interface CollectorRuntimeRecord {
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 export class Updater {
+  private readonly analyticsBundles: AnalyticsBundleStore | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private checking = false;
@@ -215,11 +222,59 @@ export class Updater {
   constructor(
     private config: AutoUpdateConfig,
     baseDir?: string,
+    analytics?: AnalyticsBundleOptions,
   ) {
     this.paths = baseDir ? buildPaths(baseDir) : defaultPaths();
+    this.analyticsBundles = analytics ? new AnalyticsBundleStore(this.paths.dataDir, analytics) : null;
     this.configPath = resolveHome(
       process.env.AGENT_DATA_COLLECTION_CONFIG ?? DEFAULT_CONFIG_PATH,
     );
+  }
+
+  async installAnalyticsBundle(envelope: SignedAnalyticsManifest, archive: string): Promise<void> {
+    if (!this.analyticsBundles) throw new Error('Analytics updater not configured');
+    await this.analyticsBundles.install(envelope, archive);
+  }
+
+  async resolveAnalyticsBundle(): Promise<VerifiedAnalyticsBundle | null> {
+    return this.analyticsBundles ? this.analyticsBundles.resolve() : null;
+  }
+
+  private async downloadAnalyticsBundle(target: VersionManifest): Promise<void> {
+    if (!this.analyticsBundles || !target.analyticsBundle) throw new Error('Analytics updater not configured');
+    await this.analyticsBundles.preflight(target.analyticsBundle);
+    if (target.version !== target.analyticsBundle.payload.version || target.sha256 !== target.analyticsBundle.payload.archiveSha256) throw new Error('Analytics release identity mismatch');
+    const tmp = await fs.mkdtemp(path.join(this.paths.cacheDir, 'analytics-download-'));
+    try {
+      const archive = path.join(tmp, 'bundle.tgz');
+      await this.downloadAnalyticsArchive(target.package_url, archive);
+      await this.installAnalyticsBundle(target.analyticsBundle, archive);
+    } finally { await fs.rm(tmp, { recursive: true, force: true }); }
+  }
+
+  private async downloadAnalyticsArchive(url: string, destination: string): Promise<void> {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), DOWNLOAD_TIMEOUT_MS);
+    const limit = 32 * 1024 * 1024;
+    try {
+      const response = await fetch(url, { signal: abort.signal });
+      if (!response.ok || !response.body) throw new Error('Analytics archive download failed');
+      const length = response.headers.get('content-length');
+      if (length && Number(length) > limit) {
+        await response.body.cancel();
+        throw new Error('Analytics archive exceeds limit');
+      }
+      let bytes = 0;
+      const bound = new Transform({ transform(chunk, _encoding, callback) {
+        bytes += chunk.length;
+        callback(bytes > limit ? new Error('Analytics archive exceeds limit') : null, bytes > limit ? undefined : chunk);
+      } });
+      await pipeline(Readable.fromWeb(response.body as any), bound, createWriteStream(destination), { signal: abort.signal });
+    } catch (error) {
+      abort.abort();
+      await fs.rm(destination, { force: true });
+      throw error;
+    } finally { clearTimeout(timer); }
   }
 
   setMetrics(metrics: UpdaterMetrics): void {
@@ -281,6 +336,10 @@ export class Updater {
       await this.ensureInstallId();
       const { manifest: target, channel, hotfixVersion } = this.resolveTargetVersion(latestManifest);
 
+      if (Object.hasOwn(target, 'analyticsBundle')) {
+        await this.downloadAnalyticsBundle(target);
+        return;
+      }
       const local = await this.readLocalVersion();
       if (!this.needsUpdate(local, target, channel)) {
         logger.debug('already up to date', {
@@ -541,10 +600,36 @@ export class Updater {
     }
   }
 
+  /** Owner-provisioned Ed25519 release keys (`<dataDir>/release-trusted-keys.json`); missing or invalid means none. */
+  private async releaseKeys(): Promise<TrustedAnalyticsKeys | undefined> {
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(this.paths.dataDir, 'release-trusted-keys.json'), 'utf8')) as TrustedAnalyticsKeys;
+      trustedKeyMap(parsed);
+      return parsed;
+    } catch { return undefined; }
+  }
+
+  /**
+   * `enforce` refuses before anything is downloaded; the default `warn` only logs, so a server that does not yet
+   * publish sha256/signature keeps working. See release-integrity.ts for the checks and the owner gate.
+   */
+  private async enforceReleaseIntegrity(packageUrl: string, manifest: VersionManifest): Promise<void> {
+    const policy = { ...resolveIntegrityPolicy(this.config), trustedKeys: await this.releaseKeys() };
+    const problems = assessRelease(manifest as ReleaseDescriptor, packageUrl, policy);
+    if (problems.length === 0) return;
+    if (policy.mode === 'enforce') {
+      logger.error('release refused by the integrity policy', { problems, version: manifest.version });
+      throw new Error(`release integrity: ${problems.join(',')}`);
+    }
+    logger.warn('release integrity problems (warn mode, update proceeds)', { problems, version: manifest.version });
+  }
+
   private async downloadAndDeploy(
     packageUrl: string,
     manifest: VersionManifest,
   ): Promise<void> {
+    if (Object.hasOwn(manifest, 'analyticsBundle')) throw new Error('Analytics bundle cannot use legacy installer');
+    await this.enforceReleaseIntegrity(packageUrl, manifest);
     const { cacheDir, versionsDir } = this.paths;
     // The tarball is unpacked with tar.exe, which cannot address a non-ASCII path
     // (see utils/win-archive.ts), so under C:\Users\<CJK name> the download staging

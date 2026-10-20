@@ -25,6 +25,8 @@ export interface AutoUpdateConfig {
   installId?: string;
   canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
+  /** Release integrity for the main package: `warn` (default) logs problems, `enforce` refuses the update. */
+  integrity?: { mode?: 'warn' | 'enforce'; allowedHosts?: string[] };
 }
 
 export interface CmsConfig {
@@ -122,7 +124,20 @@ export interface InnerTraceConfig {
   serviceNamePrefix?: string;
 }
 
+export interface InstrumentationConfig {
+  localEnabled: boolean;
+  /** Explicit portal HTTPS origin. Never inferred from an OTLP endpoint. */
+  portalBaseUrl: string;
+  deviceId?: string;
+  /** Existing machine Bearer credential; never included in status or logs. */
+  authorization?: string;
+  /** Hours the last healthy policy keeps enrichment on while offline (1..72, default 24). */
+  healthyTtlHours?: number;
+}
+
 export interface AnalyticsConfig {
+  enrichment?: {timeoutMs:number;maxAgeDays:number;maxSpoolBytes:number};
+  instrumentation?: InstrumentationConfig;
   privacy?: { excludeWorkspaces: string[] };
   enabled: boolean;
   autoStart: boolean;

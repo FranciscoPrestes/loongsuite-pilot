@@ -1,3 +1,9 @@
+import { setActiveMaskConfig } from '../mask/active-mask.js';
+import { JobStore } from '../enrichment/job-store.js';
+import { EnrichmentScheduler } from '../enrichment/scheduler.js';
+import { jobFromEntry, type LocalJob } from '../enrichment/job-contract.js';
+import type { AgentActivityEntry } from '../types/index.js';
+import { createInputAdapter } from '../inputs/input-adapter-registry.js';
 import { WorkspacePolicy } from './workspace-policy.js';
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
@@ -13,6 +19,12 @@ import { ToolVerdictStore } from '../interceptor/tool-verdict-store.js';
 import { startInterceptorService, type InterceptorService } from '../interceptor/daemon/lifecycle.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
+import { DesiredStateReconciler } from '../deployment/desired-state-reconciler.js';
+import { createCollectorPolicyRuntime } from '../analytics/bundle-runtime.js';
+import { resolveRuntimeAuthorization } from '../analytics/instrumentation-runtime.js';
+import { AnalyticsRuntime } from '../analytics/runtime.js';
+import { connectReplayFence, tolerantManifests } from '../analytics/runtime.js';
+import type { CapabilityStatus } from '../deployment/desired-state-reconciler.js';
 import {
   areGrokBuildHookAssetsHealthy,
   restoreGrokBuildHookAssets,
@@ -170,6 +182,11 @@ export class Orchestrator extends EventEmitter {
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
+  private enrichmentStore: JobStore | null = null;
+  private enrichmentScheduler: EnrichmentScheduler | null = null;
+  private enrichmentUnavailable = false;
+  private analyticsRuntime: AnalyticsRuntime | null = null;
+  private desiredStateReconciler: DesiredStateReconciler | null = null;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
   private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
@@ -190,6 +207,22 @@ export class Orchestrator extends EventEmitter {
     super();
     this.config = config;
     this.dataDir = resolveHome(config.dataDir || DEFAULT_DATA_DIR);
+  }
+
+  getEnrichmentScheduler(): EnrichmentScheduler | null { return this.enrichmentScheduler; }
+  /** C7 synchronizes tombstones and consumes replayBatch; raw records are never exposed. */
+  getEnrichmentStore(): JobStore | null { return this.enrichmentStore; }
+  getAnalyticsRuntime(): AnalyticsRuntime | null { return this.analyticsRuntime; }
+  async enqueueEnrichment(job: LocalJob): Promise<'created'|'existing'|'disabled'|'unavailable'> {
+    // Every enrichment failure is isolated: the harness and base capture never wait on it.
+    try {
+      if (this.enrichmentUnavailable) return 'unavailable';
+      if (!this.enrichmentStore || !this.desiredStateReconciler?.getEffectivePolicy().enrichmentEnabled) return 'disabled';
+      return await this.enrichmentStore.enqueue(job);
+    } catch {
+      try { this.emit('enrichment:status', { state: 'error', reason: 'enqueue_unavailable' }); } catch { /* observer failure */ }
+      return 'unavailable';
+    }
   }
 
   async start(): Promise<void> {
@@ -236,6 +269,7 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setWorkspacePolicy(workspacePolicy);
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
+    setActiveMaskConfig(this.config.mask);
     this.inputManager.setMaskConfig(
       this.config.mask ?? {
         mode: 'none',
@@ -347,11 +381,66 @@ export class Orchestrator extends EventEmitter {
     // 6. Register inputs & build detection entries
     const detectionEntries = await this.registerAllInputs();
 
+    // Compatibility is the C3-verified bundle (resolver), never the bare installed collector version.
+    const policyRuntime = createCollectorPolicyRuntime(this.config, this.dataDir, version);
+    this.desiredStateReconciler = new DesiredStateReconciler({
+      definitions: this.deploymentManager.getDefinitions(), deployment: this.deploymentManager,
+      intervalMs: 60_000, now: Date.now, agentEnabled: id => this.isAgentGatedEnabled(id),
+      localEnabled: () => this.config.instrumentation?.localEnabled === true,
+      policyClient: policyRuntime?.client,
+      onStatuses: statuses => this.emit('instrumentation:status', statuses),
+    });
+    await this.desiredStateReconciler.start();
+    // Invalid or direct enrichment config must never disable base capture:
+    // the analytics queue degrades to disabled and capture keeps running.
+    this.enrichmentUnavailable = false;
+    try {
+      const policy = () => this.desiredStateReconciler!.getEffectivePolicy();
+      this.enrichmentStore = new JobStore(this.dataDir, {policy, ...this.config.enrichment});
+      this.enrichmentScheduler = new EnrichmentScheduler(this.enrichmentStore, {policy, timeoutMs:this.config.enrichment?.timeoutMs,
+        onError:reason=>this.emit('enrichment:status',{state:'error',reason})});
+      this.inputManager.on('enrichment:signals', ({inputId,entries}:{inputId:string;entries:AgentActivityEntry[]}) => {
+        try {
+          if(!policy().enrichmentEnabled)return;
+          for(const entry of entries) {
+            const job=jobFromEntry(entry,inputId,this.config.instrumentation?.deviceId??'',version);
+            if(job)void this.enqueueEnrichment(job);
+          }
+        } catch { /* fail open: signal conversion never blocks base capture */ }
+      });
+      const deviceId = this.config.instrumentation?.deviceId;
+      const portalBaseUrl = this.config.instrumentation?.portalBaseUrl;
+      if (deviceId && portalBaseUrl) {
+        const runtime = new AnalyticsRuntime({
+          dataDir: this.dataDir, collectorVersion: version, deviceId, userId: this.config.userId, portalBaseUrl,
+          store: this.enrichmentStore, scheduler: this.enrichmentScheduler, policy, ...(policyRuntime ? { policyClient: policyRuntime.client } : {}),
+          credential: () => resolveRuntimeAuthorization(this.config),
+          send: entry => this.flusher.sendBatch([entry]), manifests: tolerantManifests(this.deploymentManager.getDefinitions()),
+          onStatus: reason => this.emit('enrichment:status', { state: 'error', reason }),
+        });
+        this.analyticsRuntime = runtime;
+        this.inputManager.on('enrichment:signals', ({ entries }: { entries: AgentActivityEntry[] }) => runtime.onEntries(entries));
+        this.on('instrumentation:status', (statuses: CapabilityStatus[]) => this.analyticsRuntime?.onStatuses(statuses));
+        connectReplayFence(this.flusher, runtime.replayFence());
+        // The reconciler's startup batch fired before this listener existed: publish it now.
+        runtime.onStatuses(this.desiredStateReconciler.getStatuses());
+        runtime.start();
+      }
+      this.enrichmentScheduler.start();
+    } catch (err) {
+      this.enrichmentStore = null;
+      this.enrichmentScheduler = null;
+      this.enrichmentUnavailable = true;
+      logger.warn('enrichment queue unavailable', { error: String(err) });
+      try { this.emit('enrichment:status', { state: 'error', reason: 'init_unavailable' }); } catch { /* observer failure */ }
+    }
+
     // 7. Build deployment detection entries for dynamic discovery
     const deployDetectionEntries = this.buildDeployDetectionEntries();
 
     // 8. Start AgentDiscoveryService (input entries + deploy detection entries)
     this.agentDiscoveryService = new AgentDiscoveryService([...detectionEntries, ...deployDetectionEntries]);
+    this.agentDiscoveryService.on('discovery:refreshed', () => { void this.desiredStateReconciler?.reconcile('discovery'); });
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
@@ -445,6 +534,7 @@ export class Orchestrator extends EventEmitter {
       this.config.statusBar,
       this.config.flushers.jsonl?.outputDir,
     );
+    this.metricsSummaryWriter.setAnalyticsHealth(() => this.analyticsRuntime?.healthSummary() ?? null);
     this.metricsSummaryWriter.start();
 
     // The local dashboard shares the collector lifecycle and is non-fatal when
@@ -566,6 +656,13 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    await this.analyticsRuntime?.stop();
+    this.analyticsRuntime = null;
+    await this.enrichmentScheduler?.stop();
+    this.enrichmentScheduler=null;
+    this.enrichmentStore?.invalidateReplay();
+    this.enrichmentStore=null;
+    await this.desiredStateReconciler?.stop();
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
@@ -605,6 +702,8 @@ export class Orchestrator extends EventEmitter {
     return this.agentDiscoveryService;
   }
 
+  getDesiredStateReconciler(): DesiredStateReconciler | null { return this.desiredStateReconciler; }
+
   getDeploymentManager(): DeploymentManager {
     return this.deploymentManager;
   }
@@ -628,7 +727,6 @@ export class Orchestrator extends EventEmitter {
       const watchPaths = def.detection.paths.map(p =>
         p.startsWith('~') ? resolveHome(p) : p,
       );
-      if (watchPaths.length === 0) continue;
 
       const entryId = `deploy:${def.id}`;
       entries.push({
@@ -639,10 +737,11 @@ export class Orchestrator extends EventEmitter {
         enabled: () => this.isAgentGatedEnabled(def.id),
         start: async () => {
           logger.info('new agent discovered, deploying', { agentId: def.id });
-          await this.deploymentManager.deploySingle(def);
+          if (this.desiredStateReconciler) await this.desiredStateReconciler.reconcile('discovery');
+          else await this.deploymentManager.deploySingle(def);
         },
         stop: async () => {},
-        pollIntervalMs: 300_000,
+        pollIntervalMs: 60_000,
       });
     }
 
@@ -1031,7 +1130,7 @@ export class Orchestrator extends EventEmitter {
     const listenerCfg = this.config.listeners;
 
     // --- Qoder Work CN Trace (multi-source merge, supersedes hook/log/sqlite) ---
-    const qoderWorkTraceInput = new QoderWorkTraceInput({
+    const qoderWorkTraceInput = createInputAdapter('qoder-work-trace', {
       stateStore: this.stateStore,
       logDir: path.join(this.dataDir, 'logs', 'qoder-work', 'history'),
     });
@@ -1059,7 +1158,7 @@ export class Orchestrator extends EventEmitter {
       );
 
     // --- QoderCN (SQLite token usage polling, fallback when trace is disabled) ---
-    const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore });
+    const qoderCnSqliteInput = createInputAdapter('qoder-cn-sqlite', { stateStore: this.stateStore });
     this.inputManager.registerInput(qoderCnSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
@@ -1076,7 +1175,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- QoderCN (IDE snapshot — file history + ai_tracker) — disabled when qoder-cn-trace is enabled ---
-    const qoderCnInput = new QoderCnInput({ stateStore: this.stateStore });
+    const qoderCnInput = createInputAdapter('qoder-cn', { stateStore: this.stateStore });
     this.inputManager.registerInput(qoderCnInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnInput, {
@@ -1094,7 +1193,7 @@ export class Orchestrator extends EventEmitter {
 
     // --- QoderCN Trace (multi-source merge, supersedes sqlite/ide) ---
     const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
-    const qoderCnTraceInput = new QoderCnTraceInput({
+    const qoderCnTraceInput = createInputAdapter('qoder-cn-trace', {
       stateStore: this.stateStore,
       logDir: qoderCnLogDir,
       pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
@@ -1111,7 +1210,7 @@ export class Orchestrator extends EventEmitter {
 
     // --- Qoder Work (Hook JSONL) — disabled when CN trace is active ---
     const qoderWorkLogDir = path.join(this.dataDir, 'logs', 'qoder-work', 'history');
-    const qoderWorkInput = new QoderWorkInput({
+    const qoderWorkInput = createInputAdapter('qoder-work-hook', {
       stateStore: this.stateStore,
       logDir: qoderWorkLogDir,
     });
@@ -1131,7 +1230,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (SDK Log tail) — disabled when CN trace is active ---
-    const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore });
+    const qoderWorkLogInput = createInputAdapter('qoder-work-log', { stateStore: this.stateStore });
     this.inputManager.registerInput(qoderWorkLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkLogInput, {
@@ -1148,7 +1247,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (SQLite agents.db) — disabled when CN trace is active ---
-    const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore });
+    const qoderWorkSqliteInput = createInputAdapter('qoder-work-sqlite', { stateStore: this.stateStore });
     this.inputManager.registerInput(qoderWorkSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
@@ -1170,7 +1269,7 @@ export class Orchestrator extends EventEmitter {
     const qoderWorkCNDetectionPath = resolveHome('~/.qoderworkcn');
 
     // --- Qoder Work CN (Trace: SDK Log + SQLite aggregation) ---
-    const qoderWorkCNTraceInput = new QoderWorkCNTraceInput({
+    const qoderWorkCNTraceInput = createInputAdapter('qoder-work-cn-trace', {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
@@ -1192,7 +1291,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work CN (Hook JSONL) — disabled when CN trace is active ---
-    const qoderWorkCNHookInput = new QoderWorkInput({
+    const qoderWorkCNHookInput = createInputAdapter('qoder-work-cn-hook', {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       logDir: qoderWorkCNLogDir,
@@ -1213,7 +1312,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work CN (SDK Log tail) — disabled when CN trace is active ---
-    const qoderWorkCNLogInput = new QoderWorkLogInput({
+    const qoderWorkCNLogInput = createInputAdapter('qoder-work-cn-log', {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
@@ -1234,7 +1333,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work CN (SQLite agents.db) — disabled when CN trace is active ---
-    const qoderWorkCNSqliteInput = new QoderWorkSqliteInput({
+    const qoderWorkCNSqliteInput = createInputAdapter('qoder-work-cn-sqlite', {
       stateStore: this.stateStore,
       agentType: ClientType.QoderWorkCN,
       dataRoot: qoderWorkCNDataRoot,
@@ -1256,7 +1355,7 @@ export class Orchestrator extends EventEmitter {
 
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
-    const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
+    const qwenWorkCNTraceInput = createInputAdapter('qwen-work-cn-trace', {
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
@@ -1283,7 +1382,7 @@ export class Orchestrator extends EventEmitter {
     // Keep the standalone Hook listener as an explicit fallback when the
     // richer trace merger is disabled. This mirrors the QoderWorkCN lifecycle
     // and makes the qwen-work-cn-hook listener setting effective.
-    const qwenWorkCNHookInput = new QwenWorkCNInput({
+    const qwenWorkCNHookInput = createInputAdapter('qwen-work-cn-hook', {
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
@@ -1303,7 +1402,7 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore });
+    const qwenWorkCNSqliteInput = createInputAdapter('qwen-work-cn-sqlite', { stateStore: this.stateStore });
     this.inputManager.registerInput(qwenWorkCNSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qwenWorkCNSqliteInput, {
@@ -1325,7 +1424,7 @@ export class Orchestrator extends EventEmitter {
     const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
     const qoderMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
-    const qoderTraceInput = new QoderTraceInput({
+    const qoderTraceInput = createInputAdapter('qoder-trace', {
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,
       multimodal: {
@@ -1356,7 +1455,7 @@ export class Orchestrator extends EventEmitter {
 
     // --- Cursor Hook (Hook JSONL) ---
     const cursorHookLogDir = path.join(this.dataDir, 'logs', 'cursor', 'history');
-    const cursorHookInput = new CursorHookInput({
+    const cursorHookInput = createInputAdapter('cursor-hook', {
       stateStore: this.stateStore,
       logDir: cursorHookLogDir,
     });
@@ -1376,7 +1475,7 @@ export class Orchestrator extends EventEmitter {
 
     // --- Claude Code Log (OTel plugin JSONL) ---
     const claudeCodeLogDir = this.resolveClaudeCodeLogDir();
-    const claudeCodeLogInput = new ClaudeCodeLogInput({
+    const claudeCodeLogInput = createInputAdapter('claude-code-log', {
       stateStore: this.stateStore,
       logDir: claudeCodeLogDir,
     });
@@ -1396,7 +1495,7 @@ export class Orchestrator extends EventEmitter {
 
     // --- Grok Build Log (three-source transcript fusion via Hook JSONL) ---
     const grokBuildLogDir = path.join(this.dataDir, 'logs', 'grok-build');
-    const grokBuildLogInput = new GrokBuildLogInput({
+    const grokBuildLogInput = createInputAdapter('grok-build-log', {
       stateStore: this.stateStore,
       logDir: grokBuildLogDir,
     });
@@ -1421,7 +1520,7 @@ export class Orchestrator extends EventEmitter {
     // never starts because the dir is only created later by the
     // delayedCollect subprocess — a chicken-egg problem.
     await ensureDir(kiroCliLogDir);
-    const kiroCliLogInput = new KiroCliLogInput({
+    const kiroCliLogInput = createInputAdapter('kiro-cli-log', {
       stateStore: this.stateStore,
       logDir: kiroCliLogDir,
     });
@@ -1446,7 +1545,7 @@ export class Orchestrator extends EventEmitter {
       'kiro-cli-hook-processor.mjs',
     );
     const kiroCliSessionWatchPaths = KiroCliSessionInput.getWatchPaths(this.dataDir);
-    const kiroCliSessionInput = new KiroCliSessionInput({
+    const kiroCliSessionInput = createInputAdapter('kiro-cli-session', {
       stateStore: this.stateStore,
       hookProcessorPath: kiroCliHookProcessorPath,
       dataDir: this.dataDir,
@@ -1473,7 +1572,7 @@ export class Orchestrator extends EventEmitter {
     const codexWakeupDir = path.join(this.dataDir, 'state', 'codex', 'transcript-wakeups');
     const codexSpanContextDir = path.join(this.dataDir, 'state', 'codex', 'transcript-span-contexts');
     await ensureDir(codexWakeupDir);
-    const codexTranscriptInput = new CodexTranscriptInput({
+    const codexTranscriptInput = createInputAdapter('codex-transcript', {
       stateStore: this.stateStore,
       wakeupDir: codexWakeupDir,
       spanContextDir: codexSpanContextDir,
@@ -1504,7 +1603,7 @@ export class Orchestrator extends EventEmitter {
     // avoiding a 5-minute polling fallback delay after fresh install with --purge.
     const opencodeLogDir = path.join(this.dataDir, 'logs', 'opencode');
     await ensureDir(opencodeLogDir);
-    const opencodeLogInput = new OpenCodeLogInput({
+    const opencodeLogInput = createInputAdapter('opencode-log', {
       stateStore: this.stateStore,
       logDir: opencodeLogDir,
       pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
@@ -1526,7 +1625,7 @@ export class Orchestrator extends EventEmitter {
     // --- Pi Coding Agent Log (Pi extension JSONL) ---
     const piCodingAgentLogDir = path.join(this.dataDir, 'logs', 'pi-coding-agent');
     await ensurePiCodingAgentLogDir(piCodingAgentLogDir);
-    const piCodingAgentLogInput = new PiCodingAgentLogInput({
+    const piCodingAgentLogInput = createInputAdapter('pi-coding-agent-log', {
       stateStore: this.stateStore,
       logDir: piCodingAgentLogDir,
       // The physical JSONL stream is shared by the built-in PI integration and
@@ -1555,7 +1654,7 @@ export class Orchestrator extends EventEmitter {
     // fs.watch in AgentDiscoveryService succeeds immediately after install.
     const mimoCodeLogDir = path.join(this.dataDir, 'logs', 'mimo-code');
     await ensureDir(mimoCodeLogDir);
-    const mimoCodeLogInput = new MimoCodeLogInput({
+    const mimoCodeLogInput = createInputAdapter('mimo-code-log', {
       stateStore: this.stateStore,
       logDir: mimoCodeLogDir,
     });
@@ -1577,7 +1676,7 @@ export class Orchestrator extends EventEmitter {
     const qwenCodeCliLogDir = path.join(this.dataDir, 'logs', 'qwen-code-cli');
     // Pre-create log dir so fs.watch in AgentDiscoveryService succeeds immediately.
     await ensureDir(qwenCodeCliLogDir);
-    const qwenCodeCliLogInput = new QwenCodeCliLogInput({
+    const qwenCodeCliLogInput = createInputAdapter('qwen-code-cli-log', {
       stateStore: this.stateStore,
       logDir: qwenCodeCliLogDir,
     });
@@ -1598,7 +1697,7 @@ export class Orchestrator extends EventEmitter {
     // --- OpenClaw Plugin Log (event_t plugin JSONL) ---
     const openClawPluginLogDir = path.join(this.dataDir, 'logs', 'openclaw');
     await ensureOpenClawPluginLogDir(openClawPluginLogDir);
-    const openClawPluginInput = new OpenClawPluginInput({
+    const openClawPluginInput = createInputAdapter('openclaw-plugin-log', {
       stateStore: this.stateStore,
       logDir: openClawPluginLogDir,
       pollIntervalMs: listenerCfg['openclaw-plugin-log']?.pollInterval,
@@ -1620,7 +1719,7 @@ export class Orchestrator extends EventEmitter {
     // --- Hermes Agent (native Python directory plugin JSONL) ---
     const hermesLogDir = path.join(this.dataDir, 'logs', 'hermes-agent');
     await ensureDir(hermesLogDir);
-    const hermesLogInput = new HermesLogInput({
+    const hermesLogInput = createInputAdapter('hermes-agent-log', {
       stateStore: this.stateStore,
       sessionDir: hermesLogDir,
       pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
@@ -1642,7 +1741,7 @@ export class Orchestrator extends EventEmitter {
     // --- DeepSeek Harness (plugin-inject via YAML patch layer; BaseSessionInput consumer) ---
     const dshLogDir = path.join(this.dataDir, 'logs', 'dsh');
     await ensureDshLogDir(dshLogDir);
-    const dshLogInput = new DshLogInput({
+    const dshLogInput = createInputAdapter('dsh-log', {
       stateStore: this.stateStore,
       sessionDir: dshLogDir,
       pollIntervalMs: listenerCfg['dsh-log']?.pollInterval,
@@ -1662,7 +1761,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Wukong (CLI API polling) ---
-    const wukongInput = new WukongInput({ stateStore: this.stateStore });
+    const wukongInput = createInputAdapter('wukong', { stateStore: this.stateStore });
     this.inputManager.registerInput(wukongInput);
     entries.push(
       this.inputManager.buildDetectionEntry(wukongInput, {
@@ -1679,7 +1778,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
-    const workBuddyInput = new WorkBuddyInput({
+    const workBuddyInput = createInputAdapter('workbuddy', {
       stateStore: this.stateStore,
       hookEventDir: path.join(this.dataDir, 'state', 'workbuddy', 'hook-events'),
       pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
@@ -1699,7 +1798,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- GitHub Copilot (agent-host transcript polling + hook wakeups) ---
-    const copilotInput = new CopilotInput({
+    const copilotInput = createInputAdapter('copilot', {
       stateStore: this.stateStore,
       wakeupDir: path.join(this.dataDir, 'state', 'copilot', 'wakeups'),
       pollIntervalMs: listenerCfg.copilot?.pollInterval,

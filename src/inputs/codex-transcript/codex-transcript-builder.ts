@@ -249,6 +249,10 @@ function buildToolEntries(
   stepSpanId: string,
 ): AgentActivityEntry[] {
   const spanId = codexToolSpanId(turn.sessionId, turn.transcriptTurnId, tool.callId);
+  // Execution handle for C6 execution correlation (platform convention: the
+  // tool call id identifies the execution). Additive only — the legacy record
+  // shape is unchanged.
+  const execFields: Record<string, JsonValue> = { 'gen_ai.tool.call.exec.id': tool.callId };
   const records = [buildEntry({
     ...base,
     timestamp: tool.startedAtMs,
@@ -259,6 +263,7 @@ function buildToolEntries(
     'gen_ai.step.id': stepId,
     'gen_ai.tool.name': tool.name,
     'gen_ai.tool.call.id': tool.callId,
+    ...execFields,
     ...(tool.input !== undefined ? { 'gen_ai.tool.call.arguments': tool.input } : {}),
   })];
 
@@ -273,6 +278,7 @@ function buildToolEntries(
     'gen_ai.step.id': stepId,
     'gen_ai.tool.name': tool.name,
     'gen_ai.tool.call.id': tool.callId,
+    ...execFields,
     'tool.result.status': completed ? 'success' : 'cancelled',
   };
   if (completed && tool.output !== undefined) result['gen_ai.tool.call.result'] = tool.output;

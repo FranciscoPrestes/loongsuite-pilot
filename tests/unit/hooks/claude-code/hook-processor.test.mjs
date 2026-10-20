@@ -2295,3 +2295,40 @@ describe('hook-processor merges intercept data into llm events', () => {
     expect(fs.existsSync(staleFile)).toBe(false);
   });
 });
+
+describe('Claude Code execution correlation evidence', () => {
+  test('tool records carry the process handle and async spawn phase', () => {
+    const transcriptPath = writeTranscript('s-bg-c6', [
+      { type: 'user', timestamp: '2026-06-04T03:00:00.000Z', message: { content: [{ type: 'text', text: 'start my cli in background' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T03:00:10.000Z', message: { id: 'msg-bg-c6-1', content: [{ type: 'tool_use', id: 'tu-bg-c6', name: 'Bash', input: { command: 'my-cli --serve', run_in_background: true } }], usage: { input_tokens: 100, output_tokens: 50 }, stop_reason: 'tool_use' } },
+      { type: 'user', timestamp: '2026-06-04T03:00:10.200Z', toolUseResult: { backgroundTaskId: 'bg-task-c6' }, message: { content: [{ type: 'tool_result', tool_use_id: 'tu-bg-c6', content: 'Command running in background with ID: bg-task-c6' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T03:00:12.000Z', message: { id: 'msg-bg-c6-2', content: [{ type: 'tool_use', id: 'tu-poll-c6', name: 'Bash', input: { bash_id: 'bg-task-c6', timeout: 1000 } }], usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: 'tool_use' } },
+      { type: 'user', timestamp: '2026-06-04T03:00:12.200Z', toolUseResult: {}, message: { content: [{ type: 'tool_result', tool_use_id: 'tu-poll-c6', content: 'still running' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T03:00:15.000Z', message: { id: 'msg-bg-c6-3', content: [{ type: 'text', text: 'background task started' }], usage: { input_tokens: 200, output_tokens: 20 }, stop_reason: 'end_turn' } },
+    ]);
+    const stop = runHook('stop', {
+      session_id: 's-bg-c6',
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(stop.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const spawnCall = records.find((r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'tu-bg-c6');
+    const spawnResult = records.find((r) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'tu-bg-c6');
+    const pollCall = records.find((r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'tu-poll-c6');
+    const pollResult = records.find((r) => r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'tu-poll-c6');
+
+    // The spawn's process handle is captured on BOTH records so async polling
+    // joins the original execution instead of minting a second one.
+    expect(spawnCall['gen_ai.tool.call.exec.id']).toBe('bg-task-c6');
+    expect(spawnResult['gen_ai.tool.call.exec.id']).toBe('bg-task-c6');
+    // The spawn acknowledgement is not the process's final result.
+    expect(spawnResult['gen_ai.tool.call.exec.phase']).toBe('spawned');
+    // A poll referencing the same process handle joins it as well.
+    expect(pollCall['gen_ai.tool.call.exec.id']).toBe('bg-task-c6');
+    expect(pollResult['gen_ai.tool.call.exec.id']).toBe('bg-task-c6');
+    // Existing legacy contract is preserved.
+    expect(spawnResult['gen_ai.tool.call.result']).toContain('bg-task-c6');
+  });
+});

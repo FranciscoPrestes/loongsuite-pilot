@@ -3,13 +3,25 @@
   "displayName": "Codex",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.codex"],
+    "paths": [
+      "~/.codex"
+    ],
     "commands": []
   },
   "hook": {
     "settingsPath": "~/.codex/hooks.json",
-    "events": ["SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop"],
-    "retiredEvents": ["PreToolUse", "PostToolUse", "PostToolUseFailure"],
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "SubagentStart",
+      "SubagentStop",
+      "Stop"
+    ],
+    "retiredEvents": [
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure"
+    ],
     "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
@@ -22,5 +34,86 @@
   },
   "input": {
     "type": "session-file-polling"
+  },
+  "analytics": {
+    "version": 1,
+    "lifecycle": "supported",
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "versionRange": null,
+    "mechanisms": [
+      "local-hook-transcript-jsonl"
+    ],
+    "adapters": [
+      {
+        "id": "codex-transcript",
+        "role": "primary"
+      },
+      {
+        "id": "codex-log",
+        "role": "retired",
+        "reason": "Superseded by primary native transcript/trace; dual-stream collection is not validated"
+      },
+      {
+        "id": "codex-aborted-turn",
+        "role": "retired",
+        "reason": "Superseded by primary native transcript/trace; dual-stream collection is not validated"
+      }
+    ],
+    "sourceRules": [
+      {
+        "eventClass": "message",
+        "primary": "codex.native-rollout-transcript",
+        "secondary": [
+          "codex.wakeup-and-span-context"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_call",
+        "primary": "codex.native-rollout-transcript",
+        "secondary": [
+          "codex.wakeup-and-span-context"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "tool_result",
+        "primary": "codex.native-rollout-transcript",
+        "secondary": [
+          "codex.wakeup-and-span-context"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes"
+      },
+      {
+        "eventClass": "llm_usage",
+        "primary": "codex.native-rollout-transcript",
+        "secondary": [
+          "codex.wakeup-and-span-context"
+        ],
+        "equivalence": "native-id-or-validated-rule",
+        "unresolvedSecondary": "exclude-additive-volumes",
+        "usageSemantics": "cumulative"
+      }
+    ],
+    "capabilities": {
+      "messages": "conditional",
+      "tools": "conditional",
+      "results": "conditional",
+      "tokens": "conditional",
+      "subagents": "conditional"
+    },
+    "gaps": [
+      "Live execution validation pending",
+      "Availability depends on native version, platform and fields",
+      "Retired tool hooks do not retire active transcript collection",
+      "Subagent relationships require native parent identity; source resemblance is unresolved"
+    ]
   }
 }

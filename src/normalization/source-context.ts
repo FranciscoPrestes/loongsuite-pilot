@@ -1,4 +1,5 @@
 import type { JsonValue } from '../types/index.js';
+import { sanitizeDomainValue, sanitizeRepoValue } from './remote-identity.js';
 
 export interface SourceContextInput {
   repo?: unknown;
@@ -24,9 +25,9 @@ export function normalizeSourceContext(input: SourceContextInput): NormalizedSou
     .filter(isAbsolutePath);
 
   return {
-    repo: normalizeRepo(input.repo),
+    repo: sanitizeRepoValue(input.repo),
     branch: normalizeString(input.branch),
-    domain: normalizeString(input.domain),
+    domain: sanitizeDomainValue(input.domain),
     currentRoot: selectCurrentRoot({ cwd, roots, absolutePaths }),
   };
 }
@@ -80,25 +81,6 @@ function collectAbsolutePathValuesInto(value: unknown, out: Set<string>, depth =
   if (typeof value === 'object') {
     for (const nested of Object.values(value)) collectAbsolutePathValuesInto(nested, out, depth + 1);
   }
-}
-
-export function normalizeDomain(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const httpsMatch = raw.match(/^https?:\/\/([^/]+)/);
-  if (httpsMatch) return httpsMatch[1];
-  const sshMatch = raw.match(/^[^@]+@([^:]+)/);
-  if (sshMatch) return sshMatch[1];
-  return undefined;
-}
-
-function normalizeRepo(value: unknown): string | undefined {
-  const raw = normalizeString(value);
-  if (!raw) return undefined;
-  return raw
-    .replace(/^https?:\/\/[^/]+\//, '')
-    .replace(/^[^@]+@([^:]+)[:/]/, '')
-    .replace(/\.git$/, '')
-    .replace(/^\/+|\/+$/g, '');
 }
 
 function normalizeString(value: unknown): string | undefined {

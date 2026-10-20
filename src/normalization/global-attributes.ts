@@ -11,6 +11,7 @@ export const DEFAULT_GIT_PASSTHROUGH_KEYS = [
   'git.repo',
   'git.branch',
   'git.domain',
+  'git.worktree_id',
   'workspace.current_root',
   'workspace.path',
 ] as const;
@@ -30,6 +31,9 @@ const RESERVED_PREFIXES = [
   'agent.',
   'time_unix_nano',
   'observed_time_unix_nano',
+  // Analytics annotations are collector-authored; untrusted custom attributes
+  // and hook records can never inject them (see ANALYTICS_ANNOTATION_KEYS).
+  'ntconsult.analytics.',
 ];
 
 export function isReservedKey(key: string): boolean {

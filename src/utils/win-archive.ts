@@ -32,6 +32,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import { createLogger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -104,6 +105,50 @@ export async function makeTarStagingDir(preferred: string): Promise<string> {
   return dir;
 }
 
+function tarCommands(args: string[]): Array<{ bin: string; args: string[] }> {
+  if (process.platform !== 'win32') return [{ bin: 'tar', args }];
+  return [
+    { bin: path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe'), args },
+    { bin: 'tar', args: ['--force-local', ...args] },
+  ];
+}
+
+export interface TarGzReader {
+  list(): Promise<string>;
+  details(): Promise<string>;
+  readFile(name: string, maxBytes: number): Promise<Buffer>;
+}
+
+/** Unicode-safe copy to ASCII scratch; tar never receives a profile path. */
+export async function withTarGzReader<T>(archive: string, consume: (reader: TarGzReader) => Promise<T>): Promise<T> {
+  const scratch = await makeTarStagingDir(path.join(os.tmpdir(), `pilot-analytics-tar-${randomUUID()}`));
+  try {
+    if (process.platform === 'win32' && !isAsciiPath(scratch)) throw new Error('ASCII tar staging unavailable');
+    const staged = path.join(scratch, 'archive.tgz');
+    await fs.copyFile(archive, staged);
+    const read = async (args: string[], maxBuffer: number): Promise<Buffer> => {
+      let lastError: unknown;
+      for (const candidate of tarCommands(args)) {
+        try {
+          const { stdout } = await execFileAsync(candidate.bin, candidate.args, { timeout: 30000, maxBuffer, encoding: 'buffer' });
+          return stdout;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          // A bound/timeout/corrupt archive must not trigger another expensive parse.
+          if (code !== 'ENOENT' && code !== 'EACCES') throw error;
+          lastError = error;
+        }
+      }
+      throw lastError;
+    };
+    return await consume({
+      list: async () => (await read(['-tzf', staged], 65536)).toString('utf8'),
+      details: async () => (await read(['-tvzf', staged], 65536)).toString('utf8'),
+      readFile: (name, maxBytes) => read(['-xOf', staged, '--', name], maxBytes),
+    });
+  } finally { await fs.rm(scratch, { recursive: true, force: true }); }
+}
+
 /**
  * Extract a .tar.gz. Both paths must already be ASCII on Windows — stage them with
  * makeTarStagingDir first, then move the result into the real destination (fs.rename
@@ -114,17 +159,7 @@ export async function extractTarGz(
   destDir: string,
   timeoutMs: number,
 ): Promise<void> {
-  const candidates: Array<{ bin: string; args: string[] }> = [];
-  if (process.platform === 'win32') {
-    const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
-    candidates.push({
-      bin: path.join(systemRoot, 'System32', 'tar.exe'),
-      args: ['-xzf', archive, '-C', destDir],
-    });
-    candidates.push({ bin: 'tar', args: ['-xzf', archive, '-C', destDir, '--force-local'] });
-  } else {
-    candidates.push({ bin: 'tar', args: ['-xzf', archive, '-C', destDir] });
-  }
+  const candidates = tarCommands(['-xzf', archive, '-C', destDir]);
 
   let lastErr: unknown;
   for (const candidate of candidates) {

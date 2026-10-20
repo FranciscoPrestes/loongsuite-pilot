@@ -1,10 +1,11 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { normalizeDomain } from '../normalization/source-context.js';
+import { GIT_SAFE_CONFIG } from './git-safe.js';
+import { parseRemote } from '../normalization/remote-identity.js';
 
 const execFile = promisify(execFileCb);
 
-const GIT_CONTEXT_TTL_MS = 30_000;
+export const GIT_CONTEXT_TTL_MS = 30_000;
 const MAX_CACHE_ENTRIES = 256;
 
 export interface GitContextResult {
@@ -12,6 +13,8 @@ export interface GitContextResult {
   branch?: string;
   root?: string;
   domain?: string;
+  /** Absolute git dir of this checkout (a linked worktree has its own); basis of the worktree id. */
+  gitDir?: string;
 }
 
 interface GitContextCacheEntry extends GitContextResult {
@@ -38,19 +41,36 @@ function evictStaleEntries(cache: Map<string, { expiresAt: number }>): void {
  * Uses per-command catch for partial success: e.g. if rev-parse succeeds
  * but remote fails, the available fields are still cached and returned.
  */
-export async function inferGitContext(probeDir: string): Promise<GitContextResult> {
+export function inferGitContext(probeDir: string): Promise<GitContextResult> {
+  // Concurrent probes of one directory (a burst of entries) share a single set of git calls.
+  const running = inflight.get(probeDir);
+  if (running) return running;
+  const probe = probeOnce(probeDir).finally(() => { inflight.delete(probeDir); });
+  inflight.set(probeDir, probe);
+  return probe;
+}
+
+const inflight = new Map<string, Promise<GitContextResult>>();
+
+async function probeOnce(probeDir: string): Promise<GitContextResult> {
   const now = Date.now();
   const cached = gitContextCache.get(probeDir);
   if (cached && cached.expiresAt > now) {
-    return { repo: cached.repo, branch: cached.branch, root: cached.root, domain: cached.domain };
+    return { repo: cached.repo, branch: cached.branch, root: cached.root, domain: cached.domain, gitDir: cached.gitDir };
   }
 
-  const root = await runGit(probeDir, ['rev-parse', '--show-toplevel']);
-  const gitRoot = root?.trim() || undefined;
-  const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['rev-parse', '--abbrev-ref', 'HEAD']));
-  const remote = await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url']);
-  const repo = normalizeRepo(remote);
-  const domain = normalizeDomain(remote);
+  // One shared time budget for every git call of a probe (each call is also capped by GIT_CALL_TIMEOUT_MS).
+  const deadline = now + GIT_PROBE_BUDGET_MS;
+  // Separate calls, only the trailing newline removed: a directory name may itself contain a newline.
+  const gitRoot = await runGit(probeDir, ['rev-parse', '--show-toplevel'], deadline);
+  const gitDir = await runGit(gitRoot ?? probeDir, ['rev-parse', '--absolute-git-dir'], deadline);
+  // symbolic-ref also answers for an unborn branch (no commit yet); a detached HEAD has no branch and yields none.
+  const branch = normalizeBranch(await runGit(gitRoot ?? probeDir, ['symbolic-ref', '-q', 'HEAD'], deadline));
+  const remote = (await runGit(gitRoot ?? probeDir, ['config', '--get', 'remote.origin.url'], deadline))?.trim();
+  // One parser for both: either a clean {repo, domain} or nothing; the raw remote is never exported.
+  const identity = parseRemote(remote);
+  const repo = identity?.repo;
+  const domain = identity?.domain;
 
   evictStaleEntries(gitContextCache);
   gitContextCache.set(probeDir, {
@@ -59,39 +79,35 @@ export async function inferGitContext(probeDir: string): Promise<GitContextResul
     branch,
     root: gitRoot,
     domain,
+    gitDir,
   });
-  return { repo, branch, root: gitRoot, domain };
+  return { repo, branch, root: gitRoot, domain, gitDir };
 }
 
-async function runGit(root: string, args: string[]): Promise<string | undefined> {
+export const GIT_CALL_TIMEOUT_MS = 1500;
+export const GIT_PROBE_BUDGET_MS = 2500;
+
+async function runGit(root: string, args: string[], deadline: number): Promise<string | undefined> {
+  const remaining = Math.min(GIT_CALL_TIMEOUT_MS, deadline - Date.now());
+  if (remaining <= 0) return undefined;
   try {
-    const { stdout } = await execFile('git', ['-C', root, ...args], {
-      timeout: 1500,
+    const { stdout } = await execFile('git', ['-C', root, ...GIT_SAFE_CONFIG, ...args], {
+      timeout: remaining,
+      killSignal: 'SIGKILL',
       maxBuffer: 64 * 1024,
       encoding: 'utf8',
     });
-    const text = stdout.trim();
-    return text.length > 0 ? text : undefined;
+    const text = stdout.replace(/\r?\n$/, '');
+    return text.trim().length > 0 ? text : undefined;
   } catch {
     return undefined;
   }
 }
 
+/** Only a real branch ref counts: HEAD pointing at refs/tags/... or anything else is not a branch. */
 function normalizeBranch(raw: string | undefined): string | undefined {
-  if (!raw || raw === 'HEAD') return undefined;
-  return raw;
-}
-
-export function normalizeRepo(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const sshMatch = trimmed.match(/^[^@]+@[^:]+:(.+)$/);
-  const source = sshMatch ? sshMatch[1] : trimmed;
-  return source
-    .replace(/^https?:\/\/[^/]+\//, '')
-    .replace(/\.git$/, '')
-    .replace(/^\/+|\/+$/g, '');
+  const match = raw?.trim().match(/^refs\/heads\/(.+)$/);
+  return match ? match[1] : undefined;
 }
 
 /**

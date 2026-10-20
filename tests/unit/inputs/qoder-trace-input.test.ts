@@ -104,6 +104,26 @@ function makeSegment(overrides: Partial<SegmentTokenData> = {}): SegmentTokenDat
   };
 }
 
+/** Best-of-3 time of `fn(n)`. */
+function bestMs(fn: (n: number) => unknown, n: number): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (let run = 0; run < 3; run += 1) {
+    const started = performance.now();
+    fn(n);
+    best = Math.min(best, performance.now() - started);
+  }
+  return best;
+}
+
+/** Pure decision: 4x the input costing well under 16x the time is linear (about 4x; the bar is 10x). */
+function isLinearGrowth(smallMs: number, largeMs: number): boolean {
+  return largeMs / Math.max(smallMs, 1) < 10; // 1 ms floor: sub-millisecond timers are noise
+}
+
+function growsLinearly(fn: (n: number) => unknown, small = 20_000): boolean {
+  return isLinearGrowth(bestMs(fn, small), bestMs(fn, small * 4));
+}
+
 describe('QoderTraceInput token-enricher', () => {
   // Segments are paired with llm.response by completion instant, so a fixture's
   // response time must sit within the join tolerance of its responseEndTs - the
@@ -1682,11 +1702,21 @@ describe('QoderTraceInput multimodal', () => {
     });
 
     it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {
-      const started = Date.now();
       const noise = '!['.repeat(80_000);
       expect(extractMarkdownImagePaths(`${noise} ![x](/tmp/ok.png)`)).toEqual(['/tmp/ok.png']);
-      expect(Date.now() - started).toBeLessThan(200);
       expect(extractMarkdownImagePaths(noise)).toEqual([]);
+      // Growth, not wall-clock: a 4x larger input must cost about 4x (linear), never about 16x (quadratic).
+      // A ratio is stable under machine load, where an absolute time limit is not.
+      expect(growsLinearly(n => extractMarkdownImagePaths(`${'!['.repeat(n)} ![x](/tmp/ok.png)`))).toBe(true);
+    });
+
+    it('the growth decision tells linear timings from quadratic ones (deterministic, no clock)', () => {
+      expect(isLinearGrowth(10, 40)).toBe(true);      // 4x input, 4x time
+      expect(isLinearGrowth(10, 90)).toBe(true);      // noisy but still far from quadratic
+      expect(isLinearGrowth(10, 160)).toBe(false);    // 4x input, 16x time
+      expect(isLinearGrowth(10, 400)).toBe(false);
+      expect(isLinearGrowth(0.05, 0.2)).toBe(true);   // sub-millisecond: floor applies
+      expect(isLinearGrowth(0.05, 12)).toBe(false);   // a real blow-up is still caught against the floor
     });
 
     it('caps extracted markdown and tool paths at MAX_MULTIMODAL_PARTS', () => {
