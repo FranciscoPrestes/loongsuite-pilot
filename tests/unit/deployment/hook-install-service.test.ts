@@ -10,6 +10,7 @@ import {
   hintForReason,
   hookInstallResultPath,
   markHookInstallAlarmSent,
+  mergeInstalledAgents,
   runHookInstall,
   selectAgents,
   toPublicReport,
@@ -247,6 +248,43 @@ describe('hook install service', () => {
   it('reports a missing hook as not installed until a record exists', async () => {
     const status = await run({ agentsFlag: 'sample-agent', mode: 'status', writeResult: false });
     expect(status.report.agents[0].reason).toBe('not-detected');
+  });
+
+  it('keeps an earlier named agent when a later install names a different one', async () => {
+    const otherHome = path.join(tmp, 'other-home');
+    await fs.mkdir(otherHome, { recursive: true });
+    await fs.writeFile(path.join(pilotDir, 'agents.d', 'other-agent.json'), JSON.stringify({
+      id: 'other-agent',
+      displayName: 'Other',
+      deployMode: 'hook',
+      detection: { paths: [otherHome], commands: [] },
+      hook: {
+        settingsPath: path.join(otherHome, 'settings.json'),
+        events: ['Stop'],
+        hookCommand: '$PILOT_DATA/hooks/other-agent-hook.sh',
+        format: 'nested',
+        matcher: '*',
+      },
+    }));
+    const first = await run({ agentsFlag: 'sample-agent' });
+    expect(first.exitCode).toBe(0);
+    const sampleSettings = path.join(home, 'settings.json');
+    const sampleText = await fs.readFile(sampleSettings, 'utf8');
+
+    const second = await run({ agentsFlag: 'other-agent' });
+    expect(second.exitCode).toBe(0);
+    expect(await fs.readFile(sampleSettings, 'utf8')).toBe(sampleText);
+    const disk = JSON.parse(await fs.readFile(hookInstallResultPath(dataDir), 'utf8'));
+    const ids = disk.agents.filter((agent: { status: string }) => agent.status === 'ok').map((agent: { id: string }) => agent.id);
+    expect(ids).toEqual(expect.arrayContaining(['sample-agent', 'other-agent']));
+  });
+
+  it('mergeInstalledAgents keeps a previous success when the same id fails later', () => {
+    const merged = mergeInstalledAgents(
+      [{ id: 'grok-build', status: 'ok', reason: null, hint: null, settingsPath: '/a', deployMode: 'hook' }],
+      [{ id: 'grok-build', status: 'failed', reason: 'uid-mismatch', hint: 'x', settingsPath: '/b', deployMode: 'hook' }],
+    );
+    expect(merged.map(agent => agent.status)).toEqual(['ok', 'failed']);
   });
 
   it('does not mark a newer hook-install report as already alarmed', async () => {

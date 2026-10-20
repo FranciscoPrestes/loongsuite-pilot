@@ -114,6 +114,31 @@ describe('grok hook install paths', () => {
     expect(redirected.hook?.settingsPath).toBe(loaded.hook?.settingsPath);
   });
 
+  it('keeps the first home when a later home fails', async () => {
+    const firstHome = path.join(tmp, 'u', 'eee');
+    const secondHome = path.join(tmp, 'u', 'fff');
+    const firstFile = path.join(firstHome, 'hooks', 'loongsuite-pilot.json');
+    await install(firstHome);
+    const firstText = await fs.readFile(firstFile, 'utf8');
+
+    const failed = await runHookInstall({
+      dataDir,
+      pilotDir,
+      builtinAgentsDir: builtinDir,
+      writeResult: true,
+      agentsFlag: 'grok-build',
+      homes: { 'grok-build': secondHome },
+      euid: 0,
+      homeOwner: async () => 1000,
+      identity: { identity: 'e'.repeat(64), source: 'cgroup' },
+    });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.report.agents[0].status).toBe('failed');
+    expect(await fs.readFile(firstFile, 'utf8')).toBe(firstText);
+    const disk = JSON.parse(await fs.readFile(path.join(dataDir, 'last-hook-install.json'), 'utf8'));
+    expect(disk.agents.some((agent: { id: string; status: string }) => agent.id === 'grok-build' && agent.status === 'ok')).toBe(true);
+  });
+
   it('repairs every recorded grok settings file', async () => {
     const firstHome = path.join(tmp, 'u', 'ccc');
     const secondHome = path.join(tmp, 'u', 'ddd');

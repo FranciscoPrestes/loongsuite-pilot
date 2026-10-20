@@ -656,12 +656,18 @@ export class Orchestrator extends EventEmitter {
     );
   }
 
-  /** Drop agents a raced deployAll wrote, and stop inputs outside the named set. */
+  /**
+   * Remove daemon records that raced ahead of a named install, and agents this
+   * named result no longer counts as installed. A later install keeps earlier
+   * successes in the result file, so those ids stay in the allow list and are
+   * not uninstalled. Build records are in the allow list as well.
+   */
   private async reconcileRecordedAgents(): Promise<void> {
     if (this.deploymentScope !== 'recorded') return;
     for (const def of this.deploymentManager.getDefinitions()) {
       if (!this.deploymentManager.hasRecord(def.id)) continue;
       if (this.recordedAgentIds.has(def.id)) continue;
+      if (this.deploymentManager.recordInstalledBy(def.id) === 'build') continue;
       try {
         await this.deploymentManager.undeployAgent(def);
       } catch (err) {

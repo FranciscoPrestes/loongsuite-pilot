@@ -159,6 +159,34 @@ export function hookInstallSignalPath(dataDir: string): string {
   return path.join(dataDir, HOOK_INSTALL_SIGNAL_FILE);
 }
 
+/**
+ * Keep earlier named successes that this run did not replace with a new success.
+ * A failed extra home for the same id must not drop the id: that would make the
+ * daemon uninstall every settings file already written for it.
+ */
+export function mergeInstalledAgents(
+  existing: HookInstallAgentResult[] | undefined,
+  current: HookInstallAgentResult[],
+): HookInstallAgentResult[] {
+  const currentById = new Map(current.map(agent => [agent.id, agent]));
+  const merged: HookInstallAgentResult[] = [];
+  const seen = new Set<string>();
+  for (const previous of existing ?? []) {
+    if (previous.status !== 'ok' && previous.status !== 'up-to-date') continue;
+    const now = currentById.get(previous.id);
+    seen.add(previous.id);
+    if (now && (now.status === 'ok' || now.status === 'up-to-date')) merged.push(now);
+    else if (now && now.status === 'failed') {
+      merged.push(previous);
+      merged.push(now);
+    } else merged.push(previous);
+  }
+  for (const now of current) {
+    if (!seen.has(now.id)) merged.push(now);
+  }
+  return merged;
+}
+
 export function exitCodeFor(agents: HookInstallAgentResult[]): number {
   return agents.every(agent => agent.status === 'ok' || agent.status === 'up-to-date' || agent.status === 'skipped')
     ? 0
@@ -405,19 +433,20 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     }
   }
 
-  const installed = agents.some(agent => agent.status === 'ok' || agent.status === 'up-to-date');
-  let scope: 'detected' | 'named' = selection.kind === 'named' && installed ? 'named' : 'detected';
-  if (scope === 'detected' && opts.writeResult) {
-    const existing = await readJsonFile<HookInstallReport>(hookInstallResultPath(opts.dataDir));
-    if (existing?.scope === 'named' && existing.identity === identity.identity) scope = 'named';
-  }
+  const existing = opts.writeResult && !statusOnly
+    ? await readJsonFile<HookInstallReport>(hookInstallResultPath(opts.dataDir))
+    : null;
+  const sameNamedContainer = existing?.scope === 'named' && existing.identity === identity.identity;
+  const persistedAgents = sameNamedContainer ? mergeInstalledAgents(existing?.agents, agents) : agents;
+  const installed = persistedAgents.some(agent => agent.status === 'ok' || agent.status === 'up-to-date');
+  const scope: 'detected' | 'named' = selection.kind === 'named' && installed ? 'named' : 'detected';
 
   const report: HookInstallReport = {
     schema: 1,
     identity: identity.identity,
     ts,
     scope,
-    agents,
+    agents: persistedAgents,
   };
 
   const hasFailure = agents.some(agent => agent.status === 'failed');
@@ -426,7 +455,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       alarm_type: 'HOOK_INSTALL_ALARM',
       identity: report.identity,
       ts: report.ts,
-      agents: report.agents.filter(agent => agent.status === 'failed').map(agent => agent.id).join(','),
+      agents: agents.filter(agent => agent.status === 'failed').map(agent => agent.id).join(','),
     });
   } else {
     report.alarmSent = !hasFailure;
@@ -445,7 +474,12 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     wroteResult = true;
   }
 
-  return { exitCode: exitCodeFor(agents), report, warnings, wroteResult };
+  return {
+    exitCode: exitCodeFor(agents),
+    report: { ...report, agents },
+    warnings,
+    wroteResult,
+  };
 }
 
 async function postAlarmBounded(topic: string, data: Record<string, unknown>): Promise<boolean> {

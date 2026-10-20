@@ -51,23 +51,26 @@ function Log-Error {
         }
         $file = Join-Path $dir "grok-build-error-$day.jsonl"
         $lock = "$file.lock"
-        $stream = $null
+        $locked = $false
+        # FullLanguage can take an exclusive lock file. Constrained Language
+        # rejects [System.IO.File]::Open, so a failure here falls through to
+        # Add-Content instead of dropping the error line.
         try {
             $stream = [System.IO.File]::Open($lock, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $stream.Dispose()
+            $locked = $true
         } catch {
-            return
+            $locked = $false
         }
-        try {
-            $record = @{
-                time = (Get-Date).ToUniversalTime().ToString("o")
-                "gen_ai.agent.type" = "grok-build"
-                stage = $Stage
-                "error.type" = "ps1_$Stage"
-                "error.message" = $Message
-            }
-            Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
-        } finally {
-            if ($stream) { $stream.Dispose() }
+        $record = @{
+            time = (Get-Date).ToUniversalTime().ToString("o")
+            "gen_ai.agent.type" = "grok-build"
+            stage = $Stage
+            "error.type" = "ps1_$Stage"
+            "error.message" = $Message
+        }
+        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+        if ($locked) {
             Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
         }
     } catch {}
