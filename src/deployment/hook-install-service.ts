@@ -433,42 +433,47 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     }
   }
 
-  const existing = opts.writeResult && !statusOnly
-    ? await readJsonFile<HookInstallReport>(hookInstallResultPath(opts.dataDir))
-    : null;
-  const sameNamedContainer = existing?.scope === 'named' && existing.identity === identity.identity;
-  const persistedAgents = sameNamedContainer ? mergeInstalledAgents(existing?.agents, agents) : agents;
-  const installed = persistedAgents.some(agent => agent.status === 'ok' || agent.status === 'up-to-date');
-  // A later full detect must not drop an existing named scope while those
-  // successes are still in the merged report. The next named install merges
-  // against that scope; flipping it to detected would uninstall them.
-  const scope: 'detected' | 'named' = installed && (selection.kind === 'named' || sameNamedContainer)
-    ? 'named'
-    : 'detected';
-
-  const report: HookInstallReport = {
-    schema: 1,
-    identity: identity.identity,
-    ts,
-    scope,
-    agents: persistedAgents,
-  };
-
   const hasFailure = agents.some(agent => agent.status === 'failed');
+  let alarmSent = !hasFailure;
   if (hasFailure && !statusOnly) {
-    report.alarmSent = await postAlarmBounded('pilot_alarm', {
+    alarmSent = await postAlarmBounded('pilot_alarm', {
       alarm_type: 'HOOK_INSTALL_ALARM',
-      identity: report.identity,
-      ts: report.ts,
+      identity: identity.identity,
+      ts,
       agents: agents.filter(agent => agent.status === 'failed').map(agent => agent.id).join(','),
     });
-  } else {
-    report.alarmSent = !hasFailure;
   }
 
+  let scope: 'detected' | 'named' = selection.kind === 'named'
+    && agents.some(agent => agent.status === 'ok' || agent.status === 'up-to-date')
+    ? 'named'
+    : 'detected';
   let wroteResult = false;
   if (opts.writeResult && !statusOnly) {
-    await writeJsonFile(hookInstallResultPath(opts.dataDir), report);
+    const file = hookInstallResultPath(opts.dataDir);
+    // Same lock as markHookInstallAlarmSent. The mark re-reads under this lock
+    // and writes alarmSent only when ts is unchanged, so it cannot put an older
+    // report back over the one this call publishes.
+    const persisted = await withDeployedStateLock(`${file}.lock`, async () => {
+      const latest = await readJsonFile<HookInstallReport>(file);
+      const sameNamedContainer = latest?.scope === 'named' && latest.identity === identity.identity;
+      const merged = sameNamedContainer ? mergeInstalledAgents(latest?.agents, agents) : agents;
+      const installed = merged.some(agent => agent.status === 'ok' || agent.status === 'up-to-date');
+      const nextScope: 'detected' | 'named' = installed && (selection.kind === 'named' || sameNamedContainer)
+        ? 'named'
+        : 'detected';
+      const next: HookInstallReport = {
+        schema: 1,
+        identity: identity.identity,
+        ts,
+        scope: nextScope,
+        agents: merged,
+        alarmSent,
+      };
+      await writeJsonFile(file, next);
+      return next;
+    });
+    scope = persisted.scope;
     const signal = hookInstallSignalPath(opts.dataDir);
     const now = new Date();
     try {
@@ -481,7 +486,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
 
   return {
     exitCode: exitCodeFor(agents),
-    report: { ...report, agents },
+    report: { schema: 1, identity: identity.identity, ts, scope, agents },
     warnings,
     wroteResult,
   };

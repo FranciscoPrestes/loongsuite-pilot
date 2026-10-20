@@ -323,6 +323,25 @@ describe('hook install service', () => {
     expect(merged.map(agent => agent.status)).toEqual(['ok', 'failed']);
   });
 
+  it('does not let an alarm mark replace a hook install report written under the same lock', async () => {
+    const file = hookInstallResultPath(dataDir);
+    await fs.mkdir(dataDir, { recursive: true });
+    await fs.writeFile(file, JSON.stringify({
+      schema: 1,
+      identity: 'c'.repeat(64),
+      ts: 'old',
+      scope: 'detected',
+      agents: [],
+      alarmSent: false,
+    }));
+    const installed = run({ agentsFlag: 'sample-agent' });
+    const marked = markHookInstallAlarmSent(file, 'old');
+    await Promise.all([installed, marked]);
+    const disk = JSON.parse(await fs.readFile(file, 'utf8'));
+    expect(disk.ts).not.toBe('old');
+    expect(disk.agents.some((agent: { id: string }) => agent.id === 'sample-agent')).toBe(true);
+  });
+
   it('does not mark a newer hook-install report as already alarmed', async () => {
     const file = hookInstallResultPath(dataDir);
     await fs.mkdir(dataDir, { recursive: true });
