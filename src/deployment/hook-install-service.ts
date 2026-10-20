@@ -439,7 +439,12 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
   const sameNamedContainer = existing?.scope === 'named' && existing.identity === identity.identity;
   const persistedAgents = sameNamedContainer ? mergeInstalledAgents(existing?.agents, agents) : agents;
   const installed = persistedAgents.some(agent => agent.status === 'ok' || agent.status === 'up-to-date');
-  const scope: 'detected' | 'named' = selection.kind === 'named' && installed ? 'named' : 'detected';
+  // A later full detect must not drop an existing named scope while those
+  // successes are still in the merged report. The next named install merges
+  // against that scope; flipping it to detected would uninstall them.
+  const scope: 'detected' | 'named' = installed && (selection.kind === 'named' || sameNamedContainer)
+    ? 'named'
+    : 'detected';
 
   const report: HookInstallReport = {
     schema: 1,

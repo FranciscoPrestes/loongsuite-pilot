@@ -279,6 +279,42 @@ describe('hook install service', () => {
     expect(ids).toEqual(expect.arrayContaining(['sample-agent', 'other-agent']));
   });
 
+  it('keeps named scope through a full detect so the next named install still merges', async () => {
+    const otherHome = path.join(tmp, 'later-home');
+    await fs.mkdir(otherHome, { recursive: true });
+    const first = await run({ agentsFlag: 'sample-agent' });
+    expect(first.report.scope).toBe('named');
+
+    const detected = await run({});
+    expect(detected.exitCode).toBe(0);
+    const afterDetect = JSON.parse(await fs.readFile(hookInstallResultPath(dataDir), 'utf8'));
+    expect(afterDetect.scope).toBe('named');
+    expect(afterDetect.agents.some((agent: { id: string; status: string }) =>
+      agent.id === 'sample-agent' && (agent.status === 'ok' || agent.status === 'up-to-date'))).toBe(true);
+
+    await fs.writeFile(path.join(pilotDir, 'agents.d', 'other-agent.json'), JSON.stringify({
+      id: 'other-agent',
+      displayName: 'Other',
+      deployMode: 'hook',
+      detection: { paths: [otherHome], commands: [] },
+      hook: {
+        settingsPath: path.join(otherHome, 'settings.json'),
+        events: ['Stop'],
+        hookCommand: '$PILOT_DATA/hooks/other-agent-hook.sh',
+        format: 'nested',
+        matcher: '*',
+      },
+    }));
+    const second = await run({ agentsFlag: 'other-agent' });
+    expect(second.exitCode).toBe(0);
+    const disk = JSON.parse(await fs.readFile(hookInstallResultPath(dataDir), 'utf8'));
+    expect(disk.scope).toBe('named');
+    const ids = disk.agents
+      .filter((agent: { status: string }) => agent.status === 'ok' || agent.status === 'up-to-date')
+      .map((agent: { id: string }) => agent.id);
+    expect(ids).toEqual(expect.arrayContaining(['sample-agent', 'other-agent']));
+  });
+
   it('mergeInstalledAgents keeps a previous success when the same id fails later', () => {
     const merged = mergeInstalledAgents(
       [{ id: 'grok-build', status: 'ok', reason: null, hint: null, settingsPath: '/a', deployMode: 'hook' }],
