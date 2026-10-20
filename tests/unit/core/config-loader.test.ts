@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockReadJsonFile = vi.fn().mockResolvedValue(null);
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: (...args: unknown[]) => mockReadJsonFile(...args),
@@ -9,7 +10,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
   }),
 }));
 
@@ -502,7 +503,7 @@ describe('ConfigLoader', () => {
       expect(config.agents).toEqual({});
     });
 
-    it('loads per-agent captureMessageContent overrides', async () => {
+    it('ignores legacy per-agent captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: false },
@@ -511,12 +512,19 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor.captureMessageContent).toBe(false);
-      expect(config.agents.qoder.captureMessageContent).toBe(true);
+      expect(config.agents.cursor).toEqual({});
+      expect(config.agents.qoder).toEqual({});
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('deprecated and ignored'),
+        { locations: [
+          'agents.cursor.captureMessageContent',
+          'agents.qoder.captureMessageContent',
+        ] },
+      );
     });
 
-    it('parses string boolean captureMessageContent values', async () => {
+    it('ignores legacy string captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'false' },
@@ -525,11 +533,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor.captureMessageContent).toBe(false);
-      expect(config.agents.qoder.captureMessageContent).toBe(true);
+      expect(config.agents.cursor).toEqual({});
+      expect(config.agents.qoder).toEqual({});
     });
 
-    it('falls back to capturing message content for invalid or omitted values', async () => {
+    it('does not expose legacy captureMessageContent in resolved agent config', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'sometimes' },
@@ -538,8 +546,8 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor.captureMessageContent).toBe(true);
-      expect(config.agents.qoder.captureMessageContent).toBe(true);
+      expect(config.agents.cursor).not.toHaveProperty('captureMessageContent');
+      expect(config.agents.qoder).not.toHaveProperty('captureMessageContent');
     });
 
     it('ignores unsupported agent fields for this stage', async () => {
@@ -553,7 +561,7 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+      expect(config.agents.cursor).toEqual({});
     });
 
     it('parses agents with enabled field', async () => {
@@ -566,9 +574,9 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.agents['claude-code']).toEqual({ enabled: true, captureMessageContent: true });
-      expect(config.agents['cursor']).toEqual({ enabled: false, captureMessageContent: true });
-      expect(config.agents['codex']).toEqual({ enabled: true, captureMessageContent: false });
+      expect(config.agents['claude-code']).toEqual({ enabled: true });
+      expect(config.agents['cursor']).toEqual({ enabled: false });
+      expect(config.agents['codex']).toEqual({ enabled: true });
     });
 
     it('backward compat: empty agents config means no gate', async () => {
@@ -591,10 +599,9 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.agents.codex).toEqual({
-        captureMessageContent: true,
         multimodal: { uploadMode: 'all' },
       });
-      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+      expect(config.agents.cursor).toEqual({});
     });
 
     it('parses agent multimodal allowedRootPaths and expands ~', async () => {
@@ -1756,6 +1763,7 @@ describe('ConfigLoader', () => {
         collectTrace: true,
         otlpTrace: {
           endpoint: 'http://jaeger:4318',
+          captureMessageContent: false,
           headers: { 'X-Custom': 'val' },
           resourceAttributes: { 'team': 'infra' },
           serviceName: 'my-svc',
@@ -1780,6 +1788,12 @@ describe('ConfigLoader', () => {
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
       expect(result!.resourceAttributeKeys).toEqual([]);
+      expect(config.otlpTrace).not.toHaveProperty('captureMessageContent');
+      expect(result).not.toHaveProperty('captureMessageContent');
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        expect.stringContaining('deprecated and ignored'),
+        { locations: ['otlpTrace.captureMessageContent'] },
+      );
     });
 
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
