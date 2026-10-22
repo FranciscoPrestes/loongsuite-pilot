@@ -1185,6 +1185,29 @@ function handleV2StepStarted(data, userId) {
     "opencode.message.id": data?.assistantMessageID,
   };
   record.time_unix_nano = msToNanos(session.stepStartTimeMs) || nowNanos();
+  // Same input-messages stamp as handleMessagePartUpdated: without it the first
+  // llm.request of a turn carries only the answer, so the prompt never reaches
+  // the trace backend (opencode v2 event path).
+  if (turn.stepSeq === 1) {
+    const inputMsgs = buildUserInputMessages(
+      session.systemPrompt,
+      turn.userPromptText
+    );
+    if (inputMsgs) {
+      record["gen_ai.input.messages"] = inputMsgs;
+      record["gen_ai.input.messages_delta"] = inputMsgs.map((message) => ({
+        ...message,
+        parts: message.parts.map((part) => ({ ...part })),
+      }));
+    }
+    if (session.systemInstructionsParts && session.systemInstructionsParts.length > 0) {
+      record["gen_ai.system_instructions"] = session.systemInstructionsParts;
+    } else if (session.systemPrompt) {
+      record["gen_ai.system_instructions"] = [
+        { type: "text", content: truncate(session.systemPrompt, MAX_CONTENT_SIZE) },
+      ];
+    }
+  }
   writeRecord(record);
 }
 
