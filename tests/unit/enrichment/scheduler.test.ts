@@ -33,7 +33,7 @@ describe('bounded scheduler',()=>{
   scheduler.register('repo_snapshot',async(j,s)=>{await new Promise(r=>setTimeout(r,15));return observation(j);});
   scheduler.start();
   try{
-   const results=await Promise.all(Array.from({length:20},(_,i)=>store.enqueue(job({id:`w-${i}`,dedupeKey:`w-${i}`}))));
+   const now=new Date().toISOString();const results=await Promise.all(Array.from({length:20},(_,i)=>store.enqueue(job({id:`w-${i}`,dedupeKey:`w-${i}`,occurredAt:now}))));
    expect(results).toEqual(Array.from({length:20},()=>'created'));
    const completed=async()=>(await Promise.all(Array.from({length:20},(_,i)=>observationsFor(dir,`w-${i}`)))).filter(a=>a.length===1).length;
    const deadline=Date.now()+8000;
