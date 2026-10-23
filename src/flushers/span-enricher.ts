@@ -44,6 +44,18 @@ function attributeSnapshot(attributes: Attributes): SpanEnricherView['attributes
     [key, Array.isArray(value) ? Object.freeze([...value]) : value])));
 }
 
+export function withSpanAttributes(span: ReadableSpan, attributes: Attributes): ReadableSpan {
+  return {
+    name: span.name, kind: span.kind, spanContext: () => span.spanContext(),
+    parentSpanId: span.parentSpanId, startTime: span.startTime, endTime: span.endTime,
+    status: span.status, attributes, links: span.links, events: span.events,
+    duration: span.duration, ended: span.ended, resource: span.resource,
+    instrumentationLibrary: span.instrumentationLibrary,
+    droppedAttributesCount: span.droppedAttributesCount,
+    droppedEventsCount: span.droppedEventsCount, droppedLinksCount: span.droppedLinksCount,
+  };
+}
+
 /** One lazy load per flusher, shared by all conversion providers. No SDK lifecycle hooks. */
 export class SpanEnricherRunner {
   private loaded?: Promise<LoadedEnricher[]>;
@@ -124,15 +136,7 @@ export class SpanEnricherRunner {
         }
       }
       // Export a new view; do not mutate the ended SDK span.
-      return attributes === span.attributes ? span : {
-        name: span.name, kind: span.kind, spanContext: () => span.spanContext(),
-        parentSpanId: span.parentSpanId, startTime: span.startTime, endTime: span.endTime,
-        status: span.status, attributes, links: span.links, events: span.events,
-        duration: span.duration, ended: span.ended, resource: span.resource,
-        instrumentationLibrary: span.instrumentationLibrary,
-        droppedAttributesCount: span.droppedAttributesCount,
-        droppedEventsCount: span.droppedEventsCount, droppedLinksCount: span.droppedLinksCount,
-      };
+      return attributes === span.attributes ? span : withSpanAttributes(span, attributes);
     });
   }
 }

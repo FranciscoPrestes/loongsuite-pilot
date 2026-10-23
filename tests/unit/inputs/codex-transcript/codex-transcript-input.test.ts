@@ -416,6 +416,36 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('retains explicit native effort after restart beyond turn_context', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-effort-restart-'));
+    const first = await createDormantInput(root);
+    try {
+      const transcript = await writeTranscript(first.sessionDir, [
+        record('2026-06-24T06:00:00Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+        record('2026-06-24T06:00:01Z', 'turn_context', { turn_id: 'turn-effort', model: 'gpt-5.5', effort: 'high' }),
+        record('2026-06-24T06:00:02Z', 'event_msg', { type: 'task_started', turn_id: 'turn-effort' }),
+        record('2026-06-24T06:00:03Z', 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }] }),
+      ].join('\n') + '\n');
+      await first.input.start();
+      await first.input.stop();
+      await first.stateStore.save();
+      expect(transcriptCheckpoint(first.stateStore, transcript)).toMatchObject({ activeTurn: { effort: 'high' } });
+      const resumed = await createDormantInput(root);
+      await fs.appendFile(transcript, [
+        record('2026-06-24T06:00:04Z', 'event_msg', { type: 'agent_message', message: 'done', phase: 'final' }),
+        record('2026-06-24T06:00:05Z', 'event_msg', tokenUsage(10, 2)),
+        record('2026-06-24T06:00:06Z', 'event_msg', { type: 'task_complete', turn_id: 'turn-effort', last_agent_message: 'done' }),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(resumed.input, transcript);
+      const calls = resumed.entries.filter(e => e['event.name'] === 'llm.request' || e['event.name'] === 'llm.response');
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.every(e => e['gen_ai.request.reasoning.level'] === 'high')).toBe(true);
+    } finally {
+      await first.input.stop();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('becomes available from a wakeup marker when the default session root is absent', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-marker-availability-'));
     tempDirs.push(root);
@@ -3299,7 +3329,7 @@ describe('CodexTranscriptInput', () => {
     const secondResponse = restarted.entries.find(entry => entry['gen_ai.step.id'] === 'session-1:turn-1:s2'
       && entry['event.name'] === 'llm.response');
     expect(secondResponse).toMatchObject({
-      'gen_ai.response.model': 'gpt-5.5',
+      'gen_ai.request.model': 'gpt-5.5',
       'agent.codex.cwd': '/tmp/project',
     });
     expect(secondResponse?.['gen_ai.system_instructions']).toBeUndefined();
@@ -3898,7 +3928,7 @@ describe('CodexTranscriptInput', () => {
       expect(responsesForTurn(entries, firstOwnedTurn)).toHaveLength(1);
       expect(responsesForTurn(entries, secondOwnedTurn)).toHaveLength(1);
       expect(responsesForTurn(entries, firstOwnedTurn)[0]).toMatchObject({
-        'gen_ai.response.model': 'gpt-5.5',
+        'gen_ai.request.model': 'gpt-5.5',
         'agent.codex.cwd': '/tmp/p',
       });
     });
@@ -4185,7 +4215,7 @@ describe('CodexTranscriptInput', () => {
       expect(responsesForTurn(entries, 'copied-parent-turn-with-start')).toHaveLength(0);
       expect(responsesForTurn(entries, currentTurn)).toHaveLength(1);
       expect(responsesForTurn(entries, currentTurn)[0]).toMatchObject({
-        'gen_ai.response.model': 'gpt-5.5',
+        'gen_ai.request.model': 'gpt-5.5',
         'agent.codex.cwd': '/tmp/p',
       });
     });

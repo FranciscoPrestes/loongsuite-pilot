@@ -17,6 +17,7 @@ import type {
   CodexTranscriptUsage,
 } from './codex-transcript-types.js';
 import { timestampMs } from './codex-transcript-utils.js';
+import { readReasoningLevel } from '../../normalization/model-settings.js';
 
 export function extractCodexTranscriptMeta(record: Record<string, unknown>): CodexTranscriptMeta | null {
   if (record.type !== 'session_meta') return null;
@@ -96,6 +97,7 @@ export function extractCodexPartialTurn(
     nextStepStartedAtMs?: number;
     lastCumulativeTokenTotal?: number;
     model?: string;
+    effort?: string;
     cwd?: string;
     developerInstructions?: string;
     blobToUri?: BlobToUriFn;
@@ -108,6 +110,7 @@ export function extractCodexPartialTurn(
     nextStepStartedAtMs: opts.nextStepStartedAtMs,
     lastCumulativeTokenTotal: opts.lastCumulativeTokenTotal,
     model: opts.model,
+    effort: opts.effort,
     cwd: opts.cwd,
     developerInstructions: opts.developerInstructions,
     blobToUri: opts.blobToUri,
@@ -125,6 +128,7 @@ export function extractCodexPartialTurnWithBoundaries(
     nextStepStartedAtMs?: number;
     lastCumulativeTokenTotal?: number;
     model?: string;
+    effort?: string;
     cwd?: string;
     developerInstructions?: string;
     blobToUri?: BlobToUriFn;
@@ -137,6 +141,7 @@ export function extractCodexPartialTurnWithBoundaries(
     nextStepStartedAtMs: opts.nextStepStartedAtMs,
     lastCumulativeTokenTotal: opts.lastCumulativeTokenTotal,
     model: opts.model,
+    effort: opts.effort,
     cwd: opts.cwd,
     developerInstructions: opts.developerInstructions,
     blobToUri: opts.blobToUri,
@@ -165,6 +170,7 @@ function extractCodexTurn(
     nextStepStartedAtMs?: number;
     lastCumulativeTokenTotal?: number;
     model?: string;
+    effort?: string;
     cwd?: string;
     developerInstructions?: string;
   },
@@ -177,6 +183,7 @@ function extractCodexTurn(
   let sawSubmittedUserMessage = false;
   let finalText: string | undefined;
   let model = opts.model ?? 'unknown';
+  let effort = readReasoningLevel(opts.effort);
   let cwd = opts.cwd;
   let developerInstructions = opts.developerInstructions;
   const blobToUri = opts.blobToUri;
@@ -201,6 +208,8 @@ function extractCodexTurn(
       if (previous?.llmClosed) previous.followedByAnotherWave = true;
       currentStep = {
         step: {
+          model,
+          effort,
           startedAtMs: timestamp,
           responseAtMs: timestamp,
           hasResponseEvidence: false,
@@ -262,6 +271,7 @@ function extractCodexTurn(
       startedAtMs ||= timestamp;
       markActivity(timestamp);
       model = stringValue(payload.model) ?? model;
+      effort = readReasoningLevel(payload.effort);
       cwd = stringValue(payload.cwd) ?? cwd;
       developerInstructions = stringValue(payload.developer_instructions) ?? developerInstructions;
       continue;
@@ -563,6 +573,7 @@ function extractCodexTurn(
     transcriptTurnId: expectedTurnId,
     provider: meta?.provider ?? 'openai',
     model,
+    ...(effort !== undefined ? { effort } : {}),
     status: resolvedStatus,
     startedAtMs: startedAtMs || terminalAtMs,
     terminalAtMs,

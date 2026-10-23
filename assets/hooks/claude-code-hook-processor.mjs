@@ -291,6 +291,15 @@ function reapInterceptFiles(intercept, mergedResponseIds) {
   }
 }
 
+function reapRouterFiles(context) {
+  const root = path.resolve(ROUTER_DIR());
+  for (const file of context?.consumed || []) {
+    try {
+      if (path.dirname(path.resolve(file)) === root) fs.unlinkSync(file);
+    } catch (_) {}
+  }
+}
+
 function reapAttemptFiles(files) {
   for (const file of files) {
     try { fs.unlinkSync(file); } catch (_) {}
@@ -863,6 +872,7 @@ async function finalizePendingSubagentTurns(state) {
   const attemptContext = {
     records: loadAttemptRecordsForSession(sessionId),
     consumed: new Set(),
+    router: { records: loadRouterRecords(), consumed: new Set() },
   };
   const consumedAttemptFiles = new Set();
   const completedSubagents = state.completed_subagents || {};
@@ -929,6 +939,7 @@ async function finalizePendingSubagentTurns(state) {
   state.completed_subagents = completedSubagents;
   reapInterceptFiles(intercept, mergedResponseIds);
   reapAttemptFiles(consumedAttemptFiles);
+  reapRouterFiles(attemptContext.router);
   reapStaleIntercept(sessionId);
 }
 
@@ -1032,6 +1043,7 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   const attemptContext = {
     records: loadAttemptRecordsForSession(sessionId),
     consumed: new Set(),
+    router: { records: loadRouterRecords(), consumed: new Set() },
   };
   const consumedAttemptFiles = new Set();
 
@@ -1122,6 +1134,7 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   // earlier turns. Failure is silent — host process must not be impacted.
   reapInterceptFiles(intercept, mergedResponseIds);
   reapAttemptFiles(consumedAttemptFiles);
+  reapRouterFiles(attemptContext.router);
   reapStaleIntercept(sessionId);
 }
 
@@ -1173,6 +1186,89 @@ function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
   });
 }
 
+function modelSettingText(value, max = 256) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= max
+    && value !== 'unknown' && !/[\u0000-\u001f\u007f-\u009f]/.test(value) ? value : undefined;
+}
+
+const SETTING_KEYS = ['request_model', 'model', 'reasoning_effort', 'thinking_type', 'thinking_budget_tokens'];
+
+function nativeRequestSettings(primary, fallback) {
+  // One physical request is the evidence; never blend a different attempt into it.
+  const data = primary || fallback || {};
+  const hasSettings = SETTING_KEYS.some(key => data[key] !== undefined && data[key] !== null);
+  const requested = modelSettingText(data.request_model ?? data.model);
+  const effort = modelSettingText(data.reasoning_effort, 64);
+  const type = modelSettingText(data.thinking_type, 64);
+  const budget = data.thinking_budget_tokens;
+  return {
+    ...(requested ? { 'gen_ai.request.model': requested } : {}),
+    ...(effort ? { 'gen_ai.request.reasoning.level': effort } : {}),
+    ...(Number.isSafeInteger(budget) && budget >= 0 ? { 'gen_ai.request.reasoning.budget_tokens': budget } : {}),
+    ...(type ? { 'gen_ai.request.thinking.type': type } : {}),
+    'gen_ai.request.model_settings.source': hasSettings ? 'claude.preload' : 'claude.transcript',
+    'gen_ai.request.model_settings.scope': 'request',
+  };
+}
+
+const ROUTER_TRACEPARENT_RE = /^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$/;
+const ROUTER_DIR = () => path.join(pilotDataDir(), 'router', 'ccr');
+
+function loadRouterRecords() {
+  const dir = ROUTER_DIR();
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return []; }
+  const now = Date.now();
+  const fresh = names.flatMap((name) => {
+    const file = path.join(dir, name);
+    try {
+      const { mtimeMs } = fs.statSync(file);
+      // Unmatched records and interrupted temp writes expire like intercept files.
+      if (now - mtimeMs > INTERCEPT_STALE_MS) { fs.unlinkSync(file); return []; }
+      return name.endsWith('.json') ? [{ file, mtimeMs }] : [];
+    } catch { return []; }
+  }).sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, MAX_ATTEMPT_FILES);
+  return fresh.flatMap(({ file }) => {
+    try {
+      const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return value?.schema_version === 1 && modelSettingText(value.response_id)
+        && (ROUTER_TRACEPARENT_RE.test(value.upstream_traceparent) || modelSettingText(value.session_id, 128))
+        ? [{ ...value, _file: file }] : [];
+    } catch { return []; }
+  });
+}
+
+function routerRecordFor(context, interceptData, responseId, sessionId) {
+  const records = context?.records;
+  const consumed = context?.consumed;
+  if (!Array.isArray(records) || !(consumed instanceof Set) || !modelSettingText(responseId)) return undefined;
+  const traceparent = interceptData?.upstream_traceparent;
+  // Exact final traceparent when the preload saw the call; otherwise the session header CCR observed.
+  const matches = ROUTER_TRACEPARENT_RE.test(traceparent)
+    ? records.filter(r => r.upstream_traceparent === traceparent && r.response_id === responseId)
+    : records.filter(r => modelSettingText(sessionId, 128) && r.session_id === sessionId && r.response_id === responseId);
+  if (matches.length !== 1) return undefined;
+  consumed.add(matches[0]._file);
+  return matches[0];
+}
+
+function routerSettingsFor(r) {
+  if (!r) return {};
+  const selected = modelSettingText(r.selected_model);
+  const provider = modelSettingText(r.provider);
+  const reason = modelSettingText(r.reason);
+  const effort = modelSettingText(r.router_reasoning_effort, 64);
+  const budget = r.router_thinking_budget_tokens;
+  return {
+    'gen_ai.request.router.name': 'ccr',
+    ...(selected ? { 'gen_ai.request.router.selected_model': selected } : {}),
+    ...(provider ? { 'gen_ai.request.router.provider': provider } : {}),
+    ...(reason ? { 'gen_ai.request.router.reason': reason } : {}),
+    ...(effort ? { 'gen_ai.request.router.reasoning.level': effort } : {}),
+    ...(Number.isSafeInteger(budget) && budget >= 0 ? { 'gen_ai.request.router.reasoning.budget_tokens': budget } : {}),
+  };
+}
+
 function applyAttemptAttributes(record, attempt) {
   if (!attempt) return;
   const requestId = attempt.request_id || attempt.client_request_id;
@@ -1207,7 +1303,7 @@ function buildRetryAttemptRecords({
       'gen_ai.step.id': currentStepId,
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': 'anthropic',
-      'gen_ai.request.model': attempt.model || model || 'unknown',
+      ...nativeRequestSettings(undefined, attempt),
       'gen_ai.input.messages_delta': [],
     };
     applyAttemptAttributes(request, attempt);
@@ -1222,8 +1318,8 @@ function buildRetryAttemptRecords({
       'gen_ai.step.id': currentStepId,
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': 'anthropic',
-      'gen_ai.request.model': attempt.model || model || 'unknown',
-      'gen_ai.response.model': attempt.model || model || 'unknown',
+      ...nativeRequestSettings(undefined, attempt),
+      ...(modelSettingText(attempt.response_model) ? { 'gen_ai.response.model': attempt.response_model } : {}),
       // A failed physical attempt produced no model output, so it carries the
       // sentinel finish reason "error" rather than a model stop reason. The
       // failure detail is still on error.type + http.response.status_code, and
@@ -1369,6 +1465,14 @@ function buildTurnRecords(
       ? intercept.get(ev.message_id)
       : undefined;
     if (interceptData) mergedResponseIds.add(ev.message_id);
+    const routerRecord = routerRecordFor(attemptContext?.router, interceptData, responseId, sessionId);
+    const observed = interceptData || finalAttempt;
+    const modelSettings = {
+      ...(observed || !routerRecord ? nativeRequestSettings(interceptData, finalAttempt)
+        : { ...nativeRequestSettings(routerRecord, undefined), 'gen_ai.request.model_settings.source': 'ccr.observer' }),
+      ...routerSettingsFor(routerRecord),
+    };
+    const reportedModel = modelSettingText(interceptData?.response_model) ?? modelSettingText(ev.model);
 
     // The preload already advertised its minted span id to the LLM gateway as
     // traceparent parent-id, so this span has to claim the same id — otherwise
@@ -1414,7 +1518,7 @@ function buildTurnRecords(
       'gen_ai.step.id': currentStepId,
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': 'anthropic',
-      'gen_ai.request.model': ev.model || 'unknown',
+      ...modelSettings,
       'gen_ai.input.messages_hash': currentFullHash,
       'gen_ai.input.messages_delta': delta,
     };
@@ -1457,8 +1561,8 @@ function buildTurnRecords(
       'gen_ai.step.id': currentStepId,
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': 'anthropic',
-      'gen_ai.request.model': ev.model || 'unknown',
-      'gen_ai.response.model': ev.model || 'unknown',
+      ...modelSettings,
+      ...(reportedModel ? { 'gen_ai.response.model': reportedModel } : {}),
       'gen_ai.response.finish_reasons': [mapStopReason(ev.stop_reason || 'stop')],
       'gen_ai.usage.input_tokens': inputTokens,
       'gen_ai.usage.output_tokens': outputTokens,

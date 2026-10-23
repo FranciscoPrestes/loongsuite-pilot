@@ -217,6 +217,84 @@ function sseStream(opts = {}) {
 }
 
 describe('claude-code-fetch-intercept preload', () => {
+  test.each([
+    [{ output_config: { effort: 'high' }, thinking: { type: 'enabled', budget_tokens: 8192 } },
+      { reasoning_effort: 'high', thinking_type: 'enabled', thinking_budget_tokens: 8192 }],
+    [{ reasoning: { effort: 'medium' } }, { reasoning_effort: 'medium' }],
+    [{ reasoning_effort: 0, thinking: { type: 'adaptive', budget_tokens: 0 } },
+      { thinking_type: 'adaptive', thinking_budget_tokens: 0 }],
+    [{ output_config: { effort: 'low' }, reasoning: { effort: 'low' }, reasoning_effort: 'low' },
+      { reasoning_effort: 'low' }],
+    [{}, {}],
+    [{ output_config: { effort: 'high' }, reasoning: { effort: 'low' } }, {}],
+    [{ output_config: { effort: 'high' }, reasoning_effort: 'low' }, {}],
+    [{ reasoning: { effort: 'high' }, reasoning_effort: 'low' }, {}],
+    [{ output_config: { effort: {} }, thinking: { type: {}, budget_tokens: -1 } }, {}],
+    [{ reasoning_effort: true, thinking: { type: 'bad\u0085mode', budget_tokens: 1.5 } }, {}],
+    [{ reasoning_effort: 'bad\neffort', thinking: { type: '', budget_tokens: '0' } }, {}],
+    [{ reasoning: { effort: 'x'.repeat(65) }, thinking: { type: 'x'.repeat(65), budget_tokens: 9007199254740992 } }, {}],
+    [{ reasoning_effort: null, thinking: { budget_tokens: null } }, {}],
+  ])('captures only explicit valid request settings: %j', (settings, expected) => {
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      body: { model: 'requested-A', ...settings }, sseEvents: sseStream(),
+    });
+    expect(r.status).toBe(0);
+    const enrichment = readIntercept(SESS)[0].record;
+    const attempt = readAttempts(SESS)[0];
+    for (const record of [enrichment, attempt]) {
+      expect(record).toMatchObject({ request_model: 'requested-A', response_model: 'claude-test', ...expected });
+      for (const key of ['reasoning_effort', 'thinking_type', 'thinking_budget_tokens']) {
+        if (!(key in expected)) expect(record).not.toHaveProperty(key);
+      }
+    }
+    expect(attempt.model).toBe('requested-A');
+  });
+
+  test.each([undefined, {}, '', 'bad\nmodel', 'x'.repeat(257)])('omits invalid or absent model without substituting response model: %j', (model) => {
+    const r = runScenario({ url: LLM_URL, sessionId: SESS, body: { model }, sseEvents: sseStream() });
+    expect(r.status).toBe(0);
+    for (const record of [readIntercept(SESS)[0].record, readAttempts(SESS)[0]]) {
+      expect(record).not.toHaveProperty('request_model');
+      expect(record.response_model).toBe('claude-test');
+    }
+  });
+
+  test.each([undefined, {}, '', 'bad\nmodel', 'x'.repeat(257)])('omits invalid or absent response model: %j', (model) => {
+    const events = sseStream();
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS, body: { model: 'requested-A' },
+      sseEvents: events.map(e => e.event === 'message_start'
+        ? { ...e, data: { ...e.data, message: { ...e.data.message, model } } } : e),
+    });
+    expect(r.status).toBe(0);
+    for (const record of [readIntercept(SESS)[0].record, readAttempts(SESS)[0]]) {
+      expect(record.request_model).toBe('requested-A');
+      expect(record).not.toHaveProperty('response_model');
+    }
+  });
+
+  test('retains distinct settings on failed attempts and retries without persisting unrelated secrets', () => {
+    const secret = 'dummy-secret-not-a-real-credential';
+    for (const [model, effort, status] of [['requested-A', 'low', 429], ['requested-B', 'high', 200]]) {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS, status,
+        body: { model, output_config: { effort, unrelated: secret }, messages: [{ content: secret }], secret },
+        extraRequestHeaders: { authorization: secret },
+        sseEvents: sseStream(),
+      });
+      expect(r.status).toBe(0);
+    }
+    const attempts = readAttempts(SESS);
+    expect(attempts).toHaveLength(2);
+    expect(attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ model: 'requested-A', request_model: 'requested-A', reasoning_effort: 'low', status_code: 429 }),
+      expect.objectContaining({ model: 'requested-B', request_model: 'requested-B', reasoning_effort: 'high', response_model: 'claude-test', status_code: 200 }),
+    ]));
+    expect(attempts.find(a => a.status_code === 429)).not.toHaveProperty('response_model');
+    expect(JSON.stringify({ attempts, enrichment: readIntercept(SESS) })).not.toContain(secret);
+  });
+
   test('captures system_instructions in spec format (text → content, filters billing header)', () => {
     const body = {
       model: 'claude-opus-4-7',
@@ -710,6 +788,8 @@ describe('claude-code-fetch-intercept preload', () => {
       expect(spanId).not.toBe('0'.repeat(16));
       expect(readAttempts(sessionId).map((a) => a.llm_span_id)).toEqual([spanId]);
       expect(observedTraceparent).toBe(`00-${TRACE_ID}-${spanId}-${FLAGS}`);
+      expect(records[0].upstream_traceparent).toBe(observedTraceparent);
+      expect(readAttempts(sessionId)[0].upstream_traceparent).toBe(observedTraceparent);
     }
 
     test('forwards the inherited trace but substitutes this attempt\'s span id', () => {
@@ -795,6 +875,20 @@ describe('claude-code-fetch-intercept preload', () => {
       expect(headers.tracestate).toBeUndefined();
     });
 
+    test.each([undefined, 'invalid', '00-' + '0'.repeat(32) + '-2222222222222222-01',
+      '00-11111111111111111111111111111111-0000000000000000-01',
+      'ff-11111111111111111111111111111111-2222222222222222-01'])
+    ('does not persist an absent or invalid final traceparent: %j', (traceparent) => {
+      const r = runScenario({
+        url: LLM_URL, sessionId: SESS, body: {}, sseEvents: sseStream(),
+        extraRequestHeaders: traceparent === undefined ? {} : { traceparent },
+      });
+      expect(r.status, r.stderr).toBe(0);
+      for (const record of [readIntercept(SESS)[0].record, readAttempts(SESS)[0]]) {
+        expect(record).not.toHaveProperty('upstream_traceparent');
+      }
+    });
+
     test('never overwrites a traceparent the caller already set', () => {
       // A propagator must not replace a context it did not create, even when
       // the caller's value looks less trustworthy than ours.
@@ -809,6 +903,10 @@ describe('claude-code-fetch-intercept preload', () => {
       expect(r.status, r.stderr).toBe(0);
       const { headers } = readObservedRequest();
       expect(headers.traceparent).toBe(callerTp);
+      for (const record of [readIntercept(SESS)[0].record, readAttempts(SESS)[0]]) {
+        expect(record.upstream_traceparent).toBe(callerTp);
+        expect(record.llm_span_id).not.toBe(callerTp.split('-')[2]);
+      }
       // tracestate rides with our traceparent; skipping one skips both.
       expect(headers.tracestate).toBeUndefined();
     });

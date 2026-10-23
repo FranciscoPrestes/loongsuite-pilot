@@ -137,6 +137,31 @@ function readBodyAsText(body) {
   return null;
 }
 
+const MODEL_MAX_LENGTH = 256;
+const SETTING_MAX_LENGTH = 64;
+const SETTING_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
+
+function validSettingString(value, maxLength) {
+  return typeof value === 'string' && value.trim().length > 0
+    && value.length <= maxLength && !SETTING_CONTROL_RE.test(value);
+}
+
+function extractRequestSettings(parsed) {
+  const efforts = [parsed.output_config?.effort, parsed.reasoning?.effort, parsed.reasoning_effort]
+    .filter(value => value !== undefined);
+  const effort = efforts[0];
+  const validEffort = validSettingString(effort, SETTING_MAX_LENGTH);
+  const budget = parsed.thinking?.budget_tokens;
+  return {
+    ...(validSettingString(parsed.model, MODEL_MAX_LENGTH) ? { request_model: parsed.model } : {}),
+    // Multiple spellings are evidence only when they agree; never invent precedence.
+    ...(validEffort && efforts.every(value => value === effort) ? { reasoning_effort: effort } : {}),
+    ...(Number.isSafeInteger(budget) && budget >= 0 ? { thinking_budget_tokens: budget } : {}),
+    ...(validSettingString(parsed.thinking?.type, SETTING_MAX_LENGTH)
+      ? { thinking_type: parsed.thinking.type } : {}),
+  };
+}
+
 function safeParseRequestMetadata(body) {
   const text = readBodyAsText(body);
   if (!text) return { systemInstructions: null, model: null, requestHash: null };
@@ -145,7 +170,8 @@ function safeParseRequestMetadata(body) {
     const parsed = JSON.parse(text);
     return {
       systemInstructions: extractSystemInstructions(parsed.system),
-      model: typeof parsed.model === 'string' ? parsed.model.slice(0, 256) : null,
+      model: validSettingString(parsed.model, MODEL_MAX_LENGTH) ? parsed.model : null,
+      settings: extractRequestSettings(parsed),
       requestHash,
     };
   } catch (_) {
@@ -401,6 +427,8 @@ if (typeof origFetch === 'function') {
     let sessionId = null;
     let systemInstructions = null;
     let model = null;
+    let settings = {};
+    let responseModel = null;
     let requestHash = null;
     let clientRequestId = null;
     let llmSpanId = null;
@@ -413,7 +441,7 @@ if (typeof origFetch === 'function') {
       if (sessionId) {
         const body = init?.body
           ?? (input && typeof input === 'object' ? input.body : null);
-        ({ systemInstructions, model, requestHash } = safeParseRequestMetadata(body));
+        ({ systemInstructions, model, requestHash, settings = {} } = safeParseRequestMetadata(body));
         // Only mint when a record can be written: a parent-id nobody records
         // would point the gateway at a span pilot never emits, which is worse
         // than forwarding the upstream parent verbatim.
@@ -425,6 +453,14 @@ if (typeof origFetch === 'function') {
     // that gate decides whether *we* can record telemetry, which has no
     // bearing on the gateway's ability to join the trace.
     ({ input, init } = withUpstreamTraceContext(input, init, llmSpanId));
+    let upstreamTraceparent = null;
+    try {
+      const finalTraceparent = readHeaderValue(
+        init?.headers ?? (input && typeof input === 'object' ? input.headers : null), 'traceparent',
+      );
+      if (typeof finalTraceparent === 'string' && finalTraceparent === finalTraceparent.trim()
+        && parseTraceparent(finalTraceparent)) upstreamTraceparent = finalTraceparent;
+    } catch (_) {}
 
     if (!sessionId) {
       return origFetch.call(this, input, init);
@@ -444,6 +480,9 @@ if (typeof origFetch === 'function') {
         client_request_id: clientRequestId,
         request_hash: requestHash,
         model,
+        ...settings,
+        ...(responseModel ? { response_model: responseModel } : {}),
+        ...(upstreamTraceparent ? { upstream_traceparent: upstreamTraceparent } : {}),
         start_time_unix_nano: String(startedUnixNs),
         end_time_unix_nano: String(startedUnixNs + durationNs),
         duration_ns: Number(durationNs <= BigInt(Number.MAX_SAFE_INTEGER)
@@ -511,6 +550,9 @@ if (typeof origFetch === 'function') {
         response_id: responseId,
         ttft_ns: ttftNs,
         system_instructions: systemInstructions,
+        ...settings,
+        ...(responseModel ? { response_model: responseModel } : {}),
+        ...(upstreamTraceparent ? { upstream_traceparent: upstreamTraceparent } : {}),
         ...(llmSpanId ? { llm_span_id: llmSpanId } : {}),
       });
       recordWritten = true;
@@ -523,6 +565,7 @@ if (typeof origFetch === 'function') {
         try {
           const evt = JSON.parse(parsed.data);
           if (evt?.message?.id) responseId = String(evt.message.id);
+          if (validSettingString(evt?.message?.model, MODEL_MAX_LENGTH)) responseModel = evt.message.model;
         } catch (_) {}
       } else if (parsed.event === 'content_block_delta' && ttftNs === null) {
         try {

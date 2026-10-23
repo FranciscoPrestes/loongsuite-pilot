@@ -6,6 +6,7 @@ import type { Dirent, FSWatcher } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import { isReservedKey } from '../../normalization/global-attributes.js';
+import { readReasoningLevel } from '../../normalization/model-settings.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
@@ -565,7 +566,7 @@ export class CodexTranscriptInput extends BaseInput {
           if (!checkpoint.activeTurn || checkpoint.activeTurn.turnId !== turnId) {
             checkpoint.activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()));
           }
-          updateActiveTurnMetadata(checkpoint.activeTurn, line.record, payload);
+          checkpoint.activeTurn = updateActiveTurnMetadata(checkpoint.activeTurn, line.record, payload);
           return;
         }
 
@@ -806,7 +807,7 @@ export class CodexTranscriptInput extends BaseInput {
     inferredTerminalStatus?: 'interrupted',
     attachmentParentThreadId?: string,
   ): Promise<SegmentRecoveryResult> {
-    const activeTurn = checkpoint.activeTurn;
+    let activeTurn = checkpoint.activeTurn;
     if (!activeTurn) {
       return {
         kind: 'unparseable',
@@ -870,7 +871,8 @@ export class CodexTranscriptInput extends BaseInput {
     }
     const turn = extraction.turn;
     if (inferredTerminalStatus) turn.status = inferredTerminalStatus;
-    updateActiveTurnFromExtractedTurn(activeTurn, turn);
+    activeTurn = updateActiveTurnFromExtractedTurn(activeTurn, turn);
+    checkpoint.activeTurn = activeTurn;
     if (turn.unmatchedTokenUsages.length > 0) {
       this.logger.warn('Codex transcript token samples could not be assigned to a response wave', {
         transcriptPath: filePath,
@@ -2000,7 +2002,7 @@ export class CodexTranscriptInput extends BaseInput {
             true,
           );
         }
-        updateActiveTurnMetadata(candidate, line.record, payload);
+        candidate = updateActiveTurnMetadata(candidate, line.record, payload);
         return;
       }
       if (terminalTurnIdFor(line.record, payload) === candidate?.turnId) candidate = null;
@@ -2063,7 +2065,7 @@ export class CodexTranscriptInput extends BaseInput {
         activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()), true);
       }
       if (turnId && activeTurn?.turnId === turnId) {
-        updateActiveTurnMetadata(activeTurn, line.record, payload);
+        activeTurn = updateActiveTurnMetadata(activeTurn, line.record, payload);
         return;
       }
       const terminalTurnId = terminalTurnIdFor(line.record, payload);
@@ -2401,6 +2403,7 @@ export class CodexTranscriptInput extends BaseInput {
     nextStepStartedAtMs?: number;
     lastCumulativeTokenTotal?: number;
     model?: string;
+    effort?: string;
     cwd?: string;
     developerInstructions?: string;
     blobToUri?: BlobToUriFn;
@@ -2418,6 +2421,7 @@ export class CodexTranscriptInput extends BaseInput {
         ? { blobToUri: this.blobToUri(filePath, activeTurn.cwd, attachmentParentThreadId), uploadMode: this.multimodalUploadMode }
         : {}),
       ...(activeTurn.model ? { model: activeTurn.model } : {}),
+      ...(activeTurn.effort !== undefined ? { effort: activeTurn.effort } : {}),
       ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
       ...(activeTurn.developerInstructions
         ? { developerInstructions: activeTurn.developerInstructions }
@@ -2918,24 +2922,31 @@ function updateActiveTurnMetadata(
   activeTurn: CodexActiveTranscriptTurn,
   record: Record<string, unknown>,
   payload: Record<string, unknown>,
-): void {
-  if (record.type !== 'turn_context') return;
+): CodexActiveTranscriptTurn {
+  if (record.type !== 'turn_context') return activeTurn;
   const model = stringValue(payload.model);
   const cwd = stringValue(payload.cwd);
   const developerInstructions = stringValue(payload.developer_instructions);
-  if (model) activeTurn.model = model;
-  if (cwd) activeTurn.cwd = cwd;
-  if (developerInstructions) activeTurn.developerInstructions = developerInstructions;
+  return {
+    ...activeTurn,
+    ...(model ? { model } : {}),
+    effort: readReasoningLevel(payload.effort),
+    ...(cwd ? { cwd } : {}),
+    ...(developerInstructions ? { developerInstructions } : {}),
+  };
 }
-
 
 function updateActiveTurnFromExtractedTurn(
   activeTurn: CodexActiveTranscriptTurn,
-  turn: { model: string; cwd?: string; developerInstructions?: string },
-): void {
-  if (turn.model && turn.model !== 'unknown') activeTurn.model = turn.model;
-  if (turn.cwd) activeTurn.cwd = turn.cwd;
-  if (turn.developerInstructions) activeTurn.developerInstructions = turn.developerInstructions;
+  turn: { model: string; effort?: string; cwd?: string; developerInstructions?: string },
+): CodexActiveTranscriptTurn {
+  return {
+    ...activeTurn,
+    ...(turn.model && turn.model !== 'unknown' ? { model: turn.model } : {}),
+    effort: readReasoningLevel(turn.effort),
+    ...(turn.cwd ? { cwd: turn.cwd } : {}),
+    ...(turn.developerInstructions ? { developerInstructions: turn.developerInstructions } : {}),
+  };
 }
 
 function terminalTurnIdFor(record: Record<string, unknown>, payload: Record<string, unknown>): string | null {
@@ -2964,6 +2975,7 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
     || typeof active.startedAtMs !== 'number'
   ) return null;
   const model = stringValue(active.model);
+  const effort = readReasoningLevel(active.effort);
   const cwd = stringValue(active.cwd);
   const developerInstructions = stringValue(active.developerInstructions);
   return {
@@ -2977,6 +2989,7 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
       ? { lastCumulativeTokenTotal: active.lastCumulativeTokenTotal }
       : {}),
     ...(model ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
     ...(cwd ? { cwd } : {}),
     ...(developerInstructions ? { developerInstructions } : {}),
     emittedPrompt: active.emittedPrompt === true,

@@ -41,7 +41,6 @@ export function buildCodexTranscriptSegment(
   const traceId = hashId([turn.sessionId, turn.transcriptTurnId, 'trace'], 32);
   const agentSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'agent'], 16);
   const turnId = `${turn.sessionId}:${turn.transcriptTurnId}`;
-  const model = turn.model || 'unknown';
   const base: Record<string, JsonValue> = {
     trace_id: traceId,
     'gen_ai.session.id': turn.sessionId,
@@ -76,6 +75,17 @@ export function buildCodexTranscriptSegment(
   }
 
   for (const [index, step] of turn.steps.entries()) {
+    const model = step.model ?? turn.model ?? 'unknown';
+    const settingsFields: Record<string, JsonValue> = {
+      ...(step.effort !== undefined ? { 'gen_ai.request.reasoning.level': step.effort } : {}),
+      ...(model !== 'unknown' || step.effort !== undefined ? {
+        'gen_ai.request.model_settings.source': 'codex.turn_context',
+        'gen_ai.request.model_settings.scope': 'turn',
+      } : {}),
+    };
+    // Codex records only the requested model; tools carry the call context, not a model field.
+    const stepBase: Record<string, JsonValue> = { ...base, 'gen_ai.request.model': model, ...settingsFields };
+    const toolBase: Record<string, JsonValue> = { ...base, ...settingsFields };
     const stepNumber = startStepNumber + index;
     const stepId = `${turnId}:s${stepNumber}`;
     const stepSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'step', String(stepNumber)], 16);
@@ -85,7 +95,7 @@ export function buildCodexTranscriptSegment(
     const outputInputMessages = inputContext.fullMessages ?? inputMessages;
 
     records.push(buildEntry({
-      ...base,
+      ...stepBase,
       timestamp: step.startedAtMs,
       'event.id': hashId([turn.sessionId, turn.transcriptTurnId, 'request', String(stepNumber)], 32),
       'event.name': 'llm.request',
@@ -102,15 +112,13 @@ export function buildCodexTranscriptSegment(
 
     const terminalStep = index === turn.steps.length - 1;
     records.push(buildEntry({
-      ...base,
+      ...stepBase,
       timestamp: responseTimestamp(step),
       'event.id': hashId([turn.sessionId, turn.transcriptTurnId, 'response', String(stepNumber)], 32),
       'event.name': 'llm.response',
       span_id: llmSpanId,
       parent_span_id: stepSpanId,
       'gen_ai.step.id': stepId,
-      'gen_ai.request.model': model,
-      'gen_ai.response.model': model,
       'gen_ai.response.id': responseId,
       'gen_ai.response.finish_reasons': finishReasons(turn, step, terminalStep),
       ...(responseMessages(turn, step, terminalStep).length > 0
@@ -120,7 +128,7 @@ export function buildCodexTranscriptSegment(
     }));
 
     for (const [toolIndex, tool] of step.tools.entries()) {
-      records.push(...buildToolEntries(turn, tool, toolIndex, base, stepId, stepSpanId));
+      records.push(...buildToolEntries(turn, tool, toolIndex, toolBase, stepId, stepSpanId));
     }
 
     inputContext = advanceInputContext(inputContext, step);

@@ -26,6 +26,7 @@ export interface CodexActiveTranscriptTurn {
   lastCumulativeTokenTotal?: number;
   /** Turn-scoped context is needed after incremental recovery advances past turn_context. */
   model?: string;
+  effort?: string;
   cwd?: string;
   developerInstructions?: string;
   emittedPrompt?: boolean;
@@ -168,6 +169,8 @@ export interface CodexTranscriptTool {
 }
 
 export interface CodexTranscriptStep {
+  model?: string;
+  effort?: string;
   startedAtMs: number;
   responseAtMs: number;
   hasResponseEvidence: boolean;
@@ -211,6 +214,7 @@ export interface CodexExtractedTranscriptTurn {
   transcriptTurnId: string;
   provider: string;
   model: string;
+  effort?: string;
   status: CodexTerminalStatus;
   startedAtMs: number;
   terminalAtMs: number;

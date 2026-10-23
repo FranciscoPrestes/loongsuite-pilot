@@ -26,6 +26,7 @@ import { replayFailedSpans, type FailedSpanRecord, type ReplayOptions } from './
 import type { TraceRuntimeCounters, TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
+import { attachModelSettings } from './model-settings.js';
 import {
   DEFAULT_GIT_PASSTHROUGH_KEYS,
   isReservedKey,
@@ -1505,6 +1506,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
 
+      spans = attachModelSettings(records, spans);
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 

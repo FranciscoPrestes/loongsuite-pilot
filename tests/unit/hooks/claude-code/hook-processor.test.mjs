@@ -282,9 +282,9 @@ describe('claude-code-hook-processor v2 端到端', () => {
     expect(records.filter((record) => record['event.name'] === 'llm.request')).toHaveLength(1);
     const responses = records.filter((record) => record['event.name'] === 'llm.response');
     expect(responses).toHaveLength(1);
+    expect(responses[0]['gen_ai.request.model']).toBeUndefined();
+    expect(responses[0]['gen_ai.response.model']).toBeUndefined();
     expect(responses[0]).toMatchObject({
-      'gen_ai.request.model': 'unknown',
-      'gen_ai.response.model': 'unknown',
       'gen_ai.turn.end': true,
       'gen_ai.request.id': 'req-error-11',
       'http.response.status_code': 529,
@@ -1587,6 +1587,127 @@ describe('hook-processor merges intercept data into llm events', () => {
     { type: 'text', content: 'You are a Claude agent.' },
     { type: 'text', content: 'CLAUDE.md content here.' },
   ];
+
+  test('keeps requested and reported models distinct and never leaks effort to another call', () => {
+    const sid = 'sid-model-settings';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_settings_a', 'msg_settings_b');
+    writeInterceptFile(sid, 'msg_settings_a', {
+      session_id: sid, response_id: 'msg_settings_a', request_model: 'requested-A', response_model: 'reported-B',
+      reasoning_effort: 'high', thinking_budget_tokens: 4096, thinking_type: 'enabled',
+    });
+    writeInterceptFile(sid, 'msg_settings_b', {
+      session_id: sid, response_id: 'msg_settings_b', request_model: 'requested-C', response_model: 'reported-D',
+      thinking_budget_tokens: 0,
+    });
+    expect(runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath }).status).toBe(0);
+    const records = readJsonlRecords();
+    const requests = records.filter(r => r['event.name'] === 'llm.request');
+    const responses = records.filter(r => r['event.name'] === 'llm.response');
+    expect(requests).toHaveLength(2);
+    expect(responses).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ 'gen_ai.request.model': 'requested-A', 'gen_ai.request.reasoning.level': 'high',
+      'gen_ai.request.reasoning.budget_tokens': 4096, 'gen_ai.request.thinking.type': 'enabled' });
+    expect(responses[0]).toMatchObject({ 'gen_ai.request.model': 'requested-A', 'gen_ai.response.model': 'reported-B' });
+    expect(requests[1]).toMatchObject({ 'gen_ai.request.model': 'requested-C', 'gen_ai.request.reasoning.budget_tokens': 0 });
+    expect(responses[1]['gen_ai.response.model']).toBe('reported-D');
+    expect(requests[1]['gen_ai.request.reasoning.level']).toBeUndefined();
+  });
+
+  test('joins CCR router metadata only by the exact final traceparent and response identity', () => {
+    const sid = 'sid-ccr-router';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_router_a', 'msg_router_b');
+    const traceA = '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1111111111111111-01';
+    const traceB = '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2222222222222222-01';
+    writeInterceptFile(sid, 'msg_router_a', { session_id: sid, response_id: 'msg_router_a', request_model: 'virtual-A',
+      upstream_traceparent: traceA, llm_span_id: '1111111111111111' });
+    writeInterceptFile(sid, 'msg_router_b', { session_id: sid, response_id: 'msg_router_b', request_model: 'virtual-B',
+      upstream_traceparent: traceB, llm_span_id: '2222222222222222' });
+    const routerDir = path.join(DATA_DIR, 'router', 'ccr');
+    fs.mkdirSync(routerDir, { recursive: true });
+    fs.writeFileSync(path.join(routerDir, 'a.json'), JSON.stringify({ schema_version: 1, request_id: 'ccr-a',
+      upstream_traceparent: traceA, response_id: 'msg_router_a', request_model: 'virtual-A', selected_model: 'provider-A',
+      provider: 'provider', router_reasoning_effort: 'medium', router_thinking_budget_tokens: 2048, response_model: 'reported-A' }));
+    fs.writeFileSync(path.join(routerDir, 'wrong-response.json'), JSON.stringify({ schema_version: 1, request_id: 'ccr-wrong',
+      upstream_traceparent: traceB, response_id: 'other', selected_model: 'wrong' }));
+    expect(runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath }).status).toBe(0);
+    const req = Object.fromEntries(readJsonlRecords().filter(r => r['event.name'] === 'llm.request').map(r => [r['gen_ai.response.id'], r]));
+    expect(req.msg_router_a).toMatchObject({ 'gen_ai.request.router.name': 'ccr', 'gen_ai.request.router.selected_model': 'provider-A',
+      'gen_ai.request.router.provider': 'provider', 'gen_ai.request.router.reasoning.level': 'medium',
+      'gen_ai.request.router.reasoning.budget_tokens': 2048 });
+    expect(req.msg_router_b['gen_ai.request.router.selected_model']).toBeUndefined();
+    expect(fs.existsSync(path.join(routerDir, 'a.json'))).toBe(false);
+    expect(fs.existsSync(path.join(routerDir, 'wrong-response.json'))).toBe(true);
+  });
+
+  test('does not fill the successful call with a failed attempt settings nor claim preload without data', () => {
+    const sid = 'sid-attempt-settings';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_attempt_a', 'msg_attempt_b');
+    writeInterceptFile(sid, 'msg_attempt_a', { session_id: sid, response_id: 'msg_attempt_a', request_model: 'requested-final' });
+    writeAttemptFile(sid, 'attempt-ok', { outcome: 'success', status_code: 200, error_type: null, response_id: 'msg_attempt_a',
+      request_model: 'requested-old', reasoning_effort: 'high', thinking_budget_tokens: 9000,
+      start_time_unix_nano: '2026060402574900000', end_time_unix_nano: '2026060402574900001' });
+    writeInterceptFile(sid, 'msg_attempt_b', { session_id: sid, response_id: 'msg_attempt_b', ttft_ns: 1 });
+    expect(runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath }).status).toBe(0);
+    const req = Object.fromEntries(readJsonlRecords().filter(r => r['event.name'] === 'llm.request').map(r => [r['gen_ai.response.id'], r]));
+    expect(req.msg_attempt_a['gen_ai.request.model']).toBe('requested-final');
+    expect(req.msg_attempt_a['gen_ai.request.reasoning.level']).toBeUndefined();
+    expect(req.msg_attempt_a['gen_ai.request.reasoning.budget_tokens']).toBeUndefined();
+    expect(req.msg_attempt_b['gen_ai.request.model_settings.source']).toBe('claude.transcript');
+  });
+
+  test('prunes stale or invalid CCR router files and still joins a fresh record beyond the scan window', () => {
+    const sid = 'sid-router-prune';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_prune_a', 'msg_prune_b');
+    const trace = '00-cccccccccccccccccccccccccccccccc-3333333333333333-01';
+    writeInterceptFile(sid, 'msg_prune_a', { session_id: sid, response_id: 'msg_prune_a', upstream_traceparent: trace });
+    const routerDir = path.join(DATA_DIR, 'router', 'ccr');
+    fs.mkdirSync(routerDir, { recursive: true });
+    const old = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    for (let i = 0; i < 520; i++) {
+      const f = path.join(routerDir, `stale-${String(i).padStart(4, '0')}.json`);
+      fs.writeFileSync(f, JSON.stringify({ schema_version: 1, request_id: `stale-${i}`, upstream_traceparent: trace, response_id: `other-${i}` }));
+      fs.utimesSync(f, old, old);
+    }
+    fs.writeFileSync(path.join(routerDir, 'orphan.json.1.x.tmp'), '{}');
+    fs.utimesSync(path.join(routerDir, 'orphan.json.1.x.tmp'), old, old);
+    fs.writeFileSync(path.join(routerDir, 'zzzz-fresh.json'), JSON.stringify({ schema_version: 1, request_id: 'fresh',
+      upstream_traceparent: trace, response_id: 'msg_prune_a', selected_model: 'fresh-route' }));
+    expect(runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath }).status).toBe(0);
+    const req = readJsonlRecords().find(r => r['event.name'] === 'llm.request' && r['gen_ai.response.id'] === 'msg_prune_a');
+    expect(req['gen_ai.request.router.selected_model']).toBe('fresh-route');
+    expect(fs.readdirSync(routerDir)).toEqual([]);
+  });
+
+  test('uses the CCR observer as request evidence by session and response when the preload saw nothing', () => {
+    const sid = 'sid-ccr-session-join';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_sess_a', 'msg_sess_b');
+    const routerDir = path.join(DATA_DIR, 'router', 'ccr');
+    fs.mkdirSync(routerDir, { recursive: true });
+    fs.writeFileSync(path.join(routerDir, 'a.json'), JSON.stringify({ schema_version: 1, request_id: 'r-a', session_id: sid,
+      response_id: 'msg_sess_a', request_model: 'requested-A', reasoning_effort: 'high', thinking_budget_tokens: 2048,
+      selected_model: 'routed-A', provider: 'prov', router_reasoning_effort: 'medium' }));
+    fs.writeFileSync(path.join(routerDir, 'other.json'), JSON.stringify({ schema_version: 1, request_id: 'r-o', session_id: 'another-session',
+      response_id: 'msg_sess_b', request_model: 'wrong' }));
+    expect(runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath }).status).toBe(0);
+    const req = Object.fromEntries(readJsonlRecords().filter(r => r['event.name'] === 'llm.request').map(r => [r['gen_ai.response.id'], r]));
+    expect(req.msg_sess_a).toMatchObject({ 'gen_ai.request.model': 'requested-A', 'gen_ai.request.reasoning.level': 'high',
+      'gen_ai.request.reasoning.budget_tokens': 2048, 'gen_ai.request.model_settings.source': 'ccr.observer',
+      'gen_ai.request.router.selected_model': 'routed-A', 'gen_ai.request.router.reasoning.level': 'medium' });
+    expect(req.msg_sess_b['gen_ai.request.model']).toBeUndefined();
+    expect(fs.existsSync(path.join(routerDir, 'a.json'))).toBe(false);
+    expect(fs.existsSync(path.join(routerDir, 'other.json'))).toBe(true);
+  });
+
+  test('does not substitute a response model for an unavailable requested model', () => {
+    const sid = 'sid-unknown-request-model';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_unknown_a', 'msg_unknown_b');
+    writeInterceptFile(sid, 'msg_unknown_a', { session_id: sid, response_id: 'msg_unknown_a', response_model: 'reported-model' });
+    expect(runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath }).status).toBe(0);
+    const records = readJsonlRecords().filter(r => r['gen_ai.response.id'] === 'msg_unknown_a');
+    expect(records).toHaveLength(2);
+    expect(records.every(r => r['gen_ai.request.model'] === undefined)).toBe(true);
+    expect(records.find(r => r['event.name'] === 'llm.response')['gen_ai.response.model']).toBe('reported-model');
+  });
 
   test('full match: both llm.request and llm.response receive new fields, intercept files deleted', () => {
     const sid = 'sid-merge-1';

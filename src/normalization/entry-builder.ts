@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { OPENCLAW_SESSION_KEY, isOpenClawSessionKey } from './openclaw-session-key.js';
+import { normalizeModelSettings } from './model-settings.js';
 import {
   type AgentActivityEntry,
   type AgentEventName,
@@ -158,7 +159,13 @@ export function buildAgentActivityEntry(
   entry['gen_ai.input.messages_delta'] = normalizeInputMessagesDelta(entry['gen_ai.input.messages_delta']);
   entry['gen_ai.input.messages'] = normalizeInputMessages(entry['gen_ai.input.messages']);
   removeLegacyAliases(entry);
-  return entry;
+  // Invalid raw settings are dropped; absent ones never become explicit undefined keys.
+  const settings = Object.entries(normalizeModelSettings(entry));
+  const invalid = new Set(settings.filter(([, v]) => v === undefined).map(([k]) => k));
+  return {
+    ...Object.fromEntries(Object.entries(entry).filter(([k]) => !invalid.has(k))),
+    ...Object.fromEntries(settings.filter(([, v]) => v !== undefined)),
+  } as AgentActivityEntry;
 }
 
 export function buildFromCodeGenerationEvent(

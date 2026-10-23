@@ -94,6 +94,18 @@ export interface AgentActivityEntry {
   'http.response.status_code'?: number;
   'gen_ai.request.model'?: string;
   'gen_ai.response.model'?: string;
+  'gen_ai.request.reasoning.level'?: string;
+  /** Explicit native thinking budget, not inferred from output-token limits. */
+  'gen_ai.request.reasoning.budget_tokens'?: number;
+  'gen_ai.request.thinking.type'?: string;
+  'gen_ai.request.model_settings.source'?: string;
+  'gen_ai.request.model_settings.scope'?: string;
+  'gen_ai.request.router.name'?: string;
+  'gen_ai.request.router.selected_model'?: string;
+  'gen_ai.request.router.provider'?: string;
+  'gen_ai.request.router.reason'?: string;
+  'gen_ai.request.router.reasoning.level'?: string;
+  'gen_ai.request.router.reasoning.budget_tokens'?: number;
   'gen_ai.response.finish_reasons'?: string[];
   /** Request-to-first-native-output latency in nanoseconds. */
   'gen_ai.response.time_to_first_token'?: number;
