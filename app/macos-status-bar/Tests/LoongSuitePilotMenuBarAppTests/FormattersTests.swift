@@ -3,6 +3,20 @@ import XCTest
 
 final class FormattersTests: XCTestCase {
 
+    // MARK: - releaseLabel (releases do fork se chamam NT-TES <n>)
+
+    func testReleaseLabel_ntcRelease() {
+        XCTAssertEqual(Formatters.releaseLabel("1.2.0-ntc.13-local-model-effort"), "NT-TES 13")
+        XCTAssertEqual(Formatters.releaseLabel("1.2.0-ntc.13"), "NT-TES 13")
+        XCTAssertEqual(Formatters.releaseLabel("v1.3.1-ntc.7"), "NT-TES 7")
+    }
+
+    func testReleaseLabel_semNumeracaoNtcMantemVersao() {
+        XCTAssertEqual(Formatters.releaseLabel("1.1.3"), "v1.1.3")
+        XCTAssertEqual(Formatters.releaseLabel(nil), "v--")
+        XCTAssertEqual(Formatters.releaseLabel("  "), "v--")
+    }
+
     // MARK: - compactNumber
 
     func testCompactNumber_millions() {

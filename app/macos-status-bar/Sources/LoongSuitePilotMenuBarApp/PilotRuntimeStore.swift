@@ -111,7 +111,7 @@ final class PilotRuntimeStore: ObservableObject {
         let active = file.status == "active"
         let version = file.packageVersion?.trimmingCharacters(in: .whitespacesAndNewlines)
         let daemonVersion = (version?.isEmpty == false) ? "v\(version!)" : "v--"
-        let displayVersion = (version?.isEmpty == false) ? "v\(version!)" : "v\(BuildInfo.version)"
+        let displayVersion = Formatters.releaseLabel((version?.isEmpty == false) ? version : BuildInfo.version)
 
         return PilotRuntimeSnapshot(
             statusText: active ? "Service running" : "Service status unknown",

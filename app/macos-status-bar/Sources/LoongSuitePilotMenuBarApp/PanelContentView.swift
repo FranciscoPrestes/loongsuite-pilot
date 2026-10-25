@@ -78,6 +78,8 @@ struct PanelContentView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(RoundedRectangle(cornerRadius: 4).fill(DT.card))
+                // Versão técnica completa ao passar o mouse (suporte).
+                .help(runtimeStore.snapshot.daemonVersionText)
 
             Spacer()
 
