@@ -1739,6 +1739,42 @@ INTERCEPTBLOCK
     echo ""
 }
 
+# Remove only the Pilot-owned Copilot startup block. Native telemetry files are data.
+remove_copilot_plugin() {
+    local copilot_home="$HOME/.copilot"
+    [ -d "$copilot_home" ] || return 0
+    local node_bin="${NODE_BIN:-}" helper="" version="" cache="$HOME/.loongsuite-pilot"
+    if [ ! -x "$node_bin" ] && [ -f "$cache/node-bin" ]; then
+        node_bin=$(tr -d '\r\n' < "$cache/node-bin")
+    fi
+    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
+    if [ -f "$cache/current" ]; then version=$(tr -d '\r\n' < "$cache/current"); fi
+    local candidate
+    for candidate in "$cache/versions/$version/dist/copilot-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/copilot-cleanup.cjs"; do
+        if [ -f "$candidate" ]; then helper="$candidate"; break; fi
+    done
+    if [ -z "$node_bin" ] || [ -z "$helper" ]; then
+        echo "Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved" >&2
+        return 0
+    fi
+    if ! "$node_bin" "$helper" "$copilot_home"; then
+        echo "Copilot cleanup incomplete; config and plugin assets preserved for retry" >&2
+    fi
+}
+
+remove_copilot_otel_environment() {
+    local file
+    for file in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$file" ] || continue
+        local tmp="${file}.pilot-copilot-$$.tmp"
+        if sed '/^# >>> loongsuite-pilot copilot otel >>>$/,/^# <<< loongsuite-pilot copilot otel <<<$/{d;}' "$file" > "$tmp"; then
+            cat "$tmp" > "$file"
+        fi
+        rm -f "$tmp"
+    done
+    rm -f "$DATA_DIR/state/copilot/otel-enabled"
+}
+
 remove_claude_code_fetch_intercept() {
     for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$file" ] && grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
@@ -3061,6 +3097,8 @@ cmd_uninstall() {
     remove_qoderclicn_token_intercept
     retire_qoderwork_runtime_overrides
     remove_claude_code_fetch_intercept
+    remove_copilot_otel_environment
+    remove_copilot_plugin
     echo ""
 
     # Remove OTel Claude plugin

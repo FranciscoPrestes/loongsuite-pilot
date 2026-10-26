@@ -3544,6 +3544,53 @@ function Remove-DshYamlPatch {
 # ============================================================
 # CMD: uninstall
 # ============================================================
+function Remove-CopilotPlugin {
+    $copilotHome = Join-Path $env:USERPROFILE '.copilot'
+    if (-not (Test-Path -LiteralPath $copilotHome)) { return }
+    $helper = $null
+    $candidates = @((Join-Path $script:PERMANENT_DIR 'dist/copilot-cleanup.cjs'))
+    $currentFile = Join-Path $CACHE_DIR 'current'
+    if (Test-Path -LiteralPath $currentFile) {
+        $version = (Get-Content -LiteralPath $currentFile -Raw -Encoding UTF8).Trim()
+        $candidates = @((Join-Path $CACHE_DIR "versions/$version/dist/copilot-cleanup.cjs")) + $candidates
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { $helper = $candidate; break }
+    }
+    if (-not $script:NODE_BIN -or -not $helper) {
+        Write-Warning 'Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved'
+        return
+    }
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $script:NODE_BIN $helper $copilotHome
+        $cleanupExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
+    if ($cleanupExit -ne 0) { Write-Warning 'Copilot cleanup incomplete; config and plugin assets preserved for retry' }
+}
+
+function Remove-CopilotOtelEnvironment {
+    # Best-effort legacy cleanup: Copilot automatic deployment is Unix-only.
+    # A profile access/CLM failure must not interrupt other agents or -Purge.
+    foreach ($relative in @('Documents/PowerShell/Microsoft.PowerShell_profile.ps1', 'Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1')) {
+        $tmp = $null
+        try {
+            $profilePath = Join-Path $env:USERPROFILE $relative
+            if (-not (Test-Path -LiteralPath $profilePath)) { continue }
+            $before = Get-Content -LiteralPath $profilePath -Raw -Encoding UTF8
+            $after = $before -replace '(?s)\r?\n?# >>> loongsuite-pilot copilot otel >>>.*?# <<< loongsuite-pilot copilot otel <<<\r?\n?', "`n"
+            if ($before -ne $after) {
+                $tmp = "$profilePath.pilot-$PID.tmp"
+                Set-Content -LiteralPath $tmp -Value $after -Encoding UTF8 -NoNewline
+                Move-Item -LiteralPath (Get-PilotLongPath $tmp) -Destination (Get-PilotLongPath $profilePath) -Force
+            }
+        } catch { Write-Warning "Copilot profile cleanup incomplete; continuing uninstall" }
+        finally { if ($tmp) { Remove-PilotPathQuietly $tmp } }
+    }
+    Remove-Item -LiteralPath (Join-Path $DATA_DIR 'state/copilot/otel-enabled') -Force -ErrorAction SilentlyContinue
+}
+
 function Cmd-Uninstall {
     Msg "🗑️  开始卸载 $PACKAGE_NAME ..." "🗑️  Uninstalling $PACKAGE_NAME ..."
     Write-Host ""
@@ -3596,6 +3643,8 @@ function Cmd-Uninstall {
     # pinned runtime can disappear, matching the POSIX uninstall ordering.
     Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
     Remove-GrokBuildHookConfig
+    try { Remove-CopilotOtelEnvironment } catch { Write-Warning "Copilot environment cleanup failed; continuing uninstall" }
+    try { Remove-CopilotPlugin } catch { Write-Warning "Copilot plugin cleanup failed; continuing uninstall" }
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."

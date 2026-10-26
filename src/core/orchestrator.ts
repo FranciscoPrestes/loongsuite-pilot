@@ -64,6 +64,7 @@ import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
+import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
@@ -148,6 +149,7 @@ export class Orchestrator extends EventEmitter {
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
+    'copilot-log': 'copilot',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
@@ -350,6 +352,7 @@ export class Orchestrator extends EventEmitter {
       ...this.buildGrokBuildInterceptTargets(),
       ...this.buildPluginInjectInterceptTargets(),
       ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildCopilotPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
@@ -869,6 +872,26 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  private buildCopilotPluginInterceptTargets(): InterceptCheckTarget[] {
+    if (process.platform === 'win32') return [];
+    return this.deploymentManager.getDefinitions()
+      .filter(def => def.deployMode === 'copilot-plugin' && def.copilotPlugin)
+      .map(def => ({
+        id: `copilot-plugin:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: () => this.deploymentManager.isAgentDetected(def),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success || result.skipped) throw new Error(result.error ?? 'Copilot disappeared before plugin repair');
+        },
+        cleanup: async () => {
+          if (!this.deploymentManager.hasRecord(def.id)) return;
+          if (!(await this.deploymentManager.undeployAgent(def))) throw new Error('Copilot plugin cleanup incomplete');
+        },
+      }));
   }
 
   /** Self-heal managed native plugin directories, such as Hermes plugins. */
@@ -1613,6 +1636,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['codex-transcript']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
+      }),
+    );
+
+    // --- Copilot CLI (session events.jsonl polling) ---
+    const copilotLogInput = new CopilotLogInput({
+      stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['copilot-log']?.pollInterval,
+      dataDir: this.config.dataDir,
+    });
+    this.inputManager.registerInput(copilotLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(copilotLogInput, {
+        watchPaths: CopilotLogInput.getWatchPaths(),
+        isAvailable: CopilotLogInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['copilot-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'copilot-log',
+            listenerCfg['copilot-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['copilot-log']?.pollInterval,
       }),
     );
 

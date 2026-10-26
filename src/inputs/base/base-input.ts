@@ -129,6 +129,8 @@ export abstract class BaseInput extends EventEmitter {
   protected async onStart(): Promise<void> {}
   /** Optional hook called once on stop. */
   protected async onStop(): Promise<void> {}
+  /** Commit source progress only after the batch has entered the shared output queue. */
+  protected onEntriesQueued(): void | Promise<void> {}
 
   /** Request an immediate serialized collection cycle from an input-owned watcher. */
   protected requestCollection(): void {
@@ -154,6 +156,7 @@ export abstract class BaseInput extends EventEmitter {
       const entries = this.workspacePolicy.filter(await this.collect(), this.agentType);
       if (entries.length > 0) {
         this.emit('entries', entries);
+        await this.onEntriesQueued();
         this.logger.debug('cycle produced entries', { count: entries.length });
       }
       // A shared checkpoint may wait for another input's HTTP recovery. Stop
