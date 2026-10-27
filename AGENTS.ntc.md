@@ -48,8 +48,9 @@ ainda não deu para aquele passo. Autorização para um passo não vale para o p
 Detalhes em `FORK.md` ("Release e rollback"). Resumo:
 
 1. Rode `ntc-release.yml` com `dry_run=true` e confira que passa.
-2. Rode com `dry_run=false` (sai como canário, 10%).
-3. `ntc-promote.yml` só com OK explícito do usuário, de preferência depois de alguns dias de canário.
+2. Rode com `dry_run=false` (o workflow publica como canário).
+3. Promova em seguida com `ntc-promote.yml` (versão recém-publicada): **toda release vai para todas as máquinas**.
+   Só deixe em canário se o usuário pedir canário literalmente (decisão de 27/10/2026).
 
 Se o CI reprovar, corrija a causa. Não pule testes nem force.
 
