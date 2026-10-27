@@ -700,7 +700,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     process.env.OTEL_SEMCONV_STABILITY_OPT_IN = semconvOptIns.join(',');
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
 
-    if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
+    if ((cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) || (cfg.turnPartialFlushMs && cfg.turnPartialFlushMs > 0)) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
       this.idleTimer.unref();
     }
@@ -2611,11 +2611,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private tickIdleTimeout(): void {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0 || this.batchDepth > 0) return;
+    const parcial = this.cfg.turnPartialFlushMs ?? 0;
+    if ((timeout <= 0 && parcial <= 0) || this.batchDepth > 0) return;
     const now = Date.now();
     this.sweepExpiredHeldOrphans(now);
     for (const [, buf] of this.turnBuffers) {
-      if (!buf.completed && now - buf.lastActivityMs > timeout) {
+      // NTConsult: turno longo e ainda ativo também sai em partes (a cada `turnPartialFlushMs` desde a abertura do buffer),
+      // pelo mesmo caminho do idle: envia o que está pareado e o turno reabre com o que chegar depois. Codex com diário fica fora (o diário é a fonte).
+      const parcialVencido = parcial > 0 && now - buf.openedAtMs >= parcial && !(buf.agentType === 'codex' && this.codexJournal);
+      if (!buf.completed && ((timeout > 0 && now - buf.lastActivityMs > timeout) || parcialVencido)) {
         if (buf.agentType === 'codex' && this.codexJournal) {
           this.turnBuffers.delete(buf.key);
           this.recordBufferRemoval(buf);

@@ -87,7 +87,7 @@ export function finalStep(ids: TurnIds = DEFAULT_IDS): AgentActivityEntry[] {
 
 export function makeFlusher(
   exported: ReadableSpan[],
-  overrides: { turnIdleTimeoutMs?: number } = {},
+  overrides: { turnIdleTimeoutMs?: number; turnPartialFlushMs?: number } = {},
 ): OtlpTraceFlusher {
   return new OtlpTraceFlusher({
     enabled: true,
@@ -95,6 +95,7 @@ export function makeFlusher(
     protocol: 'http/protobuf',
     serviceName: 'reopen-unit',
     turnIdleTimeoutMs: overrides.turnIdleTimeoutMs ?? IDLE_MS,
+    ...(overrides.turnPartialFlushMs !== undefined ? { turnPartialFlushMs: overrides.turnPartialFlushMs } : {}),
     failedReplayIntervalMs: 0,
   }, undefined, () => ({
     export: (spans, callback) => {

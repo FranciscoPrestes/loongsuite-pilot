@@ -67,6 +67,9 @@ function warnIgnoredCaptureMessageContentConfig(file: ConfigFile): void {
   }
 }
 
+/** NTConsult: intervalo padrão do envio parcial de turno aberto (painel "ao vivo" do TES). */
+const NTC_ENVIO_PARCIAL_MS = 10_000;
+
 export interface SlsEndpointEntry {
   name?: string;
   endpoint: string;
@@ -222,6 +225,7 @@ export interface ConfigFile {
     /** @deprecated Ignored. Message content capture is always enabled. */
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
+    turnPartialFlushMs?: number;
     failedReplayIntervalMs?: number;
     resourceAttributeKeys?: string[];
     spanAttributePassthroughPrefixes?: string[];
@@ -1083,6 +1087,8 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    // NTConsult: padrão de 10 s chega às máquinas já instaladas pela atualização automática (o apply-config só roda na instalação).
+    turnPartialFlushMs: otlp?.turnPartialFlushMs ?? NTC_ENVIO_PARCIAL_MS,
     failedReplayIntervalMs: otlp?.failedReplayIntervalMs,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),

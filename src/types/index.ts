@@ -92,6 +92,8 @@ export interface OtlpTraceRawConfig {
   /** @deprecated Ignored. Message content capture is always enabled. */
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
+  /** NTConsult: envia a parte pronta de um turno aberto a cada N ms (0 = só no fim do turno ou no idle). */
+  turnPartialFlushMs?: number;
   failedReplayIntervalMs?: number;
   resourceAttributeKeys?: string[];
   /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
@@ -312,6 +314,8 @@ export interface OtlpTraceFlusherConfig {
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
+  /** NTConsult: envia a parte pronta de um turno aberto a cada N ms (0 = só no fim do turno ou no idle). */
+  turnPartialFlushMs?: number;
   /** Interval to resend logs/otlp-failed; 0 disables. Default 300000. */
   failedReplayIntervalMs?: number;
   resourceAttributeKeys?: string[];

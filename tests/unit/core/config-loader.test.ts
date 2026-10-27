@@ -1876,6 +1876,15 @@ describe('ConfigLoader', () => {
       );
     });
 
+    it('NTConsult: envio parcial de turno ligado por padrão a cada 10 s; 0 desliga; valor explícito vale', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ collectTrace: true, otlpTrace: { endpoint: 'http://x:4318' } });
+      expect(buildOtlpTraceConfig(await loadConfig())!.turnPartialFlushMs).toBe(10_000);
+      mockReadJsonFile.mockResolvedValueOnce({ collectTrace: true, otlpTrace: { endpoint: 'http://x:4318', turnPartialFlushMs: 0 } });
+      expect(buildOtlpTraceConfig(await loadConfig())!.turnPartialFlushMs).toBe(0);
+      mockReadJsonFile.mockResolvedValueOnce({ collectTrace: true, otlpTrace: { endpoint: 'http://x:4318', turnPartialFlushMs: 30_000 } });
+      expect(buildOtlpTraceConfig(await loadConfig())!.turnPartialFlushMs).toBe(30_000);
+    });
+
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
