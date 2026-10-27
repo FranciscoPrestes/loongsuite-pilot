@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type {
   AgentDefinition,
   DeployResult,
@@ -144,6 +145,12 @@ export class PluginInjectStrategy implements DeployStrategy {
       const pluginKey = this.resolvePluginKey(json, config);
       const plugins: unknown[] = (json[pluginKey] as unknown[]) ?? [];
       if (!Array.isArray(plugins)) return true;
+      for (const key of this.flatPluginKeys(json, config)) {
+        const entries = json[key] as unknown[];
+        if (entries.some(entry => this.isReplacement(entry, config, resolvedSpec))) return true;
+        if (key !== pluginKey && entries.some(entry => this.matchesSpec(entry, resolvedSpec, config.pluginId))) return true;
+      }
+      if (plugins.filter(entry => this.matchesSpec(entry, resolvedSpec, config.pluginId)).length > 1) return true;
       return !plugins.some((entry) => this.matchesSpec(entry, resolvedSpec, config.pluginId));
     } catch (err) {
       logger.warn('failed to read config file', { configPath, error: String(err) });
@@ -208,9 +215,10 @@ export class PluginInjectStrategy implements DeployStrategy {
       await updateJsonConfig(configPath, json => {
         if (this.isOpenclawNested(config)) this.openclawRemove(json, resolvedSpec, config);
         else {
-          const pluginKey = this.resolvePluginKey(json, config);
-          if (Array.isArray(json[pluginKey])) json[pluginKey] = (json[pluginKey] as unknown[]).filter(
-            entry => !this.matchesSpec(entry, resolvedSpec, config.pluginId));
+          for (const key of this.flatPluginKeys(json, config)) {
+            json[key] = (json[key] as unknown[]).filter(entry => !this.matchesSpec(entry, resolvedSpec, config.pluginId)
+              && !this.isReplacement(entry, config, resolvedSpec));
+          }
         }
         return json;
       }, 'jsonc', '.bak');
@@ -260,11 +268,6 @@ export class PluginInjectStrategy implements DeployStrategy {
     return config.configShape === 'openclaw-nested';
   }
 
-  private async writePrivateBackup(backupPath: string, raw: string): Promise<void> {
-    await fs.writeFile(backupPath, raw, { encoding: 'utf-8', mode: 0o600 });
-    if (process.platform !== 'win32') await fs.chmod(backupPath, 0o600);
-  }
-
   private resolvePluginKey(
     json: Record<string, unknown>,
     config: PluginInjectConfig,
@@ -275,15 +278,12 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   private resolveSpec(spec: string): string {
-    return this.normalizeSpecForComparison(spec.replace(/\$PILOT_DATA/g, this.dataDir));
+    const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
+    return process.platform === 'win32' ? resolved.replace(/\\/g, '/') : resolved;
   }
 
   private matchesSpec(entry: unknown, resolvedSpec: string, pluginId: string): boolean {
-    const entryStr = typeof entry === 'string'
-      ? entry
-      : Array.isArray(entry)
-        ? String(entry[0])
-        : '';
+    const entryStr = this.entrySpec(entry);
 
     return this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)
       || this.hasOwnershipMarker(entryStr, pluginId);
@@ -299,7 +299,35 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   private normalizeSpecForComparison(spec: string): string {
-    return process.platform === 'win32' ? spec.replace(/\\/g, '/') : spec;
+    let normalized = spec;
+    if (normalized.startsWith('file://')) {
+      try { normalized = fileURLToPath(normalized); } catch { /* retain malformed specs for comparison */ }
+    }
+    if (process.platform === 'win32') normalized = normalized.replace(/\\/g, '/');
+    return normalized.replace(/\/$/, '');
+  }
+
+  private entrySpec(entry: unknown): string {
+    if (typeof entry === 'string') return entry;
+    if (Array.isArray(entry)) return typeof entry[0] === 'string' ? entry[0] : '';
+    if (entry && typeof entry === 'object' && 'package' in entry && typeof entry.package === 'string') return entry.package;
+    return '';
+  }
+
+  private flatPluginKeys(json: Record<string, unknown>, config: PluginInjectConfig): string[] {
+    if (config.configKey) return Array.isArray(json[config.configKey]) ? [config.configKey] : [];
+    return ['plugin', 'plugins'].filter(key => Array.isArray(json[key]));
+  }
+
+  private isReplacement(entry: unknown, config: PluginInjectConfig, resolvedSpec: string): boolean {
+    const spec = this.entrySpec(entry);
+    if (this.normalizeSpecForComparison(spec) === this.normalizeSpecForComparison(resolvedSpec)) return false;
+    return config.replaceSpecs?.some(old => {
+      if (old.includes('$PILOT_DATA') || old.startsWith('file://') || path.isAbsolute(old)) {
+        return this.normalizeSpecForComparison(spec) === this.normalizeSpecForComparison(this.resolveSpec(old));
+      }
+      return this.hasOwnershipMarker(spec, old);
+    }) ?? false;
   }
 
   private flatArrayInject(
@@ -312,24 +340,13 @@ export class PluginInjectStrategy implements DeployStrategy {
       json[pluginKey] = [];
     }
 
-    if (config.replaceSpecs?.length) {
-      json[pluginKey] = (json[pluginKey] as unknown[]).filter((entry) => {
-        const entryStr = typeof entry === 'string' ? entry : Array.isArray(entry) ? entry[0] : '';
-        return !config.replaceSpecs!.some((old) =>
-          typeof entryStr === 'string' && this.hasOwnershipMarker(entryStr, old),
-        );
-      });
-    }
-
-    const before = (json[pluginKey] as unknown[]).length;
-    json[pluginKey] = (json[pluginKey] as unknown[]).filter(
-      (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
-    );
-    let mutated = (json[pluginKey] as unknown[]).length < before;
-
-    if (!(json[pluginKey] as unknown[]).some((entry) => this.matchesSpec(entry, resolvedSpec, config.pluginId))) {
-      (json[pluginKey] as unknown[]).push(resolvedSpec);
-      mutated = true;
+    let mutated = false;
+    for (const key of this.flatPluginKeys(json, config)) {
+      const before = json[key] as unknown[];
+      const after = before.filter(entry => !this.matchesSpec(entry, resolvedSpec, config.pluginId)
+        && !this.isReplacement(entry, config, resolvedSpec));
+      if (key === pluginKey) after.push(resolvedSpec);
+      if (JSON.stringify(before) !== JSON.stringify(after)) { json[key] = after; mutated = true; }
     }
     return mutated;
   }

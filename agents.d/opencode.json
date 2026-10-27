@@ -20,6 +20,7 @@
     "pluginSpec": "file://$PILOT_DATA/plugins/opencode",
     "pluginId": "loongsuite-pilot-opencode",
     "replaceSpecs": [
+      "file://$PILOT_DATA/plugins/opencode/plugin.mjs",
       "loongsuite-pilot-opencode",
       "loongsuite-pilot-opencode-smoke",
       "plugins/opencode/plugin.mjs"

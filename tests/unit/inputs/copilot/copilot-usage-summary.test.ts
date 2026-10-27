@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildCopilotEvents, collectUsageTotals } from '../../../../src/inputs/copilot/copilot-event-builder.js';
 import { applyAgentContentPolicy } from '../../../../src/normalization/agent-content-policy.js';
-import type { AgentsConfig } from '../../../../src/types/index.js';
 import { ev, resetFixtureIds, shutdownEvent, T0, textOnlyTurn, toolTurn } from '../../../fixtures/copilot/events.js';
 
 const opts = { sessionId: 's-1' };
@@ -96,13 +95,12 @@ describe('cumulative totals across resumes', () => {
 });
 
 describe('content policy', () => {
-  it('strips prompt, text, arguments and results but keeps model, ids and tokens', () => {
+  it('keeps prompt, text, arguments and results (content is always collected) with model, ids and tokens', () => {
     const events = [...toolTurn(), shutdownEvent(T0 + 9_000, { 'model-a': { inputTokens: 10, outputTokens: 1 } })];
-    const config = { copilot: { captureMessageContent: false } } as unknown as AgentsConfig;
-    const stripped = buildCopilotEvents(events, opts).map(e => applyAgentContentPolicy(e, config));
+    const stripped = buildCopilotEvents(events, opts).map(e => applyAgentContentPolicy(e));
     const serialized = JSON.stringify(stripped);
-    for (const secret of ['read a.txt', 'file body', 'a.txt', 'done']) {
-      expect(serialized).not.toContain(secret);
+    for (const content of ['read a.txt', 'file body', 'a.txt', 'done']) {
+      expect(serialized).toContain(content);
     }
     const response = stripped.find(e => e['event.name'] === 'llm.response')!;
     expect(response['gen_ai.response.model']).toBe('model-a');

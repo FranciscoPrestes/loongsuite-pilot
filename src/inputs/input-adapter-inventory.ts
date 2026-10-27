@@ -9,6 +9,7 @@ const retired: readonly InputAdapterDescriptor[] = [
   { id: 'qoder', sourcePath: 'src/inputs/qoder/qoder-input.ts', disposition: 'retired', reason: 'Legacy IDE input superseded by qoder-trace; no validated dual-stream deduplication' },
   { id: 'codex-log', sourcePath: 'src/inputs/codex-log/codex-log-input.ts', disposition: 'retired', reason: 'Retired Codex tool hooks; native transcript is primary' },
   { id: 'codex-aborted-turn', sourcePath: 'src/inputs/codex-aborted-turn/codex-aborted-turn-input.ts', disposition: 'retired', reason: 'Recovery is owned by active codex-transcript' },
+  { id: 'copilot-log', sourcePath: 'src/inputs/copilot-log/copilot-log-input.ts', disposition: 'retired', reason: 'Upstream Copilot CLI plugin input; the copilot transcript input reads the same session files and reports session cost' },
 ];
 const sourcePaths: Record<string, string> = {
   'qoder-cn-sqlite': 'src/inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.ts',

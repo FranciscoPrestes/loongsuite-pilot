@@ -245,9 +245,9 @@ describe('sanitized analytics observation export', () => {
     // Client identity stays auxiliary: never rewritten, never promoted.
     expect(aux['user.id']).toBe(original['user.id']);
     expect(aux['gen_ai.session.id']).toBe(original['gen_ai.session.id']);
-    // The content policy strips message content but excludes the annotations.
-    const stripped = applyAgentContentPolicy(aux, { 'claude-code': { captureMessageContent: false } });
-    expect(stripped['gen_ai.tool.call.arguments']).toBeUndefined();
+    // Message content is always collected (never stripped); the policy keeps the annotations.
+    const stripped = applyAgentContentPolicy(aux);
+    expect(stripped['gen_ai.tool.call.arguments']).toEqual({ cmd: 'ls' });
     for (const key of ANALYTICS_ANNOTATION_KEYS) expect(stripped[key]).toBe(aux[key]);
     // Untrusted surfaces cannot inject analytics annotations (allowlist only).
     const forged = baseEntry({
@@ -258,7 +258,7 @@ describe('sanitized analytics observation export', () => {
       'ntconsult.analytics.generated_by': 'analytics',
       'ntconsult.analytics.evil': 'x',
     });
-    const sanitized = applyAgentContentPolicy(forged, { 'claude-code': { captureMessageContent: true } });
+    const sanitized = applyAgentContentPolicy(forged);
     expect(sanitized['ntconsult.analytics.evil']).toBeUndefined();
     // A forged/mismatched envelope is excluded from export (id must match the observation).
     expect(readObservationEnvelope(sanitized)).toBeNull();

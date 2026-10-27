@@ -39,6 +39,10 @@
       {
         "id": "copilot",
         "role": "primary"
+      },
+      {
+        "id": "copilot-log",
+        "role": "retired"
       }
     ],
     "sourceRules": [

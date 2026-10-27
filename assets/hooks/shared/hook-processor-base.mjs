@@ -15,6 +15,7 @@ import {
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
 import { decodePayload } from './decode-payload.mjs';
+import { withSyncFileLock } from './sync-file-lock.mjs';
 
 const ENABLE_LOGGING = true;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -162,40 +163,6 @@ function isLineRecordNewer(candidate, existing) {
   const existingUpdated = typeof existing.updated_at === 'string' ? existing.updated_at : '';
   return Boolean(candidateUpdated)
     && (!existingUpdated || candidateUpdated > existingUpdated);
-}
-
-const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
-
-function withSyncFileLock(lockFile, waitMs, staleMs, action) {
-  const deadline = Date.now() + waitMs;
-  let acquired = false;
-  try {
-    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
-    while (!acquired) {
-      try {
-        const fd = fs.openSync(lockFile, 'wx');
-        fs.closeSync(fd);
-        acquired = true;
-      } catch (err) {
-        if (err?.code !== 'EEXIST') return { acquired: false };
-        try {
-          const stat = fs.statSync(lockFile);
-          if (Date.now() - stat.mtimeMs > staleMs) {
-            fs.unlinkSync(lockFile);
-            continue;
-          }
-        } catch { /* retry acquisition */ }
-        if (Date.now() >= deadline) return { acquired: false };
-        Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, 10);
-      }
-    }
-
-    return { acquired: true, value: action() };
-  } finally {
-    if (acquired) {
-      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
-    }
-  }
 }
 
 function updateAggregateShadow(file, transcriptPath, record) {
@@ -471,7 +438,10 @@ export async function parseStdinPayload(agentId) {
   }
 
   const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : undefined;
-  return { transcriptPath, sessionId, cwd };
+  const extra = payload.extra && typeof payload.extra === 'object' && !Array.isArray(payload.extra)
+    ? payload.extra
+    : undefined;
+  return { transcriptPath, sessionId, cwd, extra };
 }
 
 // --- Re-export normalizer utilities -----------------------------------------

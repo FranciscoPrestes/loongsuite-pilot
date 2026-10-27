@@ -65,6 +65,8 @@ export interface AtomicTextWriteOptions {
   backupPath?: string;
   /** Permissions for the temporary file. Defaults to the existing target's mode. */
   mode?: number;
+  /** Retain an existing user file's exact mode, without applying umask again. */
+  preserveMode?: boolean;
 }
 
 async function assertExpectedFileState(
@@ -120,6 +122,7 @@ export async function writeTextFileAtomic(
   const tmp = atomicTmpPath(path);
   try {
     await fsp.writeFile(tmp, text, { encoding: 'utf8', mode });
+    if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp, options.mode);
     // Re-check after preparing the temporary file. This narrows the remaining
     // race to the final compare-and-rename window.
     if (options.expected) {
@@ -136,6 +139,7 @@ export async function writeTextFileAtomic(
       const tmp2 = atomicTmpPath(path);
       try {
         await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode });
+        if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp2, options.mode);
         if (options.expected) {
           await assertExpectedFileState(path, options.expected);
         }
